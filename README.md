@@ -209,7 +209,8 @@ docker compose down -v
 
 ## 注意事项
 
-- Embedding 维度必须严格为 **1024**（`BAAI/bge-m3`）
+- Embedding 维度默认 **1024**（`BAAI/bge-m3`），可通过 `EMBEDDING_DIMENSION` 调整
+  - 若切换模型导致维度变化，必须先 `docker compose down -v` 清空数据库后重新迁移
 - 单轮问答，不维护历史会话
 - Ingestion 为手动一次性 CLI 操作，无后台调度
 - 数据文件（`.as` / `.xml`）需自行准备并放入 `data/` 目录

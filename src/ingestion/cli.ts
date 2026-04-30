@@ -5,11 +5,13 @@ import pLimit from 'p-limit';
 import { parseXmlFile } from './xmlParser.js';
 import { parseAngelScriptFile } from './asParser.js';
 import { createEmbeddings } from './embeddings.js';
-import { storeDocuments, clearModDocuments } from './store.js';
+import { storeDocuments, clearModDocuments, getExistingKeys } from './store.js';
+import { config } from '../config/index.js';
 import type { RWRDocument } from '../types/index.js';
 
-const BATCH_SIZE = 32;
-const CONCURRENCY = 4;
+const BATCH_SIZE = config.ingestBatchSize;
+const CONCURRENCY = config.ingestConcurrency;
+const BATCH_DELAY_MS = 500; // delay between embedding batches to avoid rate limits
 
 const SUPPORTED_EXTS = new Set(['.xml', '.as', '.call', '.character', '.ai', '.resources', '.models', '.name', '.text_lines', '.weapon', '.projectile']);
 const EXCLUDED_DIRS = new Set(['models', 'maps']);
@@ -19,57 +21,79 @@ const program = new Command();
 program
   .name('rwr-ingest')
   .description('Ingest RWR data files into the vector database')
-  .version('1.0.0');
-
-program
-  .command('ingest')
-  .description('Ingest data from source directory')
+  .version('1.0.0')
   .requiredOption('-s, --source <path>', 'Source directory containing data files')
   .requiredOption('-m, --mod <name>', 'Mod name to tag documents with')
   .option('--clear', 'Clear existing documents for this mod before ingestion', false)
-  .action(async (options) => {
-    const sourceDir = path.resolve(options.source);
-    const modName = options.mod;
-    console.log(`Ingesting from ${sourceDir} for mod "${modName}"...`);
+  .option('--resume', 'Skip documents already present in the database for this mod', false)
+  .parse();
 
-    if (options.clear) {
-      console.log(`Clearing existing documents for mod "${modName}"...`);
-      await clearModDocuments(modName);
-    }
+async function main() {
+  const options = program.opts();
+  const sourceDir = path.resolve(options.source);
+  const modName = options.mod;
+  console.log(`Ingesting from ${sourceDir} for mod "${modName}"...`);
 
-    const files = await collectFiles(sourceDir);
-    console.log(`Found ${files.length} files.`);
+  if (options.clear) {
+    console.log(`Clearing existing documents for mod "${modName}"...`);
+    await clearModDocuments(modName);
+  }
 
-    const limit = pLimit(CONCURRENCY);
-    const parsedDocs: RWRDocument[] = [];
+  let existingKeys = new Set<string>();
+  if (options.resume) {
+    console.log('Fetching existing document keys from database...');
+    existingKeys = await getExistingKeys(modName);
+    console.log(`Found ${existingKeys.size} existing documents.`);
+  }
 
-    await Promise.all(
-      files.map((file) =>
-        limit(async () => {
-          try {
-            const docs = await parseFile(file, modName);
-            parsedDocs.push(...docs);
-          } catch (err) {
-            console.error(`Failed to parse ${file}:`, (err as Error).message);
+  const files = await collectFiles(sourceDir);
+  console.log(`Found ${files.length} files.`);
+
+  const limit = pLimit(CONCURRENCY);
+  const parsedDocs: RWRDocument[] = [];
+
+  await Promise.all(
+    files.map((file) =>
+      limit(async () => {
+        try {
+          const docs = await parseFile(file, modName);
+          for (const doc of docs) {
+            const dedupKey = `${doc.type}:${doc.key}`;
+            if (existingKeys.has(dedupKey)) {
+              // Skip already-ingested documents in resume mode
+              continue;
+            }
+            parsedDocs.push(doc);
           }
-        })
-      )
-    );
+        } catch (err) {
+          console.error(`Failed to parse ${file}:`, (err as Error).message);
+        }
+      })
+    )
+  );
 
-    console.log(`Parsed ${parsedDocs.length} documents.`);
+  console.log(`Parsed ${parsedDocs.length} new documents.`);
 
-    // Batch embeddings
-    for (let i = 0; i < parsedDocs.length; i += BATCH_SIZE) {
-      const batch = parsedDocs.slice(i, i + BATCH_SIZE);
-      const contents = batch.map((d) => d.content);
-      console.log(`Embedding batch ${i / BATCH_SIZE + 1} / ${Math.ceil(parsedDocs.length / BATCH_SIZE)}...`);
-      const embeddings = await createEmbeddings(contents);
-      await storeDocuments(batch, embeddings);
-    }
-
-    console.log('Ingestion complete.');
+  if (parsedDocs.length === 0) {
+    console.log('Nothing new to ingest.');
     process.exit(0);
-  });
+  }
+
+  // Batch embeddings with delay between batches
+  for (let i = 0; i < parsedDocs.length; i += BATCH_SIZE) {
+    const batch = parsedDocs.slice(i, i + BATCH_SIZE);
+    const contents = batch.map((d) => d.content);
+    console.log(`Embedding batch ${Math.floor(i / BATCH_SIZE) + 1} / ${Math.ceil(parsedDocs.length / BATCH_SIZE)} (${batch.length} docs)...`);
+    const embeddings = await createEmbeddings(contents);
+    await storeDocuments(batch, embeddings);
+    if (i + BATCH_SIZE < parsedDocs.length) {
+      await new Promise((resolve) => setTimeout(resolve, BATCH_DELAY_MS));
+    }
+  }
+
+  console.log('Ingestion complete.');
+  process.exit(0);
+}
 
 async function collectFiles(dir: string): Promise<string[]> {
   const entries = await fs.readdir(dir, { withFileTypes: true, recursive: true });
@@ -127,4 +151,7 @@ async function parsePlainTextFile(filePath: string, modName: string): Promise<RW
   }];
 }
 
-program.parse();
+main().catch((err) => {
+  console.error('Ingestion failed:', err);
+  process.exit(1);
+});

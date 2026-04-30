@@ -8,6 +8,9 @@ export const config = {
   llmBaseUrl: process.env.LLM_BASE_URL ?? process.env.SILICONFLOW_BASE_URL ?? 'https://api.siliconflow.cn/v1',
   llmModel: process.env.LLM_MODEL ?? 'Qwen/Qwen2.5-7B-Instruct',
   embeddingModel: process.env.EMBEDDING_MODEL ?? 'BAAI/bge-m3',
+  embeddingDimension: parseInt(process.env.EMBEDDING_DIMENSION ?? '1024', 10),
+  ingestBatchSize: parseInt(process.env.INGEST_BATCH_SIZE ?? '8', 10),
+  ingestConcurrency: parseInt(process.env.INGEST_CONCURRENCY ?? '2', 10),
   port: parseInt(process.env.PORT ?? '3000', 10),
 };
 

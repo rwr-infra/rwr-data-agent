@@ -26,3 +26,24 @@ export async function clearModDocuments(modName: string): Promise<void> {
     client.release();
   }
 }
+
+/**
+ * Query existing document keys for a given mod.
+ * Returns a Set of "type:key" strings for deduplication.
+ */
+export async function getExistingKeys(modName: string): Promise<Set<string>> {
+  const client = await pool.connect();
+  try {
+    const res = await client.query(
+      "SELECT type, key FROM rwr_documents WHERE metadata->>'mod_name' = $1",
+      [modName]
+    );
+    const keys = new Set<string>();
+    for (const row of res.rows) {
+      keys.add(`${row.type}:${row.key}`);
+    }
+    return keys;
+  } finally {
+    client.release();
+  }
+}

@@ -1,7 +1,12 @@
 import { pool } from './index.js';
+import { config } from '../config/index.js';
 
 const initSql = `
 CREATE EXTENSION IF NOT EXISTS vector;
+
+-- NOTE: If you change EMBEDDING_DIMENSION after data exists,
+-- you must drop the table first (data will be lost):
+-- DROP TABLE IF EXISTS rwr_documents;
 
 CREATE TABLE IF NOT EXISTS rwr_documents (
   doc_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -9,7 +14,7 @@ CREATE TABLE IF NOT EXISTS rwr_documents (
   key TEXT NOT NULL,
   content TEXT NOT NULL,
   metadata JSONB NOT NULL DEFAULT '{}',
-  embedding VECTOR(1024)
+  embedding VECTOR(${config.embeddingDimension})
 );
 
 CREATE INDEX IF NOT EXISTS idx_rwr_documents_embedding
