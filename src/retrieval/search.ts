@@ -1,6 +1,7 @@
 import { pool } from '../db/index.js';
 import { createEmbedding } from '../ingestion/embeddings.js';
 import { rerankCandidates } from './rerank.js';
+import { config } from '../config/index.js';
 import type { SearchFilters, SearchResult } from '../types/index.js';
 
 interface QueryIntent {
@@ -94,11 +95,12 @@ export async function search(
     params.push(intent.contentPattern);
   }
 
+  const tableName = config.databaseTable;
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
   const sql = `
     SELECT doc_id, type, key, content, metadata,
            embedding <=> $1::vector AS distance
-    FROM rwr_documents
+    FROM ${tableName}
     ${whereClause}
     ORDER BY embedding <=> $1::vector
     LIMIT $${paramIdx}

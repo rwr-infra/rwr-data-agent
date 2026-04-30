@@ -1,7 +1,9 @@
-import { sql } from 'drizzle-orm';
 import { db, pool } from '../db/index.js';
 import { rwrDocuments } from '../db/schema.js';
+import { config } from '../config/index.js';
 import type { RWRDocument } from '../types/index.js';
+
+const tableName = config.databaseTable;
 
 export async function storeDocuments(docs: RWRDocument[], embeddings: number[][]): Promise<void> {
   if (docs.length !== embeddings.length) {
@@ -21,7 +23,7 @@ export async function storeDocuments(docs: RWRDocument[], embeddings: number[][]
 export async function clearModDocuments(modName: string): Promise<void> {
   const client = await pool.connect();
   try {
-    await client.query("DELETE FROM rwr_documents WHERE metadata->>'mod_name' = $1", [modName]);
+    await client.query(`DELETE FROM ${tableName} WHERE metadata->>'mod_name' = $1`, [modName]);
   } finally {
     client.release();
   }
@@ -35,7 +37,7 @@ export async function getExistingKeys(modName: string): Promise<Set<string>> {
   const client = await pool.connect();
   try {
     const res = await client.query(
-      "SELECT type, key FROM rwr_documents WHERE metadata->>'mod_name' = $1",
+      `SELECT type, key FROM ${tableName} WHERE metadata->>'mod_name' = $1`,
       [modName]
     );
     const keys = new Set<string>();

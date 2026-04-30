@@ -1,8 +1,10 @@
 import { pgTable, uuid, text, jsonb, vector, index } from 'drizzle-orm/pg-core';
 import { config } from '../config/index.js';
 
+const tableName = config.databaseTable;
+
 export const rwrDocuments = pgTable(
-  'rwr_documents',
+  tableName,
   {
     docId: uuid('doc_id').primaryKey().defaultRandom(),
     type: text('type').notNull(),
@@ -12,7 +14,7 @@ export const rwrDocuments = pgTable(
     embedding: vector('embedding', { dimensions: config.embeddingDimension }),
   },
   (table) => [
-    index('idx_rwr_documents_embedding').using('hnsw', table.embedding.op('vector_cosine_ops')),
-    index('idx_rwr_documents_metadata').using('gin', table.metadata),
+    index(`idx_${tableName}_embedding`).using('hnsw', table.embedding.op('vector_cosine_ops')),
+    index(`idx_${tableName}_metadata`).using('gin', table.metadata),
   ]
 );

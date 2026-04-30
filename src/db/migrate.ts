@@ -1,14 +1,16 @@
 import { pool } from './index.js';
 import { config } from '../config/index.js';
 
+const tableName = config.databaseTable;
+
 const initSql = `
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- NOTE: If you change EMBEDDING_DIMENSION after data exists,
 -- you must drop the table first (data will be lost):
--- DROP TABLE IF EXISTS rwr_documents;
+-- DROP TABLE IF EXISTS ${tableName};
 
-CREATE TABLE IF NOT EXISTS rwr_documents (
+CREATE TABLE IF NOT EXISTS ${tableName} (
   doc_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   type TEXT NOT NULL,
   key TEXT NOT NULL,
@@ -17,11 +19,11 @@ CREATE TABLE IF NOT EXISTS rwr_documents (
   embedding VECTOR(${config.embeddingDimension})
 );
 
-CREATE INDEX IF NOT EXISTS idx_rwr_documents_embedding
-  ON rwr_documents USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_${tableName}_embedding
+  ON ${tableName} USING hnsw (embedding vector_cosine_ops);
 
-CREATE INDEX IF NOT EXISTS idx_rwr_documents_metadata
-  ON rwr_documents USING gin (metadata);
+CREATE INDEX IF NOT EXISTS idx_${tableName}_metadata
+  ON ${tableName} USING gin (metadata);
 `;
 
 async function migrate() {
