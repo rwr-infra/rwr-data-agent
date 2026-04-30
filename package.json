@@ -9,7 +9,9 @@
     "dev": "node --import tsx --watch src/api/server.ts",
     "start": "node dist/api/server.js",
     "db:migrate": "node --import tsx src/db/migrate.ts",
+    "db:migrate:prod": "node dist/db/migrate.js",
     "ingest": "node --import tsx src/ingestion/cli.ts",
+    "ingest:prod": "node dist/ingestion/cli.js",
     "lint": "eslint src --ext .ts",
     "format": "prettier --write \"src/**/*.ts\""
   },

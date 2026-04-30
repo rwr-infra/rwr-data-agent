@@ -18,5 +18,25 @@ services:
       retries: 5
       start_period: 10s
 
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: rwr-agent-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://rwr_agent:rwr_agent_secret@postgres:5432/rwr_agent
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      # Mount data directory for on-demand ingestion
+      - ./data:/app/data:ro
+
 volumes:
   postgres_data:

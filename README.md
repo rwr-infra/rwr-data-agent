@@ -1,118 +1,119 @@
 # Running With Rifles AI Agent
 
-基于 Node.js + TypeScript + Fastify 构建的 RWR 数据 RAG AI Agent，提供一次性智能问答与 OpenAI Compatible API。
+[中文](/README_zh.md)
 
-## 技术栈
+A RAG AI Agent for *Running With Rifles* game data, built with **Node.js + TypeScript + Fastify**.
+Provides single-turn Q&A through an **OpenAI Compatible API**.
+
+## Stack
 
 - **Runtime**: Node.js 20+, TypeScript
-- **Web Framework**: Fastify
-- **Database**: PostgreSQL + pgvector
+- **API Server**: Fastify
+- **Vector DB**: PostgreSQL + pgvector
 - **ORM**: Drizzle ORM
-- **Embeddings**: SiliconFlow (`BAAI/bge-m3`, 1024 维)
-- **LLM**: OpenAI Compatible API (SiliconFlow / 自定义)
+- **Embeddings**: SiliconFlow (`BAAI/bge-m3`, 1024d)
+- **Reranker**: SiliconFlow (`BAAI/bge-reranker-v2-m3`)
+- **LLM**: OpenAI Compatible API (SiliconFlow / DeepSeek / self-hosted)
 
-## 项目结构
+## Quick Start
 
-```
-src/
-  config/          # 配置与环境变量
-  db/              # 数据库连接、schema、迁移
-  ingestion/       # 数据解析与入库 CLI 脚本
-  retrieval/       # RAG 检索逻辑
-  api/             # Fastify 路由、OpenAI Compatible 接口
-  types/           # 全局类型定义
-data/              # 本地数据文件（AS/XML）
-```
-
-## 快速开始
-
-### 1. 安装依赖
+### 1. Install
 
 ```bash
 npm install
 ```
 
-### 2. 启动数据库（Docker Compose）
-
-项目使用 PostgreSQL + pgvector 作为向量数据库。如果你已有带 pgvector 的 PostgreSQL，可跳过此步。
+### 2. Start PostgreSQL + pgvector
 
 ```bash
 docker compose up -d
 ```
 
-默认会启动一个 PostgreSQL 17 + pgvector 容器，暴露端口 `5432`。数据通过 Docker Volume 持久化。
+If you already have a pgvector-enabled Postgres, skip this step.
 
-### 3. 配置环境变量
+### 3. Configure
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填写数据库和 API Key
+# Edit .env and fill in API keys
 ```
 
-必填变量：
-- `DATABASE_URL` — PostgreSQL 连接字符串（默认已配好 Docker Compose 连接）
-- `SILICONFLOW_API_KEY` — SiliconFlow API Key
-- `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` — 生成模型配置
+Required variables:
+- `DATABASE_URL`
+- `SILICONFLOW_API_KEY`
+- `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL`
 
-### 4. 初始化数据库
+Optional:
+- `DATABASE_TABLE` — isolate environments (default: `rwr_documents`)
+- `EMBEDDING_DIMENSION` / `EMBEDDING_MODEL`
+- `RERANK_MODEL`
+- `INGEST_BATCH_SIZE` / `INGEST_CONCURRENCY`
+
+### 4. Initialize Database
 
 ```bash
 npm run db:migrate
 ```
 
-该命令会自动创建 `rwr_documents` 表、pgvector 扩展以及 HNSW/GIN 索引。
+Creates the configured table, pgvector extension, HNSW and GIN indexes automatically.
 
-### 5. 导入数据
-
-```bash
-npm run ingest -- --source ./data --mod vanilla
-```
-
-如需清除该 mod 的旧数据：
+### 5. Ingest Data
 
 ```bash
-npm run ingest -- --source ./data --mod vanilla --clear
+npm run ingest -- --source ./data --mod GFL_Castling
 ```
 
-### 6. 启动 API 服务
+To clear existing data for this mod before ingestion:
+
+```bash
+npm run ingest -- --source ./data --mod GFL_Castling --clear
+```
+
+To resume and skip already-ingested documents:
+
+```bash
+npm run ingest -- --source ./data --mod GFL_Castling --resume
+```
+
+### 6. Start Server
 
 ```bash
 npm run dev
-# 或
+# or
 npm run build && npm start
 ```
 
-服务默认运行在 `http://localhost:3000`。
+Default: `http://localhost:3000`
 
-## API 接口
+## API
 
 ### POST /v1/chat/completions
 
-OpenAI Compatible 聊天接口，支持 RAG 问答。
+OpenAI Compatible chat completions with built-in RAG.
 
-**请求示例：**
+**Request:**
 
 ```bash
 curl -X POST http://localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "rwr-agent",
-    "messages": [{"role": "user", "content": "G36 的伤害是多少？"}],
+    "model": "deepseek-v4-flash",
+    "messages": [{"role": "user", "content": "What weapons have class=3?"}],
     "stream": false
   }'
 ```
 
-**响应示例：**
+**Response:**
 
 ```json
 {
   "id": "chatcmpl-xxx",
   "object": "chat.completion",
   "created": 1714464000,
-  "model": "rwr-agent",
+  "model": "deepseek-v4-flash",
   "choices": [{
     "index": 0,
-    "message": { "role": "assistant", "content": "G36 的伤害是 35。" },
+    "message": { "role": "assistant", "content": "The following weapons have class=3: ..." },
     "finish_reason": "stop"
   }],
   "usage": { "prompt_tokens": 120, "completion_tokens": 15, "total_tokens": 135 }
@@ -121,96 +122,117 @@ curl -X POST http://localhost:3000/v1/chat/completions \
 
 ### GET /v1/models
 
-返回可用模型列表。
+Returns available models.
 
 ### GET /health
 
-健康检查。
+Health check.
 
-## Streaming
+### Streaming
 
-将请求中的 `stream` 设为 `true` 可启用 SSE 流式输出：
+Set `stream: true` for SSE output:
 
 ```bash
 curl -N http://localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "rwr-agent",
-    "messages": [{"role": "user", "content": "AK-47 的弹匣容量是多少？"}],
+    "model": "deepseek-v4-flash",
+    "messages": [{"role": "user", "content": "What is the G36 damage?"}],
     "stream": true
   }'
 ```
 
-## 数据解析
+## Architecture
 
-### 支持的文件类型
-
-- `.xml` — weapon、projectile、vehicle、faction 等配置文件
-- `.as` — AngelScript 脚本文件（soldier stats、behavior 等）
-
-### Document 结构
-
-```ts
-interface RWRDocument {
-  doc_id: string;
-  type: 'weapon' | 'soldier' | 'faction' | 'script_chunk' | 'projectile' | 'vehicle';
-  key: string;
-  content: string;    // 用于 embedding 的完整文本
-  metadata: {
-    faction?: string;
-    mod_name: string;
-    weapon_class?: string;
-    file_path: string;
-    [key: string]: unknown;
-  };
-}
+```
+User Query
+  |
+  v
+Intent Parsing  (type inference, class="N" extraction, enumeration detection)
+  |
+  v
+Vector Search   (pgvector cosine distance + metadata/content filters)
+  |
+  v
+Rerank          (bge-reranker-v2-m3 cross-encoder)
+  |
+  v
+Prompt Builder  (enforced system prompt + retrieved context)
+  |
+  v
+LLM Generation  (OpenAI Compatible API)
 ```
 
-## RAG 流程
+## Supported File Types
 
-1. 接收用户 Query
-2. 生成 Embedding（`BAAI/bge-m3`）
-3. pgvector 向量相似度检索（cosine distance）
-4. 元数据过滤（faction、mod_name、weapon_class 等）
-5. 构建 Prompt（system prompt + context + question）
-6. 调用 LLM 生成答案
+| Extension | Type | Parser |
+|-----------|------|--------|
+| `.weapon`, `.projectile`, `.call`, `.character`, `.xml` | XML | Generic tag-driven parser |
+| `.as` | AngelScript | Keyword/value extractor |
+| `.ai`, `.resources`, `.name`, `.text_lines` | Plain text | Fallback text chunking |
 
-## 开发
+## Development
 
 ```bash
-# 开发模式（热重载）
-npm run dev
-
-# 构建
-npm run build
-
-# 格式化
-npm run format
-
-# 检查
-npm run lint
+npm run dev        # dev mode (hot reload)
+npm run build      # compile TypeScript
+npm run db:migrate # initialize database
+npm run ingest     # CLI ingestion
+npm run format     # Prettier
+npm run lint       # ESLint
 ```
 
-## Docker 数据库管理
+## Deployment
+
+### Docker (Recommended)
+
+A multi-stage `Dockerfile` is provided using `node:24-slim`.
 
 ```bash
-# 启动数据库
+# Build and start both Postgres + App
 docker compose up -d
 
-# 查看日志
-docker compose logs -f postgres
+# Initialize database (run once)
+docker compose run --rm app npm run db:migrate:prod
 
-# 停止数据库
+# Ingest data
+docker compose run --rm app npm run ingest:prod -- --source /app/data --mod GFL_Castling
+
+# View logs
+docker compose logs -f app
+
+# Stop
 docker compose down
-
-# 停止并清除数据卷
-docker compose down -v
 ```
 
-## 注意事项
+### Manual Docker Build
 
-- Embedding 维度默认 **1024**（`BAAI/bge-m3`），可通过 `EMBEDDING_DIMENSION` 调整
-  - 若切换模型导致维度变化，必须先 `docker compose down -v` 清空数据库后重新迁移
-- 单轮问答，不维护历史会话
-- Ingestion 为手动一次性 CLI 操作，无后台调度
-- 数据文件（`.as` / `.xml`）需自行准备并放入 `data/` 目录
+```bash
+# Build image
+docker build -t rwr-data-agent .
+
+# Run (requires external Postgres)
+docker run -d \
+  --name rwr-agent \
+  -p 3000:3000 \
+  --env-file .env \
+  -v $(pwd)/data:/app/data:ro \
+  rwr-data-agent
+```
+
+### Docker Database Management
+
+```bash
+docker compose up -d        # start
+docker compose logs -f postgres   # logs
+docker compose down         # stop
+docker compose down -v      # stop and wipe data
+```
+
+## Notes
+
+- **Enforced system prompt**: External `system` messages in the request are ignored. The server injects its own RAG system prompt to prevent prompt injection and ensure consistent behavior.
+- **Single-turn only**: No session history is maintained.
+- **Manual ingestion**: CLI-based, no background scheduler.
+- **Embedding dimension**: Default 1024 (`BAAI/bge-m3`). If you switch to a model with a different dimension (e.g., 4096), set `EMBEDDING_DIMENSION` accordingly and recreate the database (`docker compose down -v && docker compose up -d`).
+- **Table isolation**: Use `DATABASE_TABLE` to separate dev / staging / prod environments without code changes.
