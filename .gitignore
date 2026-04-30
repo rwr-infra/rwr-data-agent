@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+.env.local
+*.log
+drizzle/
+.vscode/
+.idea/
+.DS_Store
+data/
+
+# docs
+docs/

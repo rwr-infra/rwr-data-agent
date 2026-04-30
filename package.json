@@ -1,0 +1,42 @@
+{
+  "name": "rwr-data-agent",
+  "version": "1.0.0",
+  "description": "Running With Rifles AI Agent - RAG API for game data",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "node --import tsx --watch src/api/server.ts",
+    "start": "node dist/api/server.js",
+    "db:migrate": "node --import tsx src/db/migrate.ts",
+    "ingest": "node --import tsx src/ingestion/cli.ts",
+    "lint": "eslint src --ext .ts",
+    "format": "prettier --write \"src/**/*.ts\""
+  },
+  "keywords": ["rwr", "rag", "ai", "fastify"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@fastify/cors": "^11.2.0",
+    "commander": "^14.0.3",
+    "dotenv": "^17.4.2",
+    "drizzle-orm": "^0.45.2",
+    "fast-xml-parser": "^5.7.2",
+    "fastify": "^5.8.5",
+    "openai": "^6.35.0",
+    "p-limit": "^7.3.0",
+    "pg": "^8.20.0",
+    "uuid": "^14.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "@types/pg": "^8.20.0",
+    "@types/uuid": "^10.0.0",
+    "drizzle-kit": "^0.31.10",
+    "eslint": "^10.2.1",
+    "prettier": "^3.8.3",
+    "tsconfig-paths": "^4.2.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
+  }
+}
