@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import OpenAI from 'openai';
 import { config } from '../../config/index.js';
 import { search } from '../../retrieval/search.js';
-import { buildPrompt } from '../../retrieval/prompt.js';
+import { SYSTEM_PROMPT, buildUserPrompt } from '../../retrieval/prompt.js';
 import type { ChatCompletionRequest } from '../../types/index.js';
 
 const llmClient = new OpenAI({
@@ -16,6 +16,15 @@ export async function chatRoutes(app: FastifyInstance) {
     const messages = body.messages ?? [];
     const stream = body.stream ?? false;
 
+    // Explicitly drop any external system prompts for security and consistency.
+    // This RAG agent enforces its own SYSTEM_PROMPT server-side.
+    const externalSystemMessages = messages.filter((m) => m.role === 'system');
+    if (externalSystemMessages.length > 0) {
+      console.log(
+        `[chat] Ignored ${externalSystemMessages.length} external system message(s). Server-side SYSTEM_PROMPT is enforced.`
+      );
+    }
+
     const lastUserMessage = [...messages].reverse().find((m) => m.role === 'user');
     if (!lastUserMessage) {
       return reply.status(400).send({
@@ -25,7 +34,13 @@ export async function chatRoutes(app: FastifyInstance) {
 
     const query = lastUserMessage.content;
     const results = await search(query, {}, 5);
-    const prompt = buildPrompt(query, results);
+    const userPrompt = buildUserPrompt(query, results);
+
+    // Always send our SYSTEM_PROMPT as the system role, followed by the RAG user prompt.
+    const llmMessages: { role: 'system' | 'user'; content: string }[] = [
+      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'user', content: userPrompt },
+    ];
 
     if (stream) {
       reply.raw.writeHead(200, {
@@ -36,7 +51,7 @@ export async function chatRoutes(app: FastifyInstance) {
 
       const response = await llmClient.chat.completions.create({
         model: config.llmModel,
-        messages: [{ role: 'user', content: prompt }],
+        messages: llmMessages,
         stream: true,
       });
 
@@ -67,7 +82,7 @@ export async function chatRoutes(app: FastifyInstance) {
 
     const response = await llmClient.chat.completions.create({
       model: config.llmModel,
-      messages: [{ role: 'user', content: prompt }],
+      messages: llmMessages,
       temperature: body.temperature ?? 0.7,
       max_tokens: body.max_tokens,
       top_p: body.top_p ?? 1,
