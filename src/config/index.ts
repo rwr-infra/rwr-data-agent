@@ -9,6 +9,7 @@ export const config = {
   llmModel: process.env.LLM_MODEL ?? 'Qwen/Qwen2.5-7B-Instruct',
   embeddingModel: process.env.EMBEDDING_MODEL ?? 'BAAI/bge-m3',
   embeddingDimension: parseInt(process.env.EMBEDDING_DIMENSION ?? '1024', 10),
+  rerankModel: process.env.RERANK_MODEL ?? 'BAAI/bge-reranker-v2-m3',
   ingestBatchSize: parseInt(process.env.INGEST_BATCH_SIZE ?? '8', 10),
   ingestConcurrency: parseInt(process.env.INGEST_CONCURRENCY ?? '2', 10),
   port: parseInt(process.env.PORT ?? '3000', 10),
