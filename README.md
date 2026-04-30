@@ -32,7 +32,17 @@ data/              # 本地数据文件（AS/XML）
 npm install
 ```
 
-### 2. 配置环境变量
+### 2. 启动数据库（Docker Compose）
+
+项目使用 PostgreSQL + pgvector 作为向量数据库。如果你已有带 pgvector 的 PostgreSQL，可跳过此步。
+
+```bash
+docker compose up -d
+```
+
+默认会启动一个 PostgreSQL 17 + pgvector 容器，暴露端口 `5432`。数据通过 Docker Volume 持久化。
+
+### 3. 配置环境变量
 
 ```bash
 cp .env.example .env
@@ -40,19 +50,19 @@ cp .env.example .env
 ```
 
 必填变量：
-- `DATABASE_URL` — PostgreSQL 连接字符串
+- `DATABASE_URL` — PostgreSQL 连接字符串（默认已配好 Docker Compose 连接）
 - `SILICONFLOW_API_KEY` — SiliconFlow API Key
 - `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` — 生成模型配置
 
-### 3. 初始化数据库
-
-确保 PostgreSQL 已启用 pgvector 扩展，然后运行：
+### 4. 初始化数据库
 
 ```bash
 npm run db:migrate
 ```
 
-### 4. 导入数据
+该命令会自动创建 `rwr_documents` 表、pgvector 扩展以及 HNSW/GIN 索引。
+
+### 5. 导入数据
 
 ```bash
 npm run ingest -- --source ./data --mod vanilla
@@ -64,7 +74,7 @@ npm run ingest -- --source ./data --mod vanilla
 npm run ingest -- --source ./data --mod vanilla --clear
 ```
 
-### 5. 启动 API 服务
+### 6. 启动 API 服务
 
 ```bash
 npm run dev
@@ -179,6 +189,22 @@ npm run format
 
 # 检查
 npm run lint
+```
+
+## Docker 数据库管理
+
+```bash
+# 启动数据库
+docker compose up -d
+
+# 查看日志
+docker compose logs -f postgres
+
+# 停止数据库
+docker compose down
+
+# 停止并清除数据卷
+docker compose down -v
 ```
 
 ## 注意事项
