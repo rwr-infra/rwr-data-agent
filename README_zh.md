@@ -2,6 +2,8 @@
 
 [English](/README.md)
 
+> **⚠️ 早期阶段提示**：本项目处于早期开发阶段，版本可能不稳定，随时可能发生破坏性更新。
+
 基于 Node.js + TypeScript + Fastify 构建的 RWR 数据 RAG AI Agent，提供一次性智能问答与 OpenAI Compatible API。
 
 ## 技术栈
@@ -270,3 +272,7 @@ docker compose down -v
 - **Ingestion 为手动一次性 CLI 操作**：无后台调度。
 - **Embedding 维度**：默认 **1024**（`BAAI/bge-m3`），可通过 `EMBEDDING_DIMENSION` 调整。若切换模型导致维度变化，必须先 `docker compose down -v` 清空数据库后重新迁移。
 - **表名隔离**：使用 `DATABASE_TABLE` 可在不改代码的情况下区分 dev / staging / prod 环境。
+
+## 许可协议
+
+[MIT](LICENSE) © [rwr-infra](https://github.com/rwr-infra)

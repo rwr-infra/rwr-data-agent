@@ -2,6 +2,8 @@
 
 [中文](/README_zh.md)
 
+> **⚠️ Early Stage Notice**: This project is in early development. Versions may be unstable and breaking changes can occur at any time.
+
 A RAG AI Agent for *Running With Rifles* game data, built with **Node.js + TypeScript + Fastify**.
 Provides single-turn Q&A through an **OpenAI Compatible API**.
 
@@ -236,3 +238,7 @@ docker compose down -v      # stop and wipe data
 - **Manual ingestion**: CLI-based, no background scheduler.
 - **Embedding dimension**: Default 1024 (`BAAI/bge-m3`). If you switch to a model with a different dimension (e.g., 4096), set `EMBEDDING_DIMENSION` accordingly and recreate the database (`docker compose down -v && docker compose up -d`).
 - **Table isolation**: Use `DATABASE_TABLE` to separate dev / staging / prod environments without code changes.
+
+## License
+
+[MIT](LICENSE) © [rwr-infra](https://github.com/rwr-infra)
