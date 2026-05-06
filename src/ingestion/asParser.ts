@@ -61,21 +61,58 @@ function extractSoldierBlocks(text: string): ParsedSoldier[] {
   return blocks;
 }
 
+function describeSoldierStats(stats: Record<string, string | number>): string {
+  const parts: string[] = [];
+
+  const xp = stats.xp;
+  if (xp !== undefined) parts.push(`This soldier requires ${xp} experience points.`);
+
+  const health = stats.health;
+  if (health !== undefined) parts.push(`Its base health is ${health}.`);
+
+  const accuracy = stats.accuracy;
+  if (accuracy !== undefined) parts.push(`Its accuracy rating is ${accuracy}.`);
+
+  const shooting = stats.shooting;
+  if (shooting !== undefined) parts.push(`Its shooting skill is ${shooting}.`);
+
+  const running = stats.running;
+  if (running !== undefined) parts.push(`Its running speed factor is ${running}.`);
+
+  const detecting = stats.detecting;
+  if (detecting !== undefined) parts.push(`Its detection skill is ${detecting}.`);
+
+  const stamina = stats.stamina;
+  if (stamina !== undefined) parts.push(`Its stamina is ${stamina}.`);
+
+  const carrying = stats.carrying;
+  if (carrying !== undefined) parts.push(`Its carrying capacity factor is ${carrying}.`);
+
+  return parts.join(' ');
+}
+
 function soldierToText(s: ParsedSoldier): string {
-  const lines: string[] = [`Soldier class: ${s.key}`];
+  const description = describeSoldierStats(s.stats);
+
+  const rawLines: string[] = [`Soldier class: ${s.key}`];
   if (Object.keys(s.stats).length) {
-    lines.push('Stats:');
+    rawLines.push('Stats:');
     for (const [k, v] of Object.entries(s.stats)) {
-      lines.push(`  ${k}: ${v}`);
+      rawLines.push(`  ${k}: ${v}`);
     }
   }
   if (s.weapons.length) {
-    lines.push(`Weapons: ${s.weapons.join(', ')}`);
+    rawLines.push(`Weapons: ${s.weapons.join(', ')}`);
   }
   if (s.behaviors.length) {
-    lines.push(`Behaviors:\n${s.behaviors.join('\n')}`);
+    rawLines.push(`Behaviors:\n${s.behaviors.join('\n')}`);
   }
-  return lines.join('\n');
+  const raw = rawLines.join('\n');
+
+  const sections: string[] = [];
+  if (description) sections.push(`Description: ${description}`);
+  if (raw) sections.push(`Raw Data:\n${raw}`);
+  return sections.join('\n\n');
 }
 
 export async function parseAngelScriptFile(filePath: string, modName: string): Promise<RWRDocument[]> {

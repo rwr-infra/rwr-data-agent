@@ -7,15 +7,25 @@ import type { SearchFilters, SearchResult } from '../types/index.js';
 interface QueryIntent {
   inferredType?: string;
   contentPattern?: string;
+  exactKey?: string;
   isEnumeration: boolean;
+  isExactKeyQuery: boolean;
 }
 
 function extractQueryIntent(query: string): QueryIntent {
-  const intent: QueryIntent = { isEnumeration: false };
+  const intent: QueryIntent = { isEnumeration: false, isExactKeyQuery: false };
 
   // Enumeration query detection (Chinese & English patterns)
   if (/有哪些|列出|所有|全部|是什么|what are|list all/i.test(query)) {
     intent.isEnumeration = true;
+  }
+
+  // Exact key query detection: key=xxx, key="xxx", key: xxx, key 为 xxx, key是xxx
+  const exactKeyMatch = query.match(/key\s*[=:]\s*["']?([^"'\s]+)["']?/i) ||
+                        query.match(/key\s*(?:为|是)\s*["']?([^"'\s]+)["']?/i);
+  if (exactKeyMatch) {
+    intent.exactKey = exactKeyMatch[1];
+    intent.isExactKeyQuery = true;
   }
 
   // Document type inference from query text
@@ -56,8 +66,95 @@ export async function search(
   topK = 5
 ): Promise<SearchResult[]> {
   const intent = extractQueryIntent(query);
+  const tableName = config.databaseTable;
 
-  // Stage 1: retrieve a larger candidate pool for reranking
+  // -----------------------------------------------------------------------
+  // Fast path: exact key lookup — bypass embedding entirely
+  // -----------------------------------------------------------------------
+  if (intent.isExactKeyQuery && intent.exactKey) {
+    const client = await pool.connect();
+    try {
+      // Try exact match first
+      const conditions: string[] = [`key = $1`];
+      const params: (string | number)[] = [intent.exactKey];
+      let paramIdx = 2;
+
+      if (filters.type) {
+        conditions.push(`type = $${paramIdx++}`);
+        params.push(filters.type);
+      } else if (intent.inferredType) {
+        conditions.push(`type = $${paramIdx++}`);
+        params.push(intent.inferredType);
+      }
+      if (filters.mod_name) {
+        conditions.push(`metadata->>'mod_name' = $${paramIdx++}`);
+        params.push(filters.mod_name);
+      }
+
+      const whereClause = `WHERE ${conditions.join(' AND ')}`;
+      const exactSql = `
+        SELECT doc_id, type, key, content, metadata, 0.0 AS distance
+        FROM ${tableName}
+        ${whereClause}
+        LIMIT $${paramIdx}
+      `;
+      params.push(topK);
+
+      const res = await client.query(exactSql, params);
+      if (res.rows.length > 0) {
+        return res.rows.map((row) => ({
+          doc_id: row.doc_id,
+          type: row.type,
+          key: row.key,
+          content: row.content,
+          metadata: row.metadata,
+          distance: parseFloat(row.distance),
+        }));
+      }
+
+      // Fallback: partial key match (ILIKE) if exact fails
+      const likeConditions: string[] = [`key ILIKE $1`];
+      const likeParams: (string | number)[] = [`%${intent.exactKey}%`];
+      let likeParamIdx = 2;
+
+      if (filters.type) {
+        likeConditions.push(`type = $${likeParamIdx++}`);
+        likeParams.push(filters.type);
+      } else if (intent.inferredType) {
+        likeConditions.push(`type = $${likeParamIdx++}`);
+        likeParams.push(intent.inferredType);
+      }
+      if (filters.mod_name) {
+        likeConditions.push(`metadata->>'mod_name' = $${likeParamIdx++}`);
+        likeParams.push(filters.mod_name);
+      }
+
+      const likeWhere = `WHERE ${likeConditions.join(' AND ')}`;
+      const likeSql = `
+        SELECT doc_id, type, key, content, metadata, 0.0 AS distance
+        FROM ${tableName}
+        ${likeWhere}
+        LIMIT $${likeParamIdx}
+      `;
+      likeParams.push(topK);
+
+      const likeRes = await client.query(likeSql, likeParams);
+      return likeRes.rows.map((row) => ({
+        doc_id: row.doc_id,
+        type: row.type,
+        key: row.key,
+        content: row.content,
+        metadata: row.metadata,
+        distance: parseFloat(row.distance),
+      }));
+    } finally {
+      client.release();
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Standard path: vector search + optional rerank
+  // -----------------------------------------------------------------------
   const candidatePool = intent.isEnumeration ? 200 : Math.max(topK * 8, 40);
 
   const embedding = await createEmbedding(query);
@@ -95,7 +192,6 @@ export async function search(
     params.push(intent.contentPattern);
   }
 
-  const tableName = config.databaseTable;
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
   const sql = `
     SELECT doc_id, type, key, content, metadata,
