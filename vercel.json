@@ -1,11 +1,11 @@
 {
   "framework": null,
-  "buildCommand": "npm run build && node -e \"require('fs').mkdirSync('api',{recursive:true}); require('fs').writeFileSync('api/index.js','export { default } from \\\"../dist/index.js\\\";\\n');\"",
+  "buildCommand": "npm run build",
   "outputDirectory": "public",
   "cleanUrls": true,
   "functions": {
-    "api/index.js": {
-      "includeFiles": "public/**"
+    "api/index.ts": {
+      "includeFiles": "dist/**, public/**"
     }
   },
   "rewrites": [
