@@ -3,6 +3,7 @@ import OpenAI from 'openai';
 import { config, validateConfig } from '../../config/index.js';
 import { search } from '../../retrieval/search.js';
 import { SYSTEM_PROMPT, buildUserPrompt } from '../../retrieval/prompt.js';
+import { buildSearchQuery } from '../../retrieval/queryRewrite.js';
 import type { ChatCompletionRequest } from '../../types/index.js';
 
 let llmClient: OpenAI | null = null;
@@ -59,7 +60,15 @@ export async function chatRoutes(app: FastifyInstance) {
 
     let results;
     try {
-      results = await search(query, {}, 5, body.table);
+      const historyForSearch = nonSystemMessages.slice(0, -1).map((m) => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+      }));
+      const enrichedQuery = buildSearchQuery(query, historyForSearch);
+      if (enrichedQuery !== query) {
+        console.log(`[chat] Query enriched: "${truncatedQuery}" → "${enrichedQuery.length > 120 ? enrichedQuery.slice(0, 120) + '…' : enrichedQuery}"`);
+      }
+      results = await search(query, {}, 5, body.table, enrichedQuery);
       console.log(`[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (table=${body.table ?? config.databaseTable})`);
     } catch (err) {
       console.error(`[chat] Search failed: ${(err as Error).message}`);

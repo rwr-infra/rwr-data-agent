@@ -25,7 +25,8 @@ function truncateForRerank(text: string, maxLen: number): string {
 export async function rerankCandidates(
   query: string,
   candidates: SearchResult[],
-  topN: number
+  topN: number,
+  searchQuery?: string
 ): Promise<SearchResult[]> {
   if (candidates.length <= 1) return candidates;
 
@@ -47,7 +48,7 @@ export async function rerankCandidates(
         },
         body: JSON.stringify({
           model: config.rerankModel,
-          query,
+          query: searchQuery ?? query,
           documents: batchDocs,
           top_n: batchDocs.length, // rerank all docs in the batch
           return_documents: false,

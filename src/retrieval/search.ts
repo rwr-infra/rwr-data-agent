@@ -66,7 +66,8 @@ export async function search(
   query: string,
   filters: SearchFilters = {},
   topK = 5,
-  tableName?: string
+  tableName?: string,
+  searchQuery?: string
 ): Promise<SearchResult[]> {
   const pool = await getPool();
   const intent = extractQueryIntent(query);
@@ -161,7 +162,8 @@ export async function search(
   // -----------------------------------------------------------------------
   const candidatePool = intent.isEnumeration ? 200 : Math.max(topK * 8, 40);
 
-  const embedding = await createEmbedding(query);
+  const embeddingQuery = searchQuery ?? query;
+  const embedding = await createEmbedding(embeddingQuery);
   const vectorLiteral = `[${embedding.join(',')}]`;
 
   const conditions: string[] = [];
@@ -224,6 +226,6 @@ export async function search(
   }
 
   // Stage 2: rerank candidates for better precision
-  const reranked = await rerankCandidates(query, candidates, topK);
+  const reranked = await rerankCandidates(query, candidates, topK, searchQuery);
   return reranked;
 }
