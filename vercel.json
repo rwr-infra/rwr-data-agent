@@ -1,8 +1,10 @@
 {
   "framework": null,
-  "functions": {
-    "src/index.ts": {
-      "includeFiles": "public/**"
-    }
-  }
+  "buildCommand": "npm run build",
+  "outputDirectory": "public",
+  "rewrites": [
+    { "source": "/v1/:path*", "destination": "/v1/:path*" },
+    { "source": "/health", "destination": "/health" },
+    { "source": "/(.*)", "destination": "/$1" }
+  ]
 }
