@@ -1,5 +1,6 @@
 node_modules/
 dist/
+api/index.js
 .env
 .env.local
 *.log

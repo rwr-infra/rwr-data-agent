@@ -1,4 +1,4 @@
-import { pool } from '../db/index.js';
+import { getPool } from '../db/index.js';
 import { createEmbedding } from '../ingestion/embeddings.js';
 import { rerankCandidates } from './rerank.js';
 import { config } from '../config/index.js';
@@ -65,6 +65,7 @@ export async function search(
   filters: SearchFilters = {},
   topK = 5
 ): Promise<SearchResult[]> {
+  const pool = await getPool();
   const intent = extractQueryIntent(query);
   const tableName = config.databaseTable;
 

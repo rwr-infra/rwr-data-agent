@@ -1,4 +1,4 @@
-import { pool } from './index.js';
+import { getPool } from './index.js';
 import { config } from '../config/index.js';
 
 const tableName = config.databaseTable;
@@ -27,6 +27,7 @@ CREATE INDEX IF NOT EXISTS idx_${tableName}_metadata
 `;
 
 async function migrate() {
+  const pool = await getPool();
   const client = await pool.connect();
   try {
     console.log('Running database initialization...');

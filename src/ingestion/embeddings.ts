@@ -1,26 +1,29 @@
 import OpenAI from 'openai';
 import { config } from '../config/index.js';
 
-const client = new OpenAI({
-  apiKey: config.siliconFlowApiKey,
-  baseURL: config.siliconFlowBaseUrl,
-});
+let client: OpenAI | null = null;
+
+function getClient(): OpenAI {
+  if (!client) {
+    client = new OpenAI({
+      apiKey: config.siliconFlowApiKey,
+      baseURL: config.siliconFlowBaseUrl,
+    });
+  }
+  return client;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/**
- * Create embeddings with automatic retry on 429 and recursive split on 413.
- */
 export async function createEmbeddings(inputs: string[], maxRetries = 5): Promise<number[][]> {
   if (inputs.length === 0) return [];
 
-  // Try the batch as-is first
   let lastError: Error | undefined;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      const response = await client.embeddings.create({
+      const response = await getClient().embeddings.create({
         model: config.embeddingModel,
         input: inputs,
         encoding_format: 'float',
@@ -31,9 +34,7 @@ export async function createEmbeddings(inputs: string[], maxRetries = 5): Promis
       const status = (err as { status?: number }).status;
 
       if (status === 413) {
-        // Payload too large — split and recurse
         if (inputs.length === 1) {
-          // Single item too large: truncate and retry once
           const original = inputs[0];
           const truncated = original.slice(0, Math.floor(original.length / 2));
           console.log(`  Single item too large (${original.length} chars), truncating to ${truncated.length} chars...`);

@@ -19,12 +19,14 @@ export const config = {
   port: parseInt(process.env.PORT ?? '3000', 10),
 };
 
-if (!config.databaseUrl) {
-  throw new Error('DATABASE_URL is required');
-}
-if (!config.siliconFlowApiKey) {
-  throw new Error('SILICONFLOW_API_KEY is required');
-}
-if (!config.llmApiKey) {
-  throw new Error('LLM_API_KEY or SILICONFLOW_API_KEY is required');
+export function validateConfig() {
+  if (!config.databaseUrl) {
+    throw new Error('DATABASE_URL is required');
+  }
+  if (!config.siliconFlowApiKey) {
+    throw new Error('SILICONFLOW_API_KEY is required');
+  }
+  if (!config.llmApiKey) {
+    throw new Error('LLM_API_KEY or SILICONFLOW_API_KEY is required');
+  }
 }

@@ -1,14 +1,22 @@
 import type { FastifyInstance } from 'fastify';
 import OpenAI from 'openai';
-import { config } from '../../config/index.js';
+import { config, validateConfig } from '../../config/index.js';
 import { search } from '../../retrieval/search.js';
 import { SYSTEM_PROMPT, buildUserPrompt } from '../../retrieval/prompt.js';
 import type { ChatCompletionRequest } from '../../types/index.js';
 
-const llmClient = new OpenAI({
-  apiKey: config.llmApiKey,
-  baseURL: config.llmBaseUrl,
-});
+let llmClient: OpenAI | null = null;
+
+function getLlmClient(): OpenAI {
+  if (!llmClient) {
+    validateConfig();
+    llmClient = new OpenAI({
+      apiKey: config.llmApiKey,
+      baseURL: config.llmBaseUrl,
+    });
+  }
+  return llmClient;
+}
 
 export async function chatRoutes(app: FastifyInstance) {
   app.post('/chat/completions', async (request, reply) => {
@@ -75,7 +83,7 @@ export async function chatRoutes(app: FastifyInstance) {
       let ttfb = 0;
       let lastUsage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined;
       try {
-        const response = await llmClient.chat.completions.create({
+        const response = await getLlmClient().chat.completions.create({
           model: config.llmModel,
           messages: llmMessages,
           stream: true,
@@ -133,7 +141,7 @@ export async function chatRoutes(app: FastifyInstance) {
     }
 
     try {
-      const response = await llmClient.chat.completions.create({
+      const response = await getLlmClient().chat.completions.create({
         model: config.llmModel,
         messages: llmMessages,
         temperature: body.temperature ?? 0.7,

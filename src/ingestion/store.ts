@@ -1,4 +1,4 @@
-import { db, pool } from '../db/index.js';
+import { getDb, getPool } from '../db/index.js';
 import { rwrDocuments } from '../db/schema.js';
 import { config } from '../config/index.js';
 import type { RWRDocument } from '../types/index.js';
@@ -9,6 +9,7 @@ export async function storeDocuments(docs: RWRDocument[], embeddings: number[][]
   if (docs.length !== embeddings.length) {
     throw new Error('Documents and embeddings length mismatch');
   }
+  const db = await getDb();
   const values = docs.map((doc, i) => ({
     type: doc.type,
     key: doc.key,
@@ -21,6 +22,7 @@ export async function storeDocuments(docs: RWRDocument[], embeddings: number[][]
 }
 
 export async function clearModDocuments(modName: string): Promise<void> {
+  const pool = await getPool();
   const client = await pool.connect();
   try {
     await client.query(`DELETE FROM ${tableName} WHERE metadata->>'mod_name' = $1`, [modName]);
@@ -29,11 +31,8 @@ export async function clearModDocuments(modName: string): Promise<void> {
   }
 }
 
-/**
- * Query existing document keys for a given mod.
- * Returns a Set of "type:key" strings for deduplication.
- */
 export async function getExistingKeys(modName: string): Promise<Set<string>> {
+  const pool = await getPool();
   const client = await pool.connect();
   try {
     const res = await client.query(

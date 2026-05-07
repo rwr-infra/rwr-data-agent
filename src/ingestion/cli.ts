@@ -6,7 +6,7 @@ import { parseXmlFile } from './xmlParser.js';
 import { parseAngelScriptFile } from './asParser.js';
 import { createEmbeddings } from './embeddings.js';
 import { storeDocuments, clearModDocuments, getExistingKeys } from './store.js';
-import { config } from '../config/index.js';
+import { config, validateConfig } from '../config/index.js';
 import type { RWRDocument } from '../types/index.js';
 
 const BATCH_SIZE = config.ingestBatchSize;
@@ -29,6 +29,7 @@ program
   .parse();
 
 async function main() {
+  validateConfig();
   const options = program.opts();
   const sourceDir = path.resolve(options.source);
   const modName = options.mod;

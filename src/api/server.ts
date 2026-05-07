@@ -1,7 +1,8 @@
 import { buildApp } from '../app.js';
-import { config } from '../config/index.js';
+import { config, validateConfig } from '../config/index.js';
 
 async function start() {
+  validateConfig();
   const app = await buildApp();
 
   try {
