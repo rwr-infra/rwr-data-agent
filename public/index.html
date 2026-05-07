@@ -190,7 +190,7 @@
 
     tableSelect.addEventListener('change', () => {
       history.length = 0;
-      totalTokensUsed = 0;
+      contextUsed = 0;
       updateContextBar();
       chat.innerHTML = '';
       const w = document.createElement('div');
@@ -206,9 +206,14 @@
       return Math.ceil(text.length / 1.5);
     }
 
+    function estimateHistoryTokens() {
+      return history.reduce((sum, m) => sum + estimateTokens(m.content), 0);
+    }
+
     function updateContextBar() {
       const inputTokens = estimateTokens(input.value);
-      const used = totalTokensUsed + inputTokens;
+      const base = contextUsed > 0 ? contextUsed : estimateHistoryTokens();
+      const used = base + inputTokens;
       const pct = Math.min((used / MAX_CONTEXT) * 100, 100);
       ctxFill.style.width = pct + '%';
       ctxFill.className = pct > 90 ? 'over' : pct > 70 ? 'warn' : '';
@@ -283,7 +288,8 @@
     async function sendMessage() {
       const text = input.value.trim();
       if (!text || loading) return;
-      if (totalTokensUsed + estimateTokens(text) >= MAX_CONTEXT) {
+      const checkBase = contextUsed > 0 ? contextUsed : estimateHistoryTokens();
+      if (checkBase + estimateTokens(text) >= MAX_CONTEXT) {
         addMsg(t().ctxOver, 'error');
         return;
       }
@@ -364,7 +370,7 @@
         const inTokens = usage?.prompt_tokens ?? '-';
         const outTokens = usage?.completion_tokens ?? '-';
         if (usage) {
-          totalTokensUsed = (usage.total_tokens ?? (usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0));
+          contextUsed = usage.total_tokens ?? ((usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0));
         }
         updateContextBar();
         addMeta(t().metaFormat(ttfb, totalTime, inTokens, outTokens));

@@ -49,10 +49,11 @@ export async function chatRoutes(app: FastifyInstance) {
 
     const totalChars = messages.reduce((sum, m) => sum + m.content.length, 0);
     const estimatedTokens = Math.ceil(totalChars / 1.5);
-    if (estimatedTokens > config.maxContextTokens) {
-      console.log(`[chat] 400 - Request too large: ~${estimatedTokens} tokens > ${config.maxContextTokens}`);
+    const effectiveLimit = Math.floor(config.maxContextTokens * 0.7);
+    if (estimatedTokens > effectiveLimit) {
+      console.log(`[chat] 400 - Request too large: ~${estimatedTokens} tokens > ${effectiveLimit} (70% of ${config.maxContextTokens}, reserved for system prompt + RAG context)`);
       return reply.status(400).send({
-        error: { message: `Request too large: ~${estimatedTokens} estimated tokens exceed context limit (${config.maxContextTokens})`, type: 'invalid_request_error' },
+        error: { message: `Request too large: ~${estimatedTokens} estimated tokens exceed safe context limit (${effectiveLimit}, reserved space for system prompt and retrieval context)`, type: 'invalid_request_error' },
       });
     }
 
