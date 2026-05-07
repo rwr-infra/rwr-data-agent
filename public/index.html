@@ -13,6 +13,8 @@
     header span{font-size:12px;color:var(--muted);background:var(--border);padding:2px 8px;border-radius:99px}
     #table-select{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px;font-size:12px;outline:none;cursor:pointer;margin-left:auto}
     #table-select:focus{border-color:var(--accent)}
+    #lang-btn{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;transition:border-color .15s, color .15s}
+    #lang-btn:hover{border-color:var(--accent);color:var(--text)}
     #chat{flex:1;overflow-y:auto;padding:24px;display:flex;flex-direction:column;gap:16px}
     .msg{max-width:80%;padding:12px 16px;border-radius:var(--radius);line-height:1.6;font-size:14px;white-space:pre-wrap;word-break:break-word}
     .msg.user{align-self:flex-end;background:var(--user-bg);color:#dbeafe}
@@ -64,6 +66,7 @@
     <select id="table-select">
       <option value="">rwr_documents (默认)</option>
     </select>
+    <button id="lang-btn" onclick="toggleLang()">EN</button>
   </header>
   <div id="chat">
     <div class="welcome" id="welcome">
@@ -87,6 +90,48 @@
     </div>
   </div>
   <script>
+    const i18n = {
+      zh: {
+        htmlLang: 'zh-CN',
+        welcomeTitle: 'Running With Rifles 数据查询',
+        welcomeDesc: '基于 RAG 的游戏数据 AI 助手，支持武器、兵种、载具、阵营等数据查询',
+        exWeapons: '有哪些武器？',
+        exM4a1: 'M4A1 的属性',
+        exExact: '精确查询 M4A1',
+        placeholder: '输入查询，如：有哪些武器？',
+        send: '发送',
+        thinking: '思考中',
+        defaultTag: '(默认)',
+        ctxOver: '上下文已达上限，请刷新页面开始新对话',
+        reqFailed: '请求失败: ',
+        netError: '网络错误: ',
+        metaFormat: (ttfb, total, inp, out) => `TTFB ${ttfb}ms · 总耗时 ${total}ms · 输入 ${inp} tokens · 输出 ${out} tokens`,
+        langLabel: 'EN',
+      },
+      en: {
+        htmlLang: 'en',
+        welcomeTitle: 'Running With Rifles Data Query',
+        welcomeDesc: 'RAG-based game data AI assistant — weapons, soldiers, vehicles, factions & more',
+        exWeapons: 'What weapons?',
+        exM4a1: 'M4A1 stats',
+        exExact: 'Exact lookup M4A1',
+        placeholder: 'Enter query, e.g.: What weapons?',
+        send: 'Send',
+        thinking: 'Thinking',
+        defaultTag: '(Default)',
+        ctxOver: 'Context limit reached, please refresh to start a new conversation',
+        reqFailed: 'Request failed: ',
+        netError: 'Network error: ',
+        metaFormat: (ttfb, total, inp, out) => `TTFB ${ttfb}ms · Total ${total}ms · In ${inp} tokens · Out ${out} tokens`,
+        langLabel: '中文',
+      },
+    };
+
+    const browserLang = (navigator.language || 'zh').startsWith('zh') ? 'zh' : 'en';
+    let lang = localStorage.getItem('lang') || browserLang;
+
+    function t() { return i18n[lang]; }
+
     const chat = document.getElementById('chat');
     const input = document.getElementById('input');
     const sendBtn = document.getElementById('send');
@@ -99,6 +144,27 @@
     const MAX_CONTEXT = 200000;
     let totalTokensUsed = 0;
 
+    function applyLang() {
+      document.documentElement.lang = t().htmlLang;
+      input.placeholder = t().placeholder;
+      sendBtn.textContent = t().send;
+      document.getElementById('lang-btn').textContent = t().langLabel;
+      if (welcome) {
+        welcome.querySelector('h2').textContent = t().welcomeTitle;
+        welcome.querySelector('p').textContent = t().welcomeDesc;
+        const btns = welcome.querySelectorAll('.examples button');
+        if (btns[0]) btns[0].textContent = t().exWeapons;
+        if (btns[1]) btns[1].textContent = t().exM4a1;
+        if (btns[2]) btns[2].textContent = t().exExact;
+      }
+    }
+
+    function toggleLang() {
+      lang = lang === 'zh' ? 'en' : 'zh';
+      localStorage.setItem('lang', lang);
+      applyLang();
+    }
+
     (async function loadTables() {
       try {
         const res = await fetch('/v1/tables');
@@ -107,16 +173,16 @@
         const def = data.default || 'rwr_documents';
         const tables = data.tables || [];
         tableSelect.innerHTML = '';
-        tables.forEach(t => {
+        tables.forEach(tbl => {
           const opt = document.createElement('option');
-          opt.value = t === def ? '' : t;
-          opt.textContent = t + (t === def ? ' (默认)' : '');
+          opt.value = tbl === def ? '' : tbl;
+          opt.textContent = tbl + (tbl === def ? ' ' + t().defaultTag : '');
           tableSelect.appendChild(opt);
         });
         if (!tables.length) {
           const opt = document.createElement('option');
           opt.value = '';
-          opt.textContent = def + ' (默认)';
+          opt.textContent = def + ' ' + t().defaultTag;
           tableSelect.appendChild(opt);
         }
       } catch {}
@@ -130,9 +196,10 @@
       const w = document.createElement('div');
       w.className = 'welcome';
       w.id = 'welcome';
-      w.innerHTML = '<h2>Running With Rifles 数据查询</h2><p>基于 RAG 的游戏数据 AI 助手，支持武器、兵种、载具、阵营等数据查询</p><div class="examples"><button onclick="ask(\'有哪些武器？\')">有哪些武器？</button><button onclick="ask(\'M4A1 的属性\')">M4A1 属性</button><button onclick="ask(\'key: m4a1\')">精确查询 M4A1</button></div>';
+      w.innerHTML = '<h2></h2><p></p><div class="examples"><button onclick="ask(\'有哪些武器？\')"></button><button onclick="ask(\'M4A1 的属性\')"></button><button onclick="ask(\'key: m4a1\')"></button></div>';
       chat.appendChild(w);
       welcome = w;
+      applyLang();
     });
 
     function estimateTokens(text) {
@@ -181,7 +248,7 @@
       const div = document.createElement('div');
       div.className = 'typing';
       div.id = 'typing-indicator';
-      div.innerHTML = '思考中<span>.</span><span>.</span><span>.</span>';
+      div.innerHTML = t().thinking + '<span>.</span><span>.</span><span>.</span>';
       chat.appendChild(div);
       chat.scrollTop = chat.scrollHeight;
     }
@@ -217,7 +284,7 @@
       const text = input.value.trim();
       if (!text || loading) return;
       if (totalTokensUsed + estimateTokens(text) >= MAX_CONTEXT) {
-        addMsg('上下文已达上限，请刷新页面开始新对话', 'error');
+        addMsg(t().ctxOver, 'error');
         return;
       }
       loading = true;
@@ -250,7 +317,7 @@
           removeTyping();
           const err = await res.text();
           history.pop();
-          addMsg('请求失败: ' + err, 'error');
+          addMsg(t().reqFailed + err, 'error');
           return;
         }
 
@@ -300,14 +367,14 @@
           totalTokensUsed = (usage.total_tokens ?? (usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0));
         }
         updateContextBar();
-        addMeta(`TTFB ${ttfb}ms · 总耗时 ${totalTime}ms · 输入 ${inTokens} tokens · 输出 ${outTokens} tokens`);
+        addMeta(t().metaFormat(ttfb, totalTime, inTokens, outTokens));
         console.log(`[frontend] TTFB=${ttfb}ms total=${totalTime}ms in=${inTokens} out=${outTokens}`);
 
         history.push({ role: 'assistant', content: fullContent });
       } catch (err) {
         removeTyping();
         history.pop();
-        addMsg('网络错误: ' + err.message, 'error');
+        addMsg(t().netError + err.message, 'error');
       } finally {
         loading = false;
         sendBtn.disabled = false;
@@ -317,6 +384,7 @@
 
     input.focus();
     updateContextBar();
+    applyLang();
   </script>
 </body>
 </html>
