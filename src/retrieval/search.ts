@@ -43,6 +43,8 @@ function extractQueryIntent(query: string): QueryIntent {
     intent.inferredType = 'call';
   } else if (/角色|character/i.test(query)) {
     intent.inferredType = 'character';
+  } else if (/装备|物品|道具|carry.?item|防弹|护甲|背心|外骨骼|服|芯片|gear|vest|exosuit|exo|armor/i.test(query)) {
+    intent.inferredType = 'carry_item';
   }
 
   // Extract class="N" or class=N or class: N patterns

@@ -1,4 +1,4 @@
-export type DocumentType = 'weapon' | 'soldier' | 'faction' | 'script_chunk' | 'projectile' | 'vehicle' | 'call' | 'character' | 'resource';
+export type DocumentType = 'weapon' | 'soldier' | 'faction' | 'script_chunk' | 'projectile' | 'vehicle' | 'call' | 'character' | 'carry_item' | 'resource';
 
 export interface RWRDocument {
   doc_id: string;

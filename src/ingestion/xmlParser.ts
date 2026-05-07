@@ -265,6 +265,98 @@ function describeCharacter(attrs: Record<string, unknown>): string {
   return parts.length > 0 ? parts.join(' ') : '';
 }
 
+function describeCarryItem(attrs: Record<string, unknown>): string {
+  const parts: string[] = [];
+
+  const name = getFlatValue(attrs, 'name');
+  if (name !== undefined) parts.push(`This carry item is named "${name}".`);
+
+  const slot = getFlatValue(attrs, 'slot');
+  if (slot !== undefined) parts.push(`It occupies carry slot ${slot}.`);
+
+  const encumbrance = getFlatValue(attrs, 'inventory.encumbrance');
+  if (encumbrance !== undefined) parts.push(`It has an encumbrance of ${encumbrance}.`);
+
+  const price = getFlatValue(attrs, 'inventory.price');
+  if (price !== undefined) parts.push(`Its price is ${price}.`);
+
+  const commonness = getFlatValue(attrs, 'commonness.value', 'commonness.@_value');
+  if (commonness !== undefined) {
+    const c = Number(commonness);
+    if (c === 0) {
+      parts.push('It cannot be found naturally in the game world (commonness: 0).');
+    } else {
+      parts.push(`Its spawn commonness is ${commonness}.`);
+    }
+  }
+
+  const inStock = getFlatValue(attrs, 'commonness.in_stock', 'commonness.@_in_stock');
+  if (inStock !== undefined) {
+    parts.push(inStock === '1' || inStock === 1 ? 'It is available in stock.' : 'It is not available in stock.');
+  }
+
+  const canRespawn = getFlatValue(attrs, 'commonness.can_respawn_with', 'commonness.@_can_respawn_with');
+  if (canRespawn !== undefined) {
+    parts.push(canRespawn === '1' || canRespawn === 1 ? 'Players can respawn with it.' : 'Players cannot respawn with it.');
+  }
+
+  const transformOnConsume = getFlatValue(attrs, 'transform_on_consume');
+  if (transformOnConsume !== undefined) parts.push(`When consumed, it transforms into "${transformOnConsume}".`);
+
+  const speedMod = getFlatValue(attrs, 'modifier.speed');
+  if (speedMod !== undefined) {
+    const v = String(speedMod);
+    if (v.startsWith('+') || v.startsWith('-')) {
+      parts.push(`It modifies movement speed by ${v}.`);
+    } else {
+      const num = parseFloat(v);
+      if (num > 0) parts.push(`It increases movement speed by ${v}.`);
+      else if (num < 0) parts.push(`It decreases movement speed by ${v}.`);
+      else parts.push('It does not change movement speed.');
+    }
+  }
+
+  const hitProbMod = getFlatValue(attrs, 'modifier.hit_success_probability');
+  if (hitProbMod !== undefined) {
+    const v = String(hitProbMod);
+    if (v.startsWith('+') || v.startsWith('-')) {
+      parts.push(`It modifies hit probability by ${v}.`);
+    } else {
+      const num = parseFloat(v);
+      if (num > 0) parts.push(`It increases hit probability by ${v}.`);
+      else if (num < 0) parts.push(`It decreases hit probability by ${v} (negative = harder to hit).`);
+      else parts.push('It does not change hit probability.');
+    }
+  }
+
+  const detectMod = getFlatValue(attrs, 'modifier.detectability');
+  if (detectMod !== undefined) {
+    const v = String(detectMod);
+    if (v.startsWith('+') || v.startsWith('-')) {
+      parts.push(`It modifies detectability by ${v}.`);
+    } else {
+      const num = parseFloat(v);
+      if (num < 0) parts.push(`It reduces detectability by ${Math.abs(num)} (stealth bonus).`);
+      else if (num > 0) parts.push(`It increases detectability by ${v}.`);
+      else parts.push('It does not change detectability.');
+    }
+  }
+
+  const hasDeathProtection = attrs['modifier.projectile_blast_result.death'] !== undefined ||
+    attrs['modifier.projectile_hit_result.death'] !== undefined;
+  if (hasDeathProtection) {
+    const blastDeathOutput = getFlatValue(attrs, 'modifier.projectile_blast_result.death');
+    const hitDeathOutput = getFlatValue(attrs, 'modifier.projectile_hit_result.death');
+    const deathProtected = blastDeathOutput === 'stun' || blastDeathOutput === 'wound' ||
+      hitDeathOutput === 'stun' || hitDeathOutput === 'wound';
+    if (deathProtected) {
+      parts.push('It provides protection against death (death result is converted to a lesser state).');
+    }
+  }
+
+  return parts.length > 0 ? parts.join(' ') : '';
+}
+
 // ---------------------------------------------------------------------------
 // Build final document content: natural language description + raw data
 // ---------------------------------------------------------------------------
@@ -392,6 +484,27 @@ export async function parseCharacterFile(filePath: string, modName: string): Pro
 }
 
 // ---------------------------------------------------------------------------
+// Carry item files (<carry_items><carry_item>...</carry_item></carry_items>)
+// ---------------------------------------------------------------------------
+export async function parseCarryItemFile(filePath: string, modName: string): Promise<RWRDocument[]> {
+  const content = await fs.readFile(filePath, 'utf-8');
+  const parsed = parser.parse(content);
+  const carryItems = ensureArray(parsed.carry_items?.carry_item);
+
+  return carryItems.map((ci: unknown, i: number) => {
+    const attrs = (ci ?? {}) as Record<string, unknown>;
+    const flatAttrs = flattenAttributes(ci);
+    const key = extractKey(attrs, `carry_item_${i}`);
+    const description = describeCarryItem(flatAttrs);
+    const raw = extractText(ci, 0);
+    return makeDoc('carry_item', key, 'Carry Item', description, raw, filePath, modName, {
+      name: attrs['@_name'],
+      slot: attrs['@_slot'],
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Generic XML dispatcher
 // ---------------------------------------------------------------------------
 export async function parseXmlFile(filePath: string, modName: string): Promise<RWRDocument[]> {
@@ -446,6 +559,11 @@ export async function parseXmlFile(filePath: string, modName: string): Promise<R
         weapon_class: attrs['@_weapon_class'] ?? attrs['@_class'],
       });
     });
+  }
+
+  // If root contains <carry_item> tags
+  if (parsed.carry_items?.carry_item) {
+    return parseCarryItemFile(filePath, modName);
   }
 
   // If root contains <vehicle> tags

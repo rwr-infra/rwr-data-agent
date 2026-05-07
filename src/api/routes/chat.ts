@@ -85,6 +85,7 @@ export async function chatRoutes(app: FastifyInstance) {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
       });
 
       let llmError: Error | null = null;
@@ -130,9 +131,11 @@ export async function chatRoutes(app: FastifyInstance) {
             usage: chunk.usage ?? undefined,
           });
           reply.raw.write(`data: ${data}\n\n`);
+          (reply.raw as unknown as { flush?: () => void }).flush?.();
         }
 
         reply.raw.write('data: [DONE]\n\n');
+        (reply.raw as unknown as { flush?: () => void }).flush?.();
       } catch (err) {
         llmError = err as Error;
         console.error(`[chat] LLM stream error after ${chunkCount} chunks: ${llmError.message}`);

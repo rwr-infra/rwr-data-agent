@@ -13,7 +13,7 @@ const BATCH_SIZE = config.ingestBatchSize;
 const CONCURRENCY = config.ingestConcurrency;
 const BATCH_DELAY_MS = 500; // delay between embedding batches to avoid rate limits
 
-const SUPPORTED_EXTS = new Set(['.xml', '.as', '.call', '.character', '.ai', '.resources', '.models', '.name', '.text_lines', '.weapon', '.projectile']);
+const SUPPORTED_EXTS = new Set(['.xml', '.as', '.call', '.character', '.ai', '.resources', '.models', '.name', '.text_lines', '.weapon', '.projectile', '.carry_item']);
 const EXCLUDED_DIRS = new Set(['models', 'maps']);
 
 const program = new Command();
@@ -122,7 +122,7 @@ async function collectFiles(dir: string): Promise<string[]> {
 async function parseFile(filePath: string, modName: string): Promise<RWRDocument[]> {
   const ext = path.extname(filePath).toLowerCase();
   // XML-formatted files: .xml, .call, .character, .weapon, .projectile
-  if (ext === '.xml' || ext === '.call' || ext === '.character' || ext === '.weapon' || ext === '.projectile') {
+  if (ext === '.xml' || ext === '.call' || ext === '.character' || ext === '.weapon' || ext === '.projectile' || ext === '.carry_item') {
     return parseXmlFile(filePath, modName);
   }
   if (ext === '.as') {
