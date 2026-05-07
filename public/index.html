@@ -73,9 +73,9 @@
       <h2>Running With Rifles 数据查询</h2>
       <p>基于 RAG 的游戏数据 AI 助手，支持武器、兵种、载具、阵营等数据查询</p>
       <div class="examples">
-        <button onclick="ask('有哪些武器？')">有哪些武器？</button>
-        <button onclick="ask('M4A1 的属性')">M4A1 属性</button>
-        <button onclick="ask('key: m4a1')">精确查询 M4A1</button>
+        <button onclick="ask(t().exWeapons)">有哪些武器？</button>
+        <button onclick="ask(t().exM4a1)">M4A1 属性</button>
+        <button onclick="ask(t().exExact)">精确查询 M4A1</button>
       </div>
     </div>
   </div>
@@ -196,7 +196,7 @@
       const w = document.createElement('div');
       w.className = 'welcome';
       w.id = 'welcome';
-      w.innerHTML = '<h2></h2><p></p><div class="examples"><button onclick="ask(\'有哪些武器？\')"></button><button onclick="ask(\'M4A1 的属性\')"></button><button onclick="ask(\'key: m4a1\')"></button></div>';
+      w.innerHTML = '<h2></h2><p></p><div class="examples"><button onclick="ask(t().exWeapons)"></button><button onclick="ask(t().exM4a1)"></button><button onclick="ask(t().exExact)"></button></div>';
       chat.appendChild(w);
       welcome = w;
       applyLang();
