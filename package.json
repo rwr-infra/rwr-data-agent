@@ -15,11 +15,18 @@
     "lint": "eslint src --ext .ts",
     "format": "prettier --write \"src/**/*.ts\""
   },
-  "keywords": ["rwr", "rag", "ai", "fastify"],
+  "keywords": [
+    "rwr",
+    "rag",
+    "ai",
+    "fastify"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "@fastify/cors": "^11.2.0",
+    "@fastify/static": "^8.3.0",
+    "@neondatabase/serverless": "^0.10.4",
     "commander": "^14.0.3",
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",

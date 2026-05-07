@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-RAG AI Agent for *Running With Rifles* game data. Node.js 20+ / TypeScript / Fastify. OpenAI-compatible chat completions API with built-in retrieval.
+RAG AI Agent for *Running With Rifles* game data. Node.js 20+ / TypeScript / Fastify. OpenAI-compatible chat completions API with built-in retrieval. Includes a built-in chat UI served at `/`.
 
 ## Critical Conventions
 
@@ -43,7 +43,30 @@ npm run ingest -- --source ./data --mod GFL_Castling --resume  # skip existing
 - **Resume dedup key**: `${type}:${key}`.
 - **Batch delay**: 500ms between embedding batches to avoid rate limits (SiliconFlow).
 
-## Architecture Gotchas
+## Architecture
+
+### Entry Points
+
+- `src/index.ts` — Vercel entry point. Creates app via `buildApp()`, exports the Fastify instance for Vercel Functions.
+- `src/api/server.ts` — Local development entry point. Same `buildApp()` but with `app.listen()`.
+- `src/app.ts` — `buildApp()` factory: registers CORS, API routes (`/v1/*`), health check, and static file serving (`public/`).
+
+### Database Provider (Dual Driver)
+
+`DATABASE_PROVIDER` selects the database driver at startup:
+
+| Value | Driver | Use case |
+|-------|--------|----------|
+| `pg` (default) | `pg` + `drizzle-orm/node-postgres` | Local Docker, traditional servers |
+| `neon` | `@neondatabase/serverless` + `drizzle-orm/neon-serverless` | Vercel + Neon |
+
+`src/db/index.ts` uses top-level `await` to dynamically import the correct driver. The rest of the codebase (`pool.connect()`, raw SQL, Drizzle insert) works unchanged because both drivers expose the same `Pool` / query interface.
+
+### Frontend
+
+`public/index.html` is a self-contained chat UI (no build step). It calls `/v1/chat/completions` with `stream: true` and renders SSE chunks in real time. Served by `@fastify/static` in local dev; on Vercel, the `includeFiles` config in `vercel.json` makes it available.
+
+### Gotchas
 
 - **Drizzle ORM is only used for schema definition and basic queries**. Vector search and migration use **raw SQL** through the `pg` Pool because Drizzle does not support pgvector operators (`<=>`).
 - **Migration is custom SQL**, not `drizzle-kit push`. `src/db/migrate.ts` runs `CREATE EXTENSION vector`, `CREATE TABLE ...`, and HNSW/GIN indexes.
@@ -54,10 +77,43 @@ npm run ingest -- --source ./data --mod GFL_Castling --resume  # skip existing
 
 ## Environment & Config
 
-- `DATABASE_TABLE` isolates environments without code changes (default: `rwr_documents`).
-- `EMBEDDING_DIMENSION` defaults to `1024` (`BAAI/bge-m3`). Changing it after data exists **requires dropping the table** (data loss). No migration framework handles this.
-- `LLM_API_KEY` falls back to `SILICONFLOW_API_KEY` if unset.
-- Config throws at startup if `DATABASE_URL` or `SILICONFLOW_API_KEY` is missing.
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATABASE_URL` | (required) | PostgreSQL connection string |
+| `DATABASE_PROVIDER` | `pg` | `pg` for Docker/local, `neon` for Neon serverless |
+| `DATABASE_POOL_MAX` | `20` | Connection pool max (Neon free tier: `10`) |
+| `DATABASE_SSL` | `false` | Enable SSL (Neon requires `true`) |
+| `DATABASE_TABLE` | `rwr_documents` | Table name for environment isolation |
+| `SILICONFLOW_API_KEY` | (required) | SiliconFlow API key for embeddings |
+| `LLM_API_KEY` | falls back to `SILICONFLOW_API_KEY` | LLM API key |
+| `EMBEDDING_DIMENSION` | `1024` | BAAI/bge-m3 dimension. **Changing after data exists requires dropping the table.** |
+
+## Vercel + Neon Deployment
+
+1. Create a Neon database and run migration once:
+   ```bash
+   DATABASE_URL=postgresql://user:pass@ep-xxx.neon.tech/db?sslmode=require \
+   DATABASE_PROVIDER=neon DATABASE_SSL=true \
+   npm run db:migrate
+   ```
+2. Ingest data (run locally with Neon connection string):
+   ```bash
+   DATABASE_URL=postgresql://... DATABASE_PROVIDER=neon DATABASE_SSL=true \
+   npm run ingest -- --source ./data --mod GFL_Castling
+   ```
+3. Deploy to Vercel:
+   ```bash
+   vercel
+   ```
+4. Set Vercel environment variables:
+   - `DATABASE_URL` — Neon connection string (with `?sslmode=require`)
+   - `DATABASE_PROVIDER=neon`
+   - `DATABASE_SSL=true`
+   - `DATABASE_POOL_MAX=10`
+   - `SILICONFLOW_API_KEY`
+   - `LLM_API_KEY`
+
+The frontend chat UI is available at the deployed root URL. The API remains at `/v1/chat/completions`.
 
 ## Docker
 

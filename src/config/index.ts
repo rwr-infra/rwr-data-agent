@@ -2,6 +2,7 @@ import 'dotenv/config';
 
 export const config = {
   databaseUrl: process.env.DATABASE_URL ?? '',
+  databaseProvider: (process.env.DATABASE_PROVIDER ?? 'pg') as 'pg' | 'neon',
   databasePoolMax: parseInt(process.env.DATABASE_POOL_MAX ?? '20', 10),
   databaseSsl: process.env.DATABASE_SSL === 'true',
   siliconFlowApiKey: process.env.SILICONFLOW_API_KEY ?? '',
