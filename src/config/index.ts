@@ -2,6 +2,8 @@ import 'dotenv/config';
 
 export const config = {
   databaseUrl: process.env.DATABASE_URL ?? '',
+  databasePoolMax: parseInt(process.env.DATABASE_POOL_MAX ?? '20', 10),
+  databaseSsl: process.env.DATABASE_SSL === 'true',
   siliconFlowApiKey: process.env.SILICONFLOW_API_KEY ?? '',
   siliconFlowBaseUrl: process.env.SILICONFLOW_BASE_URL ?? 'https://api.siliconflow.cn/v1',
   llmApiKey: process.env.LLM_API_KEY ?? process.env.SILICONFLOW_API_KEY ?? '',

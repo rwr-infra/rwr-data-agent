@@ -5,7 +5,8 @@ import * as schema from './schema.js';
 
 const pool = new Pool({
   connectionString: config.databaseUrl,
-  max: 20,
+  max: config.databasePoolMax,
+  ssl: config.databaseSsl ? { rejectUnauthorized: false } : undefined,
 });
 
 export const db = drizzle(pool, { schema });
