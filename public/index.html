@@ -16,6 +16,7 @@
     .msg.user{align-self:flex-end;background:var(--user-bg);color:#dbeafe}
     .msg.ai{align-self:flex-start;background:var(--ai-bg);border:1px solid var(--border)}
     .msg.error{background:#3b1219;border:1px solid #7f1d1d;color:#fca5a5}
+    .msg-meta{align-self:flex-start;font-size:11px;color:var(--muted);margin-top:-10px;padding:0 16px 0 4px;user-select:none}
     .typing{align-self:flex-start;color:var(--muted);font-size:13px;padding:8px 16px}
     .typing span{animation:blink 1.2s infinite}
     .typing span:nth-child(2){animation-delay:.2s}
@@ -49,7 +50,6 @@
         <button onclick="ask('有哪些武器？')">有哪些武器？</button>
         <button onclick="ask('M4A1 的属性')">M4A1 属性</button>
         <button onclick="ask('key: m4a1')">精确查询 M4A1</button>
-        <button onclick="ask('士兵类型有哪些？')">士兵类型</button>
       </div>
     </div>
   </div>
@@ -61,7 +61,8 @@
     const chat = document.getElementById('chat');
     const input = document.getElementById('input');
     const sendBtn = document.getElementById('send');
-    const welcome = document.getElementById('welcome');
+    let welcome = document.getElementById('welcome');
+    const history = [];
     let loading = false;
 
     input.addEventListener('input', () => {
@@ -75,8 +76,12 @@
 
     function ask(q) { input.value = q; sendMessage(); }
 
+    function removeWelcome() {
+      if (welcome) { welcome.remove(); welcome = null; }
+    }
+
     function addMsg(text, cls) {
-      if (welcome) { welcome.remove(); }
+      removeWelcome();
       const div = document.createElement('div');
       div.className = 'msg ' + cls;
       div.textContent = text;
@@ -86,6 +91,7 @@
     }
 
     function addTyping() {
+      removeWelcome();
       const div = document.createElement('div');
       div.className = 'typing';
       div.id = 'typing-indicator';
@@ -99,6 +105,28 @@
       if (el) el.remove();
     }
 
+    function typingToAiDiv() {
+      const el = document.getElementById('typing-indicator');
+      if (el) {
+        el.className = 'msg ai';
+        el.id = '';
+        el.innerHTML = '';
+        return el;
+      }
+      const div = document.createElement('div');
+      div.className = 'msg ai';
+      chat.appendChild(div);
+      return div;
+    }
+
+    function addMeta(text) {
+      const div = document.createElement('div');
+      div.className = 'msg-meta';
+      div.textContent = text;
+      chat.appendChild(div);
+      chat.scrollTop = chat.scrollHeight;
+    }
+
     async function sendMessage() {
       const text = input.value.trim();
       if (!text || loading) return;
@@ -106,10 +134,15 @@
       sendBtn.disabled = true;
 
       addMsg(text, 'user');
+      history.push({ role: 'user', content: text });
       input.value = '';
       input.style.height = 'auto';
 
       addTyping();
+
+      const t0 = performance.now();
+      let firstChunkTime = 0;
+      let usage = null;
 
       try {
         const res = await fetch('/v1/chat/completions', {
@@ -117,23 +150,24 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             model: 'rwr-agent',
-            messages: [{ role: 'user', content: text }],
+            messages: history.slice(),
             stream: true,
           }),
         });
 
-        removeTyping();
-
         if (!res.ok) {
+          removeTyping();
           const err = await res.text();
+          history.pop();
           addMsg('请求失败: ' + err, 'error');
           return;
         }
 
-        const aiDiv = addMsg('', 'ai');
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buf = '';
+        let fullContent = '';
+        let aiDiv = null;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -150,13 +184,34 @@
             try {
               const json = JSON.parse(data);
               const content = json.choices?.[0]?.delta?.content || '';
-              aiDiv.textContent += content;
-              chat.scrollTop = chat.scrollHeight;
+              if (content) {
+                if (!aiDiv) {
+                  removeTyping();
+                  aiDiv = typingToAiDiv();
+                  firstChunkTime = performance.now();
+                }
+                fullContent += content;
+                aiDiv.textContent += content;
+                chat.scrollTop = chat.scrollHeight;
+              }
+              if (json.usage) usage = json.usage;
             } catch {}
           }
         }
+
+        if (!aiDiv) removeTyping();
+
+        const totalTime = Math.round(performance.now() - t0);
+        const ttfb = firstChunkTime > 0 ? Math.round(firstChunkTime - t0) : '-';
+        const inTokens = usage?.prompt_tokens ?? '-';
+        const outTokens = usage?.completion_tokens ?? '-';
+        addMeta(`TTFB ${ttfb}ms · 总耗时 ${totalTime}ms · 输入 ${inTokens} tokens · 输出 ${outTokens} tokens`);
+        console.log(`[frontend] TTFB=${ttfb}ms total=${totalTime}ms in=${inTokens} out=${outTokens}`);
+
+        history.push({ role: 'assistant', content: fullContent });
       } catch (err) {
         removeTyping();
+        history.pop();
         addMsg('网络错误: ' + err.message, 'error');
       } finally {
         loading = false;
