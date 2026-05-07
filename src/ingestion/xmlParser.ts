@@ -7,10 +7,172 @@ const parser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: '@_',
   textNodeName: '#text',
-  parseAttributeValue: false, // keep strings as strings to avoid losing precision
+  parseAttributeValue: false,
   trimValues: true,
   alwaysCreateTextNode: false,
 });
+
+// ---------------------------------------------------------------------------
+// Inheritance resolution: RWR XML files use file="parent.file" to inherit
+// from a parent. This resolves the chain recursively and merges content.
+// ---------------------------------------------------------------------------
+
+const REPLACE_KEYS = new Set([
+  'specification', 'stance', 'modifier', 'target_factors',
+  'capacity', 'commonness', 'inventory', 'hud_icon', 'model',
+  'shield', 'weak_hand_hold', 'next_in_chain',
+]);
+
+const APPEND_KEYS = new Set([
+  'tag', 'animation', 'sound', 'effect',
+]);
+
+const MAX_INHERITANCE_DEPTH = 10;
+
+const callIncludeCache = new Map<string, unknown[]>();
+
+async function expandCallIncludes(
+  calls: unknown[],
+  sourceDir: string,
+  depth = 0,
+  visited = new Set<string>(),
+): Promise<unknown[]> {
+  if (depth >= MAX_INHERITANCE_DEPTH) return calls;
+
+  const expanded: unknown[] = [];
+  for (const c of calls) {
+    const attrs = (c ?? {}) as Record<string, unknown>;
+    const refFile = attrs['@_file'] as string | undefined;
+
+    if (refFile && Object.keys(attrs).filter((k) => !k.startsWith('@_') && k !== '#text').length === 0) {
+      const refPath = path.resolve(sourceDir, refFile);
+      if (visited.has(refPath)) continue;
+      visited.add(refPath);
+
+      let includedCalls: unknown[];
+      if (callIncludeCache.has(refPath)) {
+        includedCalls = callIncludeCache.get(refPath)!;
+      } else {
+        try {
+          const content = await fs.readFile(refPath, 'utf-8');
+          const parsed = parser.parse(content);
+          includedCalls = ensureArray(parsed.calls?.call);
+          callIncludeCache.set(refPath, includedCalls);
+        } catch {
+          callIncludeCache.set(refPath, []);
+          includedCalls = [];
+        }
+      }
+
+      const subExpanded = await expandCallIncludes(includedCalls, path.dirname(refPath), depth + 1, visited);
+      expanded.push(...subExpanded);
+    } else {
+      expanded.push(c);
+    }
+  }
+
+  return expanded;
+}
+
+function deepMergeWithParent(
+  parent: Record<string, unknown>,
+  child: Record<string, unknown>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...parent };
+
+  for (const [key, childVal] of Object.entries(child)) {
+    if (key === '@_file') continue;
+
+    if (key.startsWith('@_')) {
+      result[key] = childVal;
+      continue;
+    }
+
+    if (APPEND_KEYS.has(key)) {
+      const parentArr = ensureArray(result[key]);
+      const childArr = ensureArray(childVal);
+      result[key] = [...parentArr, ...childArr];
+      continue;
+    }
+
+    if (REPLACE_KEYS.has(key)) {
+      result[key] = childVal;
+      continue;
+    }
+
+    if (result[key] === undefined) {
+      result[key] = childVal;
+    } else {
+      result[key] = childVal;
+    }
+  }
+
+  return result;
+}
+
+const parentFileCache = new Map<string, Record<string, unknown> | null>();
+
+async function resolveInheritance(
+  element: Record<string, unknown>,
+  sourceDir: string,
+  depth = 0,
+  visited = new Set<string>(),
+): Promise<Record<string, unknown>> {
+  const parentFile = element['@_file'] as string | undefined;
+  if (!parentFile || depth >= MAX_INHERITANCE_DEPTH) return element;
+
+  const parentPath = path.resolve(sourceDir, parentFile);
+  if (visited.has(parentPath)) return element;
+  visited.add(parentPath);
+
+  let parentParsed: Record<string, unknown> | null;
+  if (parentFileCache.has(parentPath)) {
+    parentParsed = parentFileCache.get(parentPath)!;
+  } else {
+    try {
+      const content = await fs.readFile(parentPath, 'utf-8');
+      const parsed = parser.parse(content);
+      parentParsed = extractRootElement(parsed);
+      parentFileCache.set(parentPath, parentParsed);
+    } catch {
+      parentFileCache.set(parentPath, null);
+      parentParsed = null;
+    }
+  }
+
+  if (!parentParsed) return element;
+
+  const parentDir = path.dirname(parentPath);
+  const resolvedParent = await resolveInheritance(parentParsed, parentDir, depth + 1, visited);
+  return deepMergeWithParent(resolvedParent, element);
+}
+
+function extractRootElement(parsed: unknown): Record<string, unknown> {
+  if (typeof parsed !== 'object' || parsed === null) return {};
+
+  const obj = parsed as Record<string, unknown>;
+
+  const weapons = obj['weapons'] as Record<string, unknown> | undefined;
+  if (weapons?.['weapon']) {
+    const weaponArr = ensureArray(weapons['weapon']);
+    if (weaponArr.length > 0) return (weaponArr[0] ?? {}) as Record<string, unknown>;
+  }
+  if (obj['weapon']) return obj['weapon'] as Record<string, unknown>;
+  const carryItems = obj['carry_items'] as Record<string, unknown> | undefined;
+  if (carryItems?.['carry_item']) {
+    const items = ensureArray(carryItems['carry_item']);
+    if (items.length > 0) return (items[0] ?? {}) as Record<string, unknown>;
+  }
+  if (obj['carry_item']) return obj['carry_item'] as Record<string, unknown>;
+  const projectiles = obj['projectiles'] as Record<string, unknown> | undefined;
+  if (projectiles?.['projectile']) {
+    const projArr = ensureArray(projectiles['projectile']);
+    if (projArr.length > 0) return (projArr[0] ?? {}) as Record<string, unknown>;
+  }
+  if (obj['projectile']) return obj['projectile'] as Record<string, unknown>;
+
+  return obj;
+}
 
 /**
  * Recursively extract simple key-value text from a parsed XML object.
@@ -105,7 +267,7 @@ function getFlatValue(attrs: Record<string, unknown>, ...keys: string[]): string
 // Description builders — convert structured attributes into natural language
 // ---------------------------------------------------------------------------
 
-function describeWeapon(attrs: Record<string, unknown>): string {
+function describeWeapon(attrs: Record<string, unknown>, resolved?: Record<string, unknown>): string {
   const parts: string[] = [];
 
   const weaponClass = getFlatValue(attrs, 'class', 'weapon_class', 'specification.class');
@@ -141,6 +303,26 @@ function describeWeapon(attrs: Record<string, unknown>): string {
   const carryInBack = getFlatValue(attrs, 'carry_in_back', 'specification.carry_in_back');
   if (carryInBack !== undefined) {
     parts.push(carryInBack === '1' || carryInBack === 1 ? 'It can be carried on the back.' : 'It cannot be carried on the back.');
+  }
+
+  const nextInChain = resolved?.['next_in_chain'] ?? attrs['next_in_chain'];
+  if (nextInChain !== undefined) {
+    const chainArr = ensureArray(nextInChain as unknown);
+    const chainKeys = chainArr
+      .map((c: unknown) => ((c as Record<string, unknown>)?.['@_key'] ?? (c as Record<string, unknown>)?.['key']))
+      .filter(Boolean) as string[];
+    const shareAmmoArr = chainArr
+      .map((c: unknown) => ((c as Record<string, unknown>)?.['@_share_ammo'] ?? (c as Record<string, unknown>)?.['share_ammo']))
+      .filter(Boolean) as string[];
+    if (chainKeys.length > 0) {
+      parts.push(`It can switch to the following weapon mode(s): ${chainKeys.join(', ')}. This represents an alternative fire mode such as an underbarrel grenade launcher or a skill variant.`);
+    }
+    if (shareAmmoArr.length > 0) {
+      const anyShare = shareAmmoArr.some((v) => String(v) === '1');
+      if (anyShare) {
+        parts.push('Some of these modes share ammo with the current weapon.');
+      }
+    }
   }
 
   return parts.length > 0 ? parts.join(' ') : '';
@@ -265,7 +447,43 @@ function describeCharacter(attrs: Record<string, unknown>): string {
   return parts.length > 0 ? parts.join(' ') : '';
 }
 
-function describeCarryItem(attrs: Record<string, unknown>): string {
+interface DeathProtection {
+  source: string;
+  output: string;
+  consumesItem: boolean;
+}
+
+function extractDeathProtection(resolved?: Record<string, unknown>): DeathProtection[] {
+  if (!resolved) return [];
+  const modifiers = ensureArray(resolved['modifier']);
+  const results: DeathProtection[] = [];
+  for (const mod of modifiers) {
+    const m = mod as Record<string, unknown>;
+    const cls = m['@_class'] ?? '';
+    if (
+      cls === 'projectile_blast_result' ||
+      cls === 'projectile_hit_result' ||
+      cls === 'melee_hit_result'
+    ) {
+      const input = m['@_input_character_state'] ?? '';
+      const output = m['@_output_character_state'] ?? '';
+      if (input === 'death' && output) {
+        const sourceLabel =
+          cls === 'projectile_blast_result' ? 'explosion' :
+          cls === 'projectile_hit_result' ? 'bullet' :
+          'melee';
+        results.push({
+          source: sourceLabel,
+          output: String(output),
+          consumesItem: m['@_consumes_item'] === '1',
+        });
+      }
+    }
+  }
+  return results;
+}
+
+function describeCarryItem(attrs: Record<string, unknown>, resolved?: Record<string, unknown>): string {
   const parts: string[] = [];
 
   const name = getFlatValue(attrs, 'name');
@@ -301,7 +519,27 @@ function describeCarryItem(attrs: Record<string, unknown>): string {
   }
 
   const transformOnConsume = getFlatValue(attrs, 'transform_on_consume');
-  if (transformOnConsume !== undefined) parts.push(`When consumed, it transforms into "${transformOnConsume}".`);
+  if (transformOnConsume !== undefined) {
+    const deathProtections = extractDeathProtection(resolved);
+    if (deathProtections.length > 0) {
+      const hasActive = deathProtections.some((p) => p.output !== 'death');
+      if (hasActive) {
+        parts.push(`It provides armor protection. When taking a hit that would kill, the damage is mitigated instead (${deathProtections.filter((p) => p.output !== 'death').map((p) => `${p.source}: death→${p.output}`).join('; ')}). On each hit the armor degrades to the next state: "${transformOnConsume}". This chain represents the armor's remaining durability layers.`);
+      } else {
+        parts.push(`When taking sufficient damage, it transforms into state "${transformOnConsume}" (final layer — death protection has expired).`);
+      }
+    } else {
+      parts.push(`When consumed or used, it transforms into "${transformOnConsume}".`);
+    }
+  } else {
+    const deathProtections = extractDeathProtection(resolved);
+    if (deathProtections.length > 0) {
+      const active = deathProtections.filter((p) => p.output !== 'death');
+      if (active.length > 0) {
+        parts.push(`It provides protection: ${active.map((p) => `${p.source}: death→${p.output}`).join('; ')}.`);
+      }
+    }
+  }
 
   const speedMod = getFlatValue(attrs, 'modifier.speed');
   if (speedMod !== undefined) {
@@ -339,18 +577,6 @@ function describeCarryItem(attrs: Record<string, unknown>): string {
       if (num < 0) parts.push(`It reduces detectability by ${Math.abs(num)} (stealth bonus).`);
       else if (num > 0) parts.push(`It increases detectability by ${v}.`);
       else parts.push('It does not change detectability.');
-    }
-  }
-
-  const hasDeathProtection = attrs['modifier.projectile_blast_result.death'] !== undefined ||
-    attrs['modifier.projectile_hit_result.death'] !== undefined;
-  if (hasDeathProtection) {
-    const blastDeathOutput = getFlatValue(attrs, 'modifier.projectile_blast_result.death');
-    const hitDeathOutput = getFlatValue(attrs, 'modifier.projectile_hit_result.death');
-    const deathProtected = blastDeathOutput === 'stun' || blastDeathOutput === 'wound' ||
-      hitDeathOutput === 'stun' || hitDeathOutput === 'wound';
-    if (deathProtected) {
-      parts.push('It provides protection against death (death result is converted to a lesser state).');
     }
   }
 
@@ -404,7 +630,9 @@ function makeDoc(
 export async function parseCallFile(filePath: string, modName: string): Promise<RWRDocument[]> {
   const content = await fs.readFile(filePath, 'utf-8');
   const parsed = parser.parse(content);
-  const calls = ensureArray(parsed.calls?.call);
+  const rawCalls = ensureArray(parsed.calls?.call);
+  const sourceDir = path.dirname(filePath);
+  const calls = await expandCallIncludes(rawCalls, sourceDir);
 
   return calls.map((c: unknown, i: number) => {
     const attrs = (c ?? {}) as Record<string, unknown>;
@@ -490,18 +718,22 @@ export async function parseCarryItemFile(filePath: string, modName: string): Pro
   const content = await fs.readFile(filePath, 'utf-8');
   const parsed = parser.parse(content);
   const carryItems = ensureArray(parsed.carry_items?.carry_item);
+  const sourceDir = path.dirname(filePath);
 
-  return carryItems.map((ci: unknown, i: number) => {
-    const attrs = (ci ?? {}) as Record<string, unknown>;
-    const flatAttrs = flattenAttributes(ci);
-    const key = extractKey(attrs, `carry_item_${i}`);
-    const description = describeCarryItem(flatAttrs);
-    const raw = extractText(ci, 0);
-    return makeDoc('carry_item', key, 'Carry Item', description, raw, filePath, modName, {
-      name: attrs['@_name'],
-      slot: attrs['@_slot'],
-    });
-  });
+  const docs: RWRDocument[] = [];
+  for (let i = 0; i < carryItems.length; i++) {
+    const ci = (carryItems[i] ?? {}) as Record<string, unknown>;
+    const resolved = await resolveInheritance(ci, sourceDir);
+    const flatAttrs = flattenAttributes(resolved);
+    const key = extractKey(ci, `carry_item_${i}`);
+    const description = describeCarryItem(flatAttrs, resolved);
+    const raw = extractText(resolved, 0);
+    docs.push(makeDoc('carry_item', key, 'Carry Item', description, raw, filePath, modName, {
+      name: ci['@_name'] ?? resolved['@_name'],
+      slot: ci['@_slot'] ?? resolved['@_slot'],
+    }));
+  }
+  return docs;
 }
 
 // ---------------------------------------------------------------------------
@@ -549,21 +781,40 @@ export async function parseXmlFile(filePath: string, modName: string): Promise<R
   // If root contains <weapon> tags
   if (parsed.weapons?.weapon || parsed.weapon) {
     const weapons = ensureArray(parsed.weapons?.weapon ?? parsed.weapon);
-    return weapons.map((w: unknown, i: number) => {
-      const attrs = (w ?? {}) as Record<string, unknown>;
-      const flatAttrs = flattenAttributes(w);
-      const key = extractKey(attrs, `weapon_${i}`);
-      const description = describeWeapon(flatAttrs);
-      const raw = extractText(w, 0);
-      return makeDoc('weapon', key, 'Weapon', description, raw, filePath, modName, {
-        weapon_class: attrs['@_weapon_class'] ?? attrs['@_class'],
-      });
-    });
+    const sourceDir = path.dirname(filePath);
+    const docs: RWRDocument[] = [];
+    for (let i = 0; i < weapons.length; i++) {
+      const w = (weapons[i] ?? {}) as Record<string, unknown>;
+      const resolved = await resolveInheritance(w, sourceDir);
+      const flatAttrs = flattenAttributes(resolved);
+      const key = extractKey(w, `weapon_${i}`);
+      const description = describeWeapon(flatAttrs, resolved);
+      const raw = extractText(resolved, 0);
+      docs.push(makeDoc('weapon', key, 'Weapon', description, raw, filePath, modName, {
+        weapon_class: w['@_weapon_class'] ?? w['@_class'] ?? resolved['@_weapon_class'] ?? resolved['@_class'],
+      }));
+    }
+    return docs;
   }
 
-  // If root contains <carry_item> tags
+  // If root contains <carry_item> tags (plural wrapper)
   if (parsed.carry_items?.carry_item) {
     return parseCarryItemFile(filePath, modName);
+  }
+
+  // If root is a single <carry_item> (no wrapper)
+  if (parsed.carry_item) {
+    const sourceDir = path.dirname(filePath);
+    const ci = (parsed.carry_item ?? {}) as Record<string, unknown>;
+    const resolved = await resolveInheritance(ci, sourceDir);
+    const flatAttrs = flattenAttributes(resolved);
+    const key = extractKey(ci, path.basename(filePath, ext));
+    const description = describeCarryItem(flatAttrs, resolved);
+    const raw = extractText(resolved, 0);
+    return [makeDoc('carry_item', key, 'Carry Item', description, raw, filePath, modName, {
+      name: ci['@_name'] ?? resolved['@_name'],
+      slot: ci['@_slot'] ?? resolved['@_slot'],
+    })];
   }
 
   // If root contains <vehicle> tags
