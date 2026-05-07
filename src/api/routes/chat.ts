@@ -47,10 +47,19 @@ export async function chatRoutes(app: FastifyInstance) {
     const truncatedQuery = query.length > 80 ? query.slice(0, 80) + '…' : query;
     console.log(`[chat] Query: "${truncatedQuery}"`);
 
+    const totalChars = messages.reduce((sum, m) => sum + m.content.length, 0);
+    const estimatedTokens = Math.ceil(totalChars / 1.5);
+    if (estimatedTokens > config.maxContextTokens) {
+      console.log(`[chat] 400 - Request too large: ~${estimatedTokens} tokens > ${config.maxContextTokens}`);
+      return reply.status(400).send({
+        error: { message: `Request too large: ~${estimatedTokens} estimated tokens exceed context limit (${config.maxContextTokens})`, type: 'invalid_request_error' },
+      });
+    }
+
     let results;
     try {
-      results = await search(query, {}, 5);
-      console.log(`[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms`);
+      results = await search(query, {}, 5, body.table);
+      console.log(`[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (table=${body.table ?? config.databaseTable})`);
     } catch (err) {
       console.error(`[chat] Search failed: ${(err as Error).message}`);
       return reply.status(500).send({ error: { message: 'Search failed', type: 'internal_error' } });
@@ -88,6 +97,7 @@ export async function chatRoutes(app: FastifyInstance) {
           messages: llmMessages,
           stream: true,
           stream_options: { include_usage: true },
+          max_tokens: body.max_tokens ?? Math.max(config.maxContextTokens - estimatedTokens, 1024),
         });
 
         const id = `chatcmpl-${Date.now()}`;
@@ -145,7 +155,7 @@ export async function chatRoutes(app: FastifyInstance) {
         model: config.llmModel,
         messages: llmMessages,
         temperature: body.temperature ?? 0.7,
-        max_tokens: body.max_tokens,
+        max_tokens: body.max_tokens ?? Math.max(config.maxContextTokens - estimatedTokens, 1024),
         top_p: body.top_p ?? 1,
       });
 

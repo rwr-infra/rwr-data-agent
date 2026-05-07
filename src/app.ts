@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { chatRoutes } from './api/routes/chat.js';
 import { modelsRoutes } from './api/routes/models.js';
 import { healthRoutes } from './api/routes/health.js';
+import { tablesRoutes } from './api/routes/tables.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isVercel = !!process.env.VERCEL;
@@ -21,6 +22,7 @@ export async function buildApp() {
   await app.register(cors, { origin: true });
   await app.register(chatRoutes, { prefix: '/v1' });
   await app.register(modelsRoutes, { prefix: '/v1' });
+  await app.register(tablesRoutes, { prefix: '/v1' });
   await app.register(healthRoutes);
 
   if (!isVercel) {

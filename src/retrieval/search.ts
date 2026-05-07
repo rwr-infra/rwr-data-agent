@@ -63,11 +63,12 @@ function extractQueryIntent(query: string): QueryIntent {
 export async function search(
   query: string,
   filters: SearchFilters = {},
-  topK = 5
+  topK = 5,
+  tableName?: string
 ): Promise<SearchResult[]> {
   const pool = await getPool();
   const intent = extractQueryIntent(query);
-  const tableName = config.databaseTable;
+  const table = tableName && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName) ? tableName : config.databaseTable;
 
   // -----------------------------------------------------------------------
   // Fast path: exact key lookup — bypass embedding entirely
@@ -95,7 +96,7 @@ export async function search(
       const whereClause = `WHERE ${conditions.join(' AND ')}`;
       const exactSql = `
         SELECT doc_id, type, key, content, metadata, 0.0 AS distance
-        FROM ${tableName}
+        FROM ${table}
         ${whereClause}
         LIMIT $${paramIdx}
       `;
@@ -133,7 +134,7 @@ export async function search(
       const likeWhere = `WHERE ${likeConditions.join(' AND ')}`;
       const likeSql = `
         SELECT doc_id, type, key, content, metadata, 0.0 AS distance
-        FROM ${tableName}
+        FROM ${table}
         ${likeWhere}
         LIMIT $${likeParamIdx}
       `;
@@ -197,7 +198,7 @@ export async function search(
   const sql = `
     SELECT doc_id, type, key, content, metadata,
            embedding <=> $1::vector AS distance
-    FROM ${tableName}
+    FROM ${table}
     ${whereClause}
     ORDER BY embedding <=> $1::vector
     LIMIT $${paramIdx}

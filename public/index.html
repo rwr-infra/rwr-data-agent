@@ -11,6 +11,8 @@
     header{padding:16px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;background:var(--surface)}
     header h1{font-size:18px;font-weight:600}
     header span{font-size:12px;color:var(--muted);background:var(--border);padding:2px 8px;border-radius:99px}
+    #table-select{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px;font-size:12px;outline:none;cursor:pointer;margin-left:auto}
+    #table-select:focus{border-color:var(--accent)}
     #chat{flex:1;overflow-y:auto;padding:24px;display:flex;flex-direction:column;gap:16px}
     .msg{max-width:80%;padding:12px 16px;border-radius:var(--radius);line-height:1.6;font-size:14px;white-space:pre-wrap;word-break:break-word}
     .msg.user{align-self:flex-end;background:var(--user-bg);color:#dbeafe}
@@ -22,25 +24,46 @@
     .typing span:nth-child(2){animation-delay:.2s}
     .typing span:nth-child(3){animation-delay:.4s}
     @keyframes blink{0%,80%,100%{opacity:.3}40%{opacity:1}}
-    #input-area{padding:16px 24px;border-top:1px solid var(--border);background:var(--surface);display:flex;gap:12px}
-    #input{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;color:var(--text);font-size:14px;outline:none;resize:none;font-family:inherit}
+    #input-area{padding:16px 24px;border-top:1px solid var(--border);background:var(--surface);display:flex;flex-direction:column;gap:8px}
+    #input-row{display:flex;gap:12px;align-items:flex-end}
+    #input{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;color:var(--text);font-size:16px;outline:none;resize:none;font-family:inherit;overflow-y:hidden;line-height:1.5;min-height:44px}
     #input:focus{border-color:var(--accent)}
-    #input::placeholder{color:var(--muted)}
-    #send{background:var(--accent);color:#fff;border:none;border-radius:var(--radius);padding:0 20px;font-size:14px;font-weight:500;cursor:pointer;transition:background .15s}
+    #input::placeholder{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    #send{background:var(--accent);color:#fff;border:none;border-radius:var(--radius);padding:0 20px;font-size:14px;font-weight:500;cursor:pointer;transition:background .15s;height:44px}
     #send:hover{background:var(--accent-hover)}
     #send:disabled{opacity:.5;cursor:not-allowed}
+    #ctx-bar{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted);user-select:none}
+    #ctx-track{flex:1;max-width:200px;height:4px;background:var(--border);border-radius:2px;overflow:hidden}
+    #ctx-fill{height:100%;width:0%;background:var(--accent);border-radius:2px;transition:width .3s,background .3s}
+    #ctx-fill.warn{background:#f59e0b}
+    #ctx-fill.over{background:#ef4444}
     .welcome{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:16px;color:var(--muted)}
     .welcome h2{font-size:20px;color:var(--text);font-weight:600}
     .welcome p{font-size:14px;max-width:420px;line-height:1.6}
     .examples{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:8px}
     .examples button{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:8px 14px;border-radius:8px;font-size:13px;cursor:pointer;transition:border-color .15s}
     .examples button:hover{border-color:var(--accent)}
+    @media(max-width:640px){
+      header{padding:10px 12px;gap:8px}
+      header h1{font-size:15px}
+      #table-select{font-size:11px;max-width:140px}
+      #chat{padding:12px 8px;gap:12px}
+      .msg{max-width:92%;font-size:13px;padding:10px 12px}
+      #input-area{padding:10px 12px}
+      #input{font-size:16px;padding:10px 12px}
+      #send{padding:0 14px;height:40px;font-size:13px}
+      .welcome h2{font-size:17px}
+      .welcome p{font-size:13px}
+    }
   </style>
 </head>
 <body>
   <header>
     <h1>RWR Data Agent</h1>
     <span>v1</span>
+    <select id="table-select">
+      <option value="">rwr_documents (默认)</option>
+    </select>
   </header>
   <div id="chat">
     <div class="welcome" id="welcome">
@@ -54,20 +77,83 @@
     </div>
   </div>
   <div id="input-area">
-    <textarea id="input" rows="1" placeholder="输入查询，例如：有哪些武器？ 或 key: weapon_name" onkeydown="handleKey(event)"></textarea>
-    <button id="send" onclick="sendMessage()">发送</button>
+    <div id="input-row">
+      <textarea id="input" rows="1" placeholder="输入查询，如：有哪些武器？" onkeydown="handleKey(event)"></textarea>
+      <button id="send" onclick="sendMessage()">发送</button>
+    </div>
+    <div id="ctx-bar">
+      <div id="ctx-track"><div id="ctx-fill"></div></div>
+      <span id="ctx-label">0 / 200K tokens</span>
+    </div>
   </div>
   <script>
     const chat = document.getElementById('chat');
     const input = document.getElementById('input');
     const sendBtn = document.getElementById('send');
+    const ctxFill = document.getElementById('ctx-fill');
+    const ctxLabel = document.getElementById('ctx-label');
+    const tableSelect = document.getElementById('table-select');
     let welcome = document.getElementById('welcome');
     const history = [];
     let loading = false;
+    const MAX_CONTEXT = 200000;
+    let totalTokensUsed = 0;
+
+    (async function loadTables() {
+      try {
+        const res = await fetch('/v1/tables');
+        if (!res.ok) return;
+        const data = await res.json();
+        const def = data.default || 'rwr_documents';
+        const tables = data.tables || [];
+        tableSelect.innerHTML = '';
+        tables.forEach(t => {
+          const opt = document.createElement('option');
+          opt.value = t === def ? '' : t;
+          opt.textContent = t + (t === def ? ' (默认)' : '');
+          tableSelect.appendChild(opt);
+        });
+        if (!tables.length) {
+          const opt = document.createElement('option');
+          opt.value = '';
+          opt.textContent = def + ' (默认)';
+          tableSelect.appendChild(opt);
+        }
+      } catch {}
+    })();
+
+    tableSelect.addEventListener('change', () => {
+      history.length = 0;
+      totalTokensUsed = 0;
+      updateContextBar();
+      chat.innerHTML = '';
+      const w = document.createElement('div');
+      w.className = 'welcome';
+      w.id = 'welcome';
+      w.innerHTML = '<h2>Running With Rifles 数据查询</h2><p>基于 RAG 的游戏数据 AI 助手，支持武器、兵种、载具、阵营等数据查询</p><div class="examples"><button onclick="ask(\'有哪些武器？\')">有哪些武器？</button><button onclick="ask(\'M4A1 的属性\')">M4A1 属性</button><button onclick="ask(\'key: m4a1\')">精确查询 M4A1</button></div>';
+      chat.appendChild(w);
+      welcome = w;
+    });
+
+    function estimateTokens(text) {
+      return Math.ceil(text.length / 1.5);
+    }
+
+    function updateContextBar() {
+      const inputTokens = estimateTokens(input.value);
+      const used = totalTokensUsed + inputTokens;
+      const pct = Math.min((used / MAX_CONTEXT) * 100, 100);
+      ctxFill.style.width = pct + '%';
+      ctxFill.className = pct > 90 ? 'over' : pct > 70 ? 'warn' : '';
+      const display = used >= 1000 ? (used / 1000).toFixed(1) + 'K' : used;
+      ctxLabel.textContent = display + ' / 200K tokens';
+      ctxLabel.style.color = pct > 90 ? '#f87171' : pct > 70 ? '#fbbf24' : 'var(--muted)';
+    }
 
     input.addEventListener('input', () => {
       input.style.height = 'auto';
       input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+      updateContextBar();
     });
 
     function handleKey(e) {
@@ -130,6 +216,10 @@
     async function sendMessage() {
       const text = input.value.trim();
       if (!text || loading) return;
+      if (totalTokensUsed + estimateTokens(text) >= MAX_CONTEXT) {
+        addMsg('上下文已达上限，请刷新页面开始新对话', 'error');
+        return;
+      }
       loading = true;
       sendBtn.disabled = true;
 
@@ -152,6 +242,7 @@
             model: 'rwr-agent',
             messages: history.slice(),
             stream: true,
+            ...(tableSelect.value ? { table: tableSelect.value } : {}),
           }),
         });
 
@@ -205,6 +296,10 @@
         const ttfb = firstChunkTime > 0 ? Math.round(firstChunkTime - t0) : '-';
         const inTokens = usage?.prompt_tokens ?? '-';
         const outTokens = usage?.completion_tokens ?? '-';
+        if (usage) {
+          totalTokensUsed = (usage.total_tokens ?? (usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0));
+        }
+        updateContextBar();
         addMeta(`TTFB ${ttfb}ms · 总耗时 ${totalTime}ms · 输入 ${inTokens} tokens · 输出 ${outTokens} tokens`);
         console.log(`[frontend] TTFB=${ttfb}ms total=${totalTime}ms in=${inTokens} out=${outTokens}`);
 
@@ -221,6 +316,7 @@
     }
 
     input.focus();
+    updateContextBar();
   </script>
 </body>
 </html>

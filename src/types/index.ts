@@ -43,4 +43,5 @@ export interface ChatCompletionRequest {
   temperature?: number;
   max_tokens?: number;
   top_p?: number;
+  table?: string;
 }

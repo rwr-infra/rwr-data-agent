@@ -8,6 +8,8 @@ drizzle/
 .idea/
 .DS_Store
 data/
+vanilla-data/
+ww2-data/
 
 # docs
 docs/

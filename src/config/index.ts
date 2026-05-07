@@ -17,6 +17,7 @@ export const config = {
   ingestBatchSize: parseInt(process.env.INGEST_BATCH_SIZE ?? '8', 10),
   ingestConcurrency: parseInt(process.env.INGEST_CONCURRENCY ?? '2', 10),
   port: parseInt(process.env.PORT ?? '3000', 10),
+  maxContextTokens: parseInt(process.env.MAX_CONTEXT_TOKENS ?? '200000', 10),
 };
 
 export function validateConfig() {
