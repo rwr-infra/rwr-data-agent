@@ -1,12 +1,11 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { chatRoutes } from './api/routes/chat.js';
 import { modelsRoutes } from './api/routes/models.js';
 import { healthRoutes } from './api/routes/health.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const publicDir = path.join(process.cwd(), 'public');
 
 export async function buildApp() {
   const app = Fastify({
@@ -22,7 +21,7 @@ export async function buildApp() {
   try {
     const staticModule = await import('@fastify/static');
     await app.register(staticModule.default, {
-      root: path.join(__dirname, '..', 'public'),
+      root: publicDir,
       prefix: '/',
       wildcard: false,
     });
