@@ -16,14 +16,39 @@ CREATE TABLE IF NOT EXISTS ${tableName} (
   key TEXT NOT NULL,
   content TEXT NOT NULL,
   metadata JSONB NOT NULL DEFAULT '{}',
-  embedding VECTOR(${config.embeddingDimension})
+  embedding VECTOR(${config.embeddingDimension}),
+  fts tsvector GENERATED ALWAYS AS (
+    setweight(to_tsvector('simple', coalesce(type, '')), 'A') ||
+    setweight(to_tsvector('simple', coalesce(key, '')), 'A') ||
+    setweight(to_tsvector('simple', coalesce(content, '')), 'B')
+  ) STORED
 );
+
+-- Add fts column to existing tables that were created before this column existed.
+-- The IF NOT EXISTS check is handled by checking column existence first.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = '${tableName}' AND column_name = 'fts'
+  ) THEN
+    ALTER TABLE ${tableName}
+      ADD COLUMN fts tsvector GENERATED ALWAYS AS (
+        setweight(to_tsvector('simple', coalesce(type, '')), 'A') ||
+        setweight(to_tsvector('simple', coalesce(key, '')), 'A') ||
+        setweight(to_tsvector('simple', coalesce(content, '')), 'B')
+      ) STORED;
+  END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_${tableName}_embedding
   ON ${tableName} USING hnsw (embedding vector_cosine_ops);
 
 CREATE INDEX IF NOT EXISTS idx_${tableName}_metadata
   ON ${tableName} USING gin (metadata);
+
+CREATE INDEX IF NOT EXISTS idx_${tableName}_fts
+  ON ${tableName} USING gin (fts);
 `;
 
 async function migrate() {

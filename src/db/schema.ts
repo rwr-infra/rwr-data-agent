@@ -18,3 +18,5 @@ export const rwrDocuments = pgTable(
     index(`idx_${tableName}_metadata`).using('gin', table.metadata),
   ]
 );
+
+export const FTS_CONFIG = 'simple';

@@ -2,7 +2,9 @@ import { getPool } from '../db/index.js';
 import { createEmbedding } from '../ingestion/embeddings.js';
 import { rerankCandidates } from './rerank.js';
 import { config } from '../config/index.js';
-import type { SearchFilters, SearchResult } from '../types/index.js';
+import { expandQuery } from './queryRewrite.js';
+import { FTS_CONFIG } from '../db/schema.js';
+import type { DocumentType, SearchFilters, SearchResult } from '../types/index.js';
 
 interface QueryIntent {
   inferredType?: string;
@@ -15,20 +17,17 @@ interface QueryIntent {
 function extractQueryIntent(query: string): QueryIntent {
   const intent: QueryIntent = { isEnumeration: false, isExactKeyQuery: false };
 
-  // Enumeration query detection (Chinese & English patterns)
   if (/有哪些|列出|所有|全部|是什么|what are|list all/i.test(query)) {
     intent.isEnumeration = true;
   }
 
-  // Exact key query detection: key=xxx, key="xxx", key: xxx, key 为 xxx, key是xxx
   const exactKeyMatch = query.match(/key\s*[=:]\s*["']?([^"'\s]+)["']?/i) ||
-                        query.match(/key\s*(?:为|是)\s*["']?([^"'\s]+)["']?/i);
+                         query.match(/key\s*(?:为|是)\s*["']?([^"'\s]+)["']?/i);
   if (exactKeyMatch) {
     intent.exactKey = exactKeyMatch[1];
     intent.isExactKeyQuery = true;
   }
 
-  // Document type inference from query text
   if (/武器|weapon|枪械|枪/i.test(query)) {
     intent.inferredType = 'weapon';
   } else if (/士兵|soldier|兵种|人/i.test(query)) {
@@ -47,19 +46,84 @@ function extractQueryIntent(query: string): QueryIntent {
     intent.inferredType = 'carry_item';
   }
 
-  // Extract class="N" or class=N or class: N patterns
   const classMatch = query.match(/class\s*[=:]\s*["']?(\d+)["']?/i);
   if (classMatch) {
     intent.contentPattern = `%class: ${classMatch[1]}%`;
   }
 
-  // Extract specification references
   if (/specification|规格|属性/i.test(query) && !intent.contentPattern) {
-    // If user mentions specification but no class value, still boost text search relevance
     intent.contentPattern = '%specification:%';
   }
 
   return intent;
+}
+
+function buildWhereClause(
+  filters: SearchFilters,
+  intent: QueryIntent,
+  startIdx: number,
+): { where: string; params: (string | number)[]; idx: number } {
+  const conditions: string[] = [];
+  const params: (string | number)[] = [];
+  let idx = startIdx;
+
+  if (filters.type) {
+    conditions.push(`type = $${idx++}`);
+    params.push(filters.type);
+  } else if (intent.inferredType) {
+    conditions.push(`type = $${idx++}`);
+    params.push(intent.inferredType);
+  }
+
+  if (filters.faction) {
+    conditions.push(`metadata->>'faction' = $${idx++}`);
+    params.push(filters.faction);
+  }
+  if (filters.mod_name) {
+    conditions.push(`metadata->>'mod_name' = $${idx++}`);
+    params.push(filters.mod_name);
+  }
+  if (filters.weapon_class) {
+    conditions.push(`metadata->>'weapon_class' = $${idx++}`);
+    params.push(filters.weapon_class);
+  }
+
+  if (intent.contentPattern) {
+    conditions.push(`content ILIKE $${idx++}`);
+    params.push(intent.contentPattern);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  return { where, params, idx };
+}
+
+/**
+ * Reciprocal Rank Fusion: merge multiple ranked lists by score = Σ 1/(k + rank).
+ * k=60 is the standard RRF constant from the original paper.
+ */
+function reciprocalRankFusion(
+  rankLists: SearchResult[][],
+  k = 60,
+): SearchResult[] {
+  const scoreMap = new Map<string, { score: number; doc: SearchResult }>();
+
+  for (const list of rankLists) {
+    for (let rank = 0; rank < list.length; rank++) {
+      const doc = list[rank];
+      const id = doc.doc_id;
+      const rrfScore = 1 / (k + rank + 1);
+      const existing = scoreMap.get(id);
+      if (existing) {
+        existing.score += rrfScore;
+      } else {
+        scoreMap.set(id, { score: rrfScore, doc });
+      }
+    }
+  }
+
+  return [...scoreMap.values()]
+    .sort((a, b) => b.score - a.score)
+    .map((entry) => ({ ...entry.doc, distance: -entry.score }));
 }
 
 export async function search(
@@ -67,11 +131,15 @@ export async function search(
   filters: SearchFilters = {},
   topK = 5,
   tableName?: string,
-  searchQuery?: string
+  searchQuery?: string,
 ): Promise<SearchResult[]> {
   const pool = await getPool();
   const intent = extractQueryIntent(query);
   const table = tableName && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName) ? tableName : config.databaseTable;
+  const baseQuery = searchQuery ?? query;
+  const expandedQuery = expandQuery(query);
+  // For embedding, append bilingual synonyms to the enriched query
+  const embeddingQuery = expandedQuery !== query ? `${baseQuery} ${expandedQuery.replace(query, '').trim()}` : baseQuery;
 
   // -----------------------------------------------------------------------
   // Fast path: exact key lookup — bypass embedding entirely
@@ -79,7 +147,6 @@ export async function search(
   if (intent.isExactKeyQuery && intent.exactKey) {
     const client = await pool.connect();
     try {
-      // Try exact match first
       const conditions: string[] = [`key = $1`];
       const params: (string | number)[] = [intent.exactKey];
       let paramIdx = 2;
@@ -117,7 +184,6 @@ export async function search(
         }));
       }
 
-      // Fallback: partial key match (ILIKE) if exact fails
       const likeConditions: string[] = [`key ILIKE $1`];
       const likeParams: (string | number)[] = [`%${intent.exactKey}%`];
       let likeParamIdx = 2;
@@ -158,62 +224,114 @@ export async function search(
   }
 
   // -----------------------------------------------------------------------
-  // Standard path: vector search + optional rerank
+  // Hybrid search: Vector + Full-Text (tsvector) with RRF fusion
   // -----------------------------------------------------------------------
-  const candidatePool = intent.isEnumeration ? 200 : Math.max(topK * 8, 40);
+  const candidatePool = intent.isEnumeration ? 200 : Math.max(topK * 12, 60);
+  const vectorPool = Math.ceil(candidatePool * 0.6);
+  const ftsPool = Math.ceil(candidatePool * 0.4);
 
-  const embeddingQuery = searchQuery ?? query;
+  const { where: whereClause, params: whereParams, idx: paramIdx } = buildWhereClause(filters, intent, 1);
+
+  // --- Stage A: Vector search ---
   const embedding = await createEmbedding(embeddingQuery);
   const vectorLiteral = `[${embedding.join(',')}]`;
 
-  const conditions: string[] = [];
-  const params: (string | number)[] = [vectorLiteral];
-  let paramIdx = 2;
-
-  // Apply explicit filters
-  if (filters.type) {
-    conditions.push(`type = $${paramIdx++}`);
-    params.push(filters.type);
-  } else if (intent.inferredType) {
-    conditions.push(`type = $${paramIdx++}`);
-    params.push(intent.inferredType);
-  }
-
-  if (filters.faction) {
-    conditions.push(`metadata->>'faction' = $${paramIdx++}`);
-    params.push(filters.faction);
-  }
-  if (filters.mod_name) {
-    conditions.push(`metadata->>'mod_name' = $${paramIdx++}`);
-    params.push(filters.mod_name);
-  }
-  if (filters.weapon_class) {
-    conditions.push(`metadata->>'weapon_class' = $${paramIdx++}`);
-    params.push(filters.weapon_class);
-  }
-
-  // Apply content text filter extracted from query (e.g., class="3")
-  if (intent.contentPattern) {
-    conditions.push(`content ILIKE $${paramIdx++}`);
-    params.push(intent.contentPattern);
-  }
-
-  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-  const sql = `
+  const vectorSql = `
     SELECT doc_id, type, key, content, metadata,
-           embedding <=> $1::vector AS distance
+           embedding <=> $${paramIdx}::vector AS distance
     FROM ${table}
     ${whereClause}
-    ORDER BY embedding <=> $1::vector
-    LIMIT $${paramIdx}
+    ORDER BY embedding <=> $${paramIdx}::vector
+    LIMIT $${paramIdx + 1}
   `;
-  params.push(candidatePool);
+  const vectorParams = [...whereParams, vectorLiteral, vectorPool];
 
-  const client = await pool.connect();
-  let candidates: SearchResult[];
+  // --- Stage B: Full-text search (tsvector with ranking) ---
+  // Use plainto_tsquery for safe user input; combine with ILIKE fallback
+  const ftsWherePrefix = whereClause ? `${whereClause} AND` : 'WHERE';
+  const ftsTsquery = `plainto_tsquery('${FTS_CONFIG}', $${paramIdx})`;
+  const ftsSql = `
+    SELECT doc_id, type, key, content, metadata,
+           ts_rank_cd(fts, ${ftsTsquery}) AS fts_rank
+    FROM ${table}
+    ${ftsWherePrefix} fts @@ ${ftsTsquery}
+    ORDER BY ts_rank_cd(fts, ${ftsTsquery}) DESC
+    LIMIT $${paramIdx + 1}
+  `;
+  const ftsParams = [...whereParams.slice(0, paramIdx - 1), expandedQuery, ftsPool];
+
+  // --- Stage C: ILIKE fallback for term matching (catches partial keys/names) ---
+  // Uses expanded query (with bilingual synonyms) for ILIKE matching
+  const terms = extractSearchTerms(expandedQuery);
+  let ilikeResults: SearchResult[] = [];
+  if (terms.length > 0) {
+    const ilikeConditions: string[] = [];
+    const ilikeParams: (string | number)[] = [];
+    let ilikeIdx = 1;
+
+    if (filters.type) {
+      ilikeConditions.push(`type = $${ilikeIdx++}`);
+      ilikeParams.push(filters.type);
+    } else if (intent.inferredType) {
+      ilikeConditions.push(`type = $${ilikeIdx++}`);
+      ilikeParams.push(intent.inferredType);
+    }
+    if (filters.mod_name) {
+      ilikeConditions.push(`metadata->>'mod_name' = $${ilikeIdx++}`);
+      ilikeParams.push(filters.mod_name);
+    }
+
+    const termOrParts: string[] = [];
+    for (const t of terms) {
+      ilikeParams.push(`%${t}%`);
+      const p1 = ilikeIdx++;
+      ilikeParams.push(`%${t}%`);
+      const p2 = ilikeIdx++;
+      termOrParts.push(`(key ILIKE $${p1} OR content ILIKE $${p2})`);
+    }
+    if (termOrParts.length > 0) {
+      ilikeConditions.push(`(${termOrParts.join(' OR ')})`);
+    }
+
+    const ilikeWhere = ilikeConditions.length > 0 ? `WHERE ${ilikeConditions.join(' AND ')}` : '';
+    const ilikeSql = `
+      SELECT doc_id, type, key, content, metadata, 0.0 AS distance
+      FROM ${table}
+      ${ilikeWhere}
+      LIMIT $${ilikeIdx}
+    `;
+    ilikeParams.push(candidatePool);
+
+    const ilikeClient = await pool.connect();
+    try {
+      const ilikeRes = await ilikeClient.query(ilikeSql, ilikeParams);
+      ilikeResults = ilikeRes.rows.map((row) => ({
+        doc_id: row.doc_id,
+        type: row.type,
+        key: row.key,
+        content: row.content,
+        metadata: row.metadata,
+        distance: parseFloat(row.distance),
+      }));
+    } finally {
+      ilikeClient.release();
+    }
+  }
+
+  // Execute vector and FTS queries in parallel
+  const vectorClient = await pool.connect();
+  const ftsClient = await pool.connect();
+
+  let vectorResults: SearchResult[] = [];
+  let ftsResults: SearchResult[] = [];
+
   try {
-    const res = await client.query(sql, params);
-    candidates = res.rows.map((row) => ({
+    const [vRes, fRes] = await Promise.all([
+      vectorClient.query(vectorSql, vectorParams),
+      ftsClient.query(ftsSql, ftsParams).catch(() => ({ rows: [] })),
+    ]);
+
+    vectorResults = vRes.rows.map((row) => ({
       doc_id: row.doc_id,
       type: row.type,
       key: row.key,
@@ -221,11 +339,64 @@ export async function search(
       metadata: row.metadata,
       distance: parseFloat(row.distance),
     }));
+
+    ftsResults = (fRes as { rows: { doc_id: string; type: string; key: string; content: string; metadata: Record<string, unknown>; fts_rank: number }[] }).rows.map((row) => ({
+      doc_id: row.doc_id,
+      type: row.type as DocumentType,
+      key: row.key,
+      content: row.content,
+      metadata: row.metadata as SearchResult['metadata'],
+      distance: -row.fts_rank,
+    }));
   } finally {
-    client.release();
+    vectorClient.release();
+    ftsClient.release();
   }
 
+  // RRF fusion of vector, FTS, and ILIKE results
+  const rankedLists = [vectorResults, ftsResults, ilikeResults].filter((l) => l.length > 0);
+  let candidates: SearchResult[];
+
+  if (rankedLists.length <= 1) {
+    candidates = rankedLists[0] ?? vectorResults;
+  } else {
+    candidates = reciprocalRankFusion(rankedLists);
+  }
+
+  // Deduplicate by doc_id (in case same doc appears in multiple result sets)
+  const seen = new Set<string>();
+  candidates = candidates.filter((c) => {
+    if (seen.has(c.doc_id)) return false;
+    seen.add(c.doc_id);
+    return true;
+  });
+
   // Stage 2: rerank candidates for better precision
-  const reranked = await rerankCandidates(query, candidates, topK, searchQuery);
+  const rerankInput = candidates.slice(0, Math.min(candidates.length, candidatePool));
+  const reranked = await rerankCandidates(query, rerankInput, topK, searchQuery);
   return reranked;
+}
+
+/**
+ * Extract meaningful search terms from a query for ILIKE matching.
+ * Filters out stop words and very short tokens.
+ */
+function extractSearchTerms(query: string): string[] {
+  const stopWords = new Set([
+    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+    'should', 'may', 'might', 'can', 'shall', 'to', 'of', 'in', 'for',
+    'on', 'with', 'at', 'by', 'from', 'as', 'into', 'through', 'during',
+    'before', 'after', 'above', 'below', 'between', 'out', 'off', 'over',
+    'under', 'again', 'further', 'then', 'once', 'all', 'each', 'every',
+    'both', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor',
+    'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very',
+    '的', '了', '是', '在', '有', '和', '与', '个', '这', '那',
+    '什么', '怎么', '如何', '哪', '哪些', '多少', '是否', '能',
+  ]);
+
+  return query
+    .split(/[\s,，。！？、；：""''（）\[\]{}]+/)
+    .map((t) => t.trim().toLowerCase())
+    .filter((t) => t.length >= 2 && !stopWords.has(t));
 }

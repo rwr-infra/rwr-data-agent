@@ -2,7 +2,7 @@ import { config } from '../config/index.js';
 import type { SearchResult } from '../types/index.js';
 
 const RERANK_BATCH_SIZE = 50; // max docs per rerank call to stay within token budget
-const RERANK_DOC_TRUNCATE = 300; // chars per doc for reranking
+const RERANK_DOC_TRUNCATE = 800; // chars per doc for reranking
 
 interface RerankResultItem {
   index: number;

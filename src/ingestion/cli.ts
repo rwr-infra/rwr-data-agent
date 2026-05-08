@@ -6,6 +6,7 @@ import { parseXmlFile } from './xmlParser.js';
 import { parseAngelScriptFile } from './asParser.js';
 import { createEmbeddings } from './embeddings.js';
 import { storeDocuments, clearModDocuments, getExistingKeys } from './store.js';
+import { chunkDocuments } from './chunker.js';
 import { config, validateConfig } from '../config/index.js';
 import type { RWRDocument } from '../types/index.js';
 
@@ -75,19 +76,25 @@ async function main() {
 
   console.log(`Parsed ${parsedDocs.length} new documents.`);
 
-  if (parsedDocs.length === 0) {
+  // Split long documents into overlapping chunks for better embedding quality
+  const chunkedDocs = chunkDocuments(parsedDocs);
+  if (chunkedDocs.length !== parsedDocs.length) {
+    console.log(`Chunked into ${chunkedDocs.length} segments (from ${parsedDocs.length} documents).`);
+  }
+
+  if (chunkedDocs.length === 0) {
     console.log('Nothing new to ingest.');
     process.exit(0);
   }
 
   // Batch embeddings with delay between batches
-  for (let i = 0; i < parsedDocs.length; i += BATCH_SIZE) {
-    const batch = parsedDocs.slice(i, i + BATCH_SIZE);
+  for (let i = 0; i < chunkedDocs.length; i += BATCH_SIZE) {
+    const batch = chunkedDocs.slice(i, i + BATCH_SIZE);
     const contents = batch.map((d) => d.content);
-    console.log(`Embedding batch ${Math.floor(i / BATCH_SIZE) + 1} / ${Math.ceil(parsedDocs.length / BATCH_SIZE)} (${batch.length} docs)...`);
+    console.log(`Embedding batch ${Math.floor(i / BATCH_SIZE) + 1} / ${Math.ceil(chunkedDocs.length / BATCH_SIZE)} (${batch.length} docs)...`);
     const embeddings = await createEmbeddings(contents);
     await storeDocuments(batch, embeddings);
-    if (i + BATCH_SIZE < parsedDocs.length) {
+    if (i + BATCH_SIZE < chunkedDocs.length) {
       await new Promise((resolve) => setTimeout(resolve, BATCH_DELAY_MS));
     }
   }

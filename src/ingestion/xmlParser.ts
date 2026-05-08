@@ -611,17 +611,43 @@ function makeDoc(
   extraMetadata: Record<string, unknown> = {}
 ): RWRDocument {
   const content = buildContent(description, rawData);
+  const tags = buildMetadataTags(type, key, extraMetadata);
+  const fullContent = `${tags}\n${label}: ${key}\n${content}`;
   return {
     doc_id: '',
     type,
     key,
-    content: `${label}: ${key}\n${content}`,
+    content: fullContent,
     metadata: {
       mod_name: modName,
       file_path: filePath,
       ...extraMetadata,
     },
   };
+}
+
+function buildMetadataTags(
+  type: RWRDocument['type'],
+  key: string,
+  extraMetadata: Record<string, unknown>,
+): string {
+  const tags: string[] = [`[Type: ${type}]`, `[Key: ${key}]`];
+
+  const tagMappings: [string, string][] = [
+    ['weapon_class', 'Class'],
+    ['faction', 'Faction'],
+    ['name', 'Name'],
+    ['slot', 'Slot'],
+  ];
+
+  for (const [metaKey, tagLabel] of tagMappings) {
+    const value = extraMetadata[metaKey];
+    if (value !== undefined && value !== null && value !== '') {
+      tags.push(`[${tagLabel}: ${value}]`);
+    }
+  }
+
+  return tags.join(' ');
 }
 
 // ---------------------------------------------------------------------------
