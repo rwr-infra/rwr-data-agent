@@ -14,7 +14,7 @@ interface QueryIntent {
   isExactKeyQuery: boolean;
 }
 
-function extractQueryIntent(query: string): QueryIntent {
+export function extractQueryIntent(query: string): QueryIntent {
   const intent: QueryIntent = { isEnumeration: false, isExactKeyQuery: false };
 
   if (/有哪些|列出|所有|全部|是什么|what are|list all/i.test(query)) {
@@ -223,6 +223,9 @@ export async function search(
     }
   }
 
+  // For enumeration queries, ensure we return enough results
+  const effectiveTopK = intent.isEnumeration ? Math.max(topK, 30) : topK;
+
   // -----------------------------------------------------------------------
   // Hybrid search: Vector + Full-Text (tsvector) with RRF fusion
   // -----------------------------------------------------------------------
@@ -318,6 +321,65 @@ export async function search(
     }
   }
 
+  // --- Stage D: Key-pattern enumeration search (for "list all X" queries) ---
+  // Extracts a likely key fragment (e.g., "G36" → "g36") and does a direct
+  // ILIKE on the key column with type filter. This catches all variants that
+  // share a name prefix but might be missed by vector/FTS/term-ILIKE.
+  let keyPatternResults: SearchResult[] = [];
+  if (intent.isEnumeration) {
+    const keyPatterns = extractKeyPatterns(query);
+    if (keyPatterns.length > 0) {
+      const kpConditions: string[] = [];
+      const kpParams: (string | number)[] = [];
+      let kpIdx = 1;
+
+      if (filters.type) {
+        kpConditions.push(`type = $${kpIdx++}`);
+        kpParams.push(filters.type);
+      } else if (intent.inferredType) {
+        kpConditions.push(`type = $${kpIdx++}`);
+        kpParams.push(intent.inferredType);
+      }
+      if (filters.mod_name) {
+        kpConditions.push(`metadata->>'mod_name' = $${kpIdx++}`);
+        kpParams.push(filters.mod_name);
+      }
+
+      const kpOrParts = keyPatterns.map((p) => {
+        kpParams.push(`%${p}%`);
+        return `key ILIKE $${kpIdx++}`;
+      });
+      if (kpOrParts.length === 1) {
+        kpConditions.push(kpOrParts[0]);
+      } else {
+        kpConditions.push(`(${kpOrParts.join(' OR ')})`);
+      }
+
+      const kpWhere = kpConditions.length > 0 ? `WHERE ${kpConditions.join(' AND ')}` : '';
+      const kpSql = `
+        SELECT doc_id, type, key, content, metadata, 0.0 AS distance
+        FROM ${table}
+        ${kpWhere}
+        LIMIT 200
+      `;
+
+      const kpClient = await pool.connect();
+      try {
+        const kpRes = await kpClient.query(kpSql, kpParams);
+        keyPatternResults = kpRes.rows.map((row) => ({
+          doc_id: row.doc_id,
+          type: row.type,
+          key: row.key,
+          content: row.content,
+          metadata: row.metadata,
+          distance: parseFloat(row.distance),
+        }));
+      } finally {
+        kpClient.release();
+      }
+    }
+  }
+
   // Execute vector and FTS queries in parallel
   const vectorClient = await pool.connect();
   const ftsClient = await pool.connect();
@@ -353,8 +415,8 @@ export async function search(
     ftsClient.release();
   }
 
-  // RRF fusion of vector, FTS, and ILIKE results
-  const rankedLists = [vectorResults, ftsResults, ilikeResults].filter((l) => l.length > 0);
+  // RRF fusion of vector, FTS, ILIKE, and key-pattern results
+  const rankedLists = [vectorResults, ftsResults, ilikeResults, keyPatternResults].filter((l) => l.length > 0);
   let candidates: SearchResult[];
 
   if (rankedLists.length <= 1) {
@@ -373,7 +435,7 @@ export async function search(
 
   // Stage 2: rerank candidates for better precision
   const rerankInput = candidates.slice(0, Math.min(candidates.length, candidatePool));
-  const reranked = await rerankCandidates(query, rerankInput, topK, searchQuery);
+  const reranked = await rerankCandidates(query, rerankInput, effectiveTopK, searchQuery);
   return reranked;
 }
 
@@ -399,4 +461,21 @@ function extractSearchTerms(query: string): string[] {
     .split(/[\s,，。！？、；：""''（）\[\]{}]+/)
     .map((t) => t.trim().toLowerCase())
     .filter((t) => t.length >= 2 && !stopWords.has(t));
+}
+
+/**
+ * Extract likely key patterns from an enumeration query.
+ * For "G36" → ["g36"], for "M16A4" → ["m16a4"], for "G36 MOD3" → ["g36", "m16a4"].
+ * Picks out alphanumeric tokens that look like game item identifiers.
+ */
+function extractKeyPatterns(query: string): string[] {
+  const tokens = query.split(/[\s,，。！？、；：""''（）\[\]{}]+/);
+  const patterns: string[] = [];
+  for (const token of tokens) {
+    const lower = token.toLowerCase();
+    if (/[a-z]+\d+/.test(lower) || /\d+[a-z]+/.test(lower)) {
+      patterns.push(lower);
+    }
+  }
+  return patterns;
 }

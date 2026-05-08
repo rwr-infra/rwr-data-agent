@@ -4,6 +4,7 @@ import { config, validateConfig } from '../../config/index.js';
 import { search } from '../../retrieval/search.js';
 import { SYSTEM_PROMPT, buildUserPrompt } from '../../retrieval/prompt.js';
 import { buildSearchQuery } from '../../retrieval/queryRewrite.js';
+import { extractQueryIntent } from '../../retrieval/search.js';
 import type { ChatCompletionRequest } from '../../types/index.js';
 
 let llmClient: OpenAI | null = null;
@@ -68,8 +69,10 @@ export async function chatRoutes(app: FastifyInstance) {
       if (enrichedQuery !== query) {
         console.log(`[chat] Query enriched: "${truncatedQuery}" → "${enrichedQuery.length > 120 ? enrichedQuery.slice(0, 120) + '…' : enrichedQuery}"`);
       }
-      results = await search(query, {}, 5, body.table, enrichedQuery);
-      console.log(`[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (table=${body.table ?? config.databaseTable})`);
+      const searchIntent = extractQueryIntent(query);
+      const topK = searchIntent.isEnumeration ? 30 : 5;
+      results = await search(query, {}, topK, body.table, enrichedQuery);
+      console.log(`[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (topK=${topK}, table=${body.table ?? config.databaseTable})`);
     } catch (err) {
       console.error(`[chat] Search failed: ${(err as Error).message}`);
       return reply.status(500).send({ error: { message: 'Search failed', type: 'internal_error' } });
