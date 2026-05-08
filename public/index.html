@@ -372,9 +372,9 @@
         const outTokens = usage?.completion_tokens ?? '-';
         if (usage) {
           const reportedTotal = usage.total_tokens ?? ((usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0));
-          contextUsed = Math.max(reportedTotal, estimateHistoryTokens());
+          contextUsed = Math.max(contextUsed, reportedTotal, estimateHistoryTokens());
         } else {
-          contextUsed = estimateHistoryTokens();
+          contextUsed = Math.max(contextUsed, estimateHistoryTokens());
         }
         updateContextBar();
         addMeta(t().metaFormat(ttfb, totalTime, inTokens, outTokens));
