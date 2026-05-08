@@ -370,7 +370,10 @@
         const inTokens = usage?.prompt_tokens ?? '-';
         const outTokens = usage?.completion_tokens ?? '-';
         if (usage) {
-          contextUsed = usage.total_tokens ?? ((usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0));
+          const reportedTotal = usage.total_tokens ?? ((usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0));
+          contextUsed = Math.max(reportedTotal, estimateHistoryTokens());
+        } else {
+          contextUsed = estimateHistoryTokens();
         }
         updateContextBar();
         addMeta(t().metaFormat(ttfb, totalTime, inTokens, outTokens));
