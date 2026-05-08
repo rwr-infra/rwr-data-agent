@@ -17,9 +17,11 @@ npm run dev              # tsx --watch src/api/server.ts
 npm run build            # tsc → dist/
 npm start                # node dist/api/server.js
 npm run db:migrate       # raw SQL init (pgvector + table + indexes)
-npm run ingest           # CLI ingestion (see below)
-npm run lint             # ESLint (no config file, uses defaults)
-npm run format           # Prettier (no config file, uses defaults)
+npm run extract           # CLI extraction to JSON (see below)
+npm run embed             # CLI embed JSON to database (see below)
+npm run ingest            # CLI extraction + embed in one step (legacy)
+npm run lint              # ESLint (no config file, uses defaults)
+npm run format            # Prettier (no config file, uses defaults)
 ```
 
 ## Running Locally (Required Order)
@@ -27,10 +29,42 @@ npm run format           # Prettier (no config file, uses defaults)
 1. `docker compose up -d` — Postgres with pgvector
 2. `cp .env.example .env` — fill in `DATABASE_URL`, `SILICONFLOW_API_KEY`, `LLM_API_KEY`
 3. `npm run db:migrate` — creates table, extension, HNSW/GIN indexes
-4. `npm run ingest -- --source ./data --mod GFL_Castling`
-5. `npm run dev`
+4. `npm run extract -- --source ./data --mod GFL_Castling` — extract data to JSON for review
+5. `npm run embed -- --input ./extracted-documents.json` — embed JSON into database
+6. `npm run dev`
 
-## Ingestion CLI
+## Extract CLI (Step 1: Parse → Structured JSON)
+
+```bash
+npm run extract -- --source ./data --mod GFL_Castling
+npm run extract -- --source ./data --mod GFL_Castling --output ./my-data.json
+npm run extract -- --source ./data --mod GFL_Castling --languages ./custom/path/languages
+```
+
+Output is a JSON file (`extracted-documents.json` by default) containing **structured documents** with:
+- `type`, `key`, `label` — document identity
+- `description` — natural language description generated from attributes
+- `raw_text` — raw text representation
+- `data` — the full parsed/resolved XML structure as JSON (for verifying inheritance, nested elements, multi-state items, etc.)
+- `flat_attributes` — flattened key-value pairs for quick reference
+- `metadata` — extra fields (faction, weapon_class, etc.)
+- `i18n` — localized names resolved from translation files (e.g. `{"cn": {"GK-Adeline": "Adeline 艾德琳"}}`)
+
+The extract CLI automatically discovers the `languages/` directory inside the source path or its subdirectories. Translation files (`<translation><text key="..." text="..."/>`) are loaded and matched against document `name` attributes to add localized names.
+
+Review/edit this JSON before embedding. The `data` field contains the XML-as-JSON structure so you can verify inheritance resolution, nested elements, and multi-state items (e.g. armor transform chains).
+
+## Embed CLI (Step 2: JSON → Database)
+
+```bash
+npm run embed -- --input ./extracted-documents.json
+npm run embed -- --input ./extracted-documents.json --clear   # wipe mod first
+npm run embed -- --input ./extracted-documents.json --resume  # skip existing
+npm run embed -- --input ./extracted-documents.json --filter-type weapon  # only weapons
+npm run embed -- --input ./extracted-documents.json --limit 10  # embed first 10 docs (testing)
+```
+
+## Ingestion CLI (Legacy: Combined Extract + Embed)
 
 ```bash
 npm run ingest -- --source ./data --mod GFL_Castling
@@ -74,6 +108,7 @@ npm run ingest -- --source ./data --mod GFL_Castling --resume  # skip existing
 - **Query intent is hardcoded in `src/retrieval/search.ts`**: Chinese/English regex patterns infer document type (`weapon`, `soldier`, `vehicle`, etc.), detect enumeration requests, and extract `class="N"` filters.
 - **External system prompts are dropped**: `chat.ts` filters out all `role: 'system'` messages from the request and enforces `SYSTEM_PROMPT` server-side.
 - **Single-turn only**: no session history is maintained. Only the last user message is used for RAG.
+- **Embedding content uses compact format**: `structuredDocToRWRDocument` produces content from `description` + `flat_attributes` + `i18n`, omitting the verbose `raw_text` to save ~60% storage. The full XML structure is preserved in the extracted JSON `data` field for review.
 
 ## Environment & Config
 

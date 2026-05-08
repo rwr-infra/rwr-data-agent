@@ -75,20 +75,49 @@ npm run db:migrate
 
 ### 5. 导入数据
 
+数据导入分为两步：**提取**（解析 XML/游戏文件 → 结构化 JSON）然后**嵌入**（JSON → 向量数据库）。你可以在两步之间审查和编辑提取出的 JSON。
+
+#### 第一步：提取为 JSON
+
+```bash
+npm run extract -- --source ./data --mod GFL_Castling
+```
+
+生成 `extracted-documents.json`，包含结构化文档：
+- `type`、`key`、`label` — 文档标识
+- `description` — 自然语言描述
+- `data` — 完整的解析/继承解析后 XML 结构（可校对继承链、嵌套元素、多状态物品）
+- `flat_attributes` — 扁平化键值对
+- `i18n` — 从翻译文件解析的本地化名称（如 `{"cn": {"GK-Adeline": "Adeline 艾德琳"}}`）
+
+选项：
+```bash
+npm run extract -- --source ./data --mod GFL_Castling --output ./my-data.json      # 自定义输出路径
+npm run extract -- --source ./data --mod GFL_Castling --languages ./path/to/languages  # 自定义语言目录
+```
+
+#### 第二步：嵌入到数据库
+
+```bash
+npm run embed -- --input ./extracted-documents.json
+```
+
+选项：
+```bash
+npm run embed -- --input ./extracted-documents.json --clear           # 清空该 mod 旧数据
+npm run embed -- --input ./extracted-documents.json --resume          # 跳过已入库文档
+npm run embed -- --input ./extracted-documents.json --filter-type weapon  # 仅嵌入武器
+npm run embed -- --input ./extracted-documents.json --limit 10        # 仅嵌入前 10 条（测试用）
+```
+
+#### 旧方式：一步导入
+
+`ingest` 命令仍然可用，合并提取和嵌入为一步：
+
 ```bash
 npm run ingest -- --source ./data --mod GFL_Castling
-```
-
-如需清除该 mod 的旧数据：
-
-```bash
-npm run ingest -- --source ./data --mod GFL_Castling --clear
-```
-
-如需跳过已入库的文档：
-
-```bash
-npm run ingest -- --source ./data --mod GFL_Castling --resume
+npm run ingest -- --source ./data --mod GFL_Castling --clear   # 清空旧数据
+npm run ingest -- --source ./data --mod GFL_Castling --resume  # 跳过已有
 ```
 
 ### 6. 启动 API 服务
@@ -164,25 +193,38 @@ curl -N http://localhost:3000/v1/chat/completions \
 
 | 扩展名 | 类型 | 解析器 |
 |--------|------|--------|
-| `.weapon`, `.projectile`, `.call`, `.character`, `.xml` | XML | 通用标签驱动解析器 |
+| `.weapon`, `.projectile`, `.call`, `.character`, `.xml` | XML | 通用标签驱动解析器（含继承解析） |
 | `.as` | AngelScript | 关键字/值提取器 |
 | `.ai`, `.resources`, `.name`, `.text_lines` | 纯文本 | 回退文本分块 |
 
-### Document 结构
+### 数据管线
+
+```
+XML/游戏文件 ──extract──▶ 结构化 JSON ──embed──▶ 向量数据库
+                   │                        │
+             （审查和编辑）           （分块 → 嵌入 → 存储）
+                   │
+             i18n 翻译解析
+           （语言目录下的翻译文件）
+```
+
+提取出的 JSON 包含完整的解析 XML 结构（`data` 字段）、扁平化属性（`flat_attributes`）和解析后的本地化名称（`i18n`）。可编辑此文件修正解析问题后再嵌入。
+
+### StructuredDocument 结构
 
 ```ts
-interface RWRDocument {
-  doc_id: string;
-  type: 'weapon' | 'soldier' | 'faction' | 'script_chunk' | 'projectile' | 'vehicle' | 'call' | 'character';
+interface StructuredDocument {
+  type: DocumentType;
   key: string;
-  content: string;    // 用于 embedding 的完整文本
-  metadata: {
-    faction?: string;
-    mod_name: string;
-    weapon_class?: string;
-    file_path: string;
-    [key: string]: unknown;
-  };
+  label: string;
+  source_file: string;
+  mod_name: string;
+  description: string;       // 自然语言描述
+  raw_text: string;           // 原始文本表示
+  data: unknown;              // 完整解析后的 XML JSON 结构
+  flat_attributes: Record<string, unknown>;  // 扁平化属性
+  metadata: Record<string, unknown>;
+  i18n?: Record<string, Record<string, string>>;  // 本地化名称
 }
 ```
 
@@ -204,6 +246,18 @@ npm run dev
 # 构建
 npm run build
 
+# 数据库初始化
+npm run db:migrate
+
+# 提取数据为 JSON
+npm run extract
+
+# 嵌入 JSON 到向量数据库
+npm run embed
+
+# 旧方式：一步导入
+npm run ingest
+
 # 格式化
 npm run format
 
@@ -224,8 +278,11 @@ docker compose up -d
 # 初始化数据库（只需执行一次）
 docker compose run --rm app npm run db:migrate:prod
 
-# 导入数据
-docker compose run --rm app npm run ingest:prod -- --source /app/data --mod GFL_Castling
+# 提取数据（第一步）
+docker compose run --rm app npm run extract:prod -- --source /app/data --mod GFL_Castling
+
+# 嵌入到数据库（第二步）
+docker compose run --rm app npm run embed:prod -- --input /app/extracted-documents.json
 
 # 查看日志
 docker compose logs -f app
@@ -269,7 +326,8 @@ docker compose down -v
 
 - **强制系统提示词**：请求中的外部 `system` 消息会被忽略。服务端会注入内置的 RAG 系统提示词，防止 prompt injection 并确保行为一致。
 - **单轮问答**：不维护历史会话。
-- **Ingestion 为手动一次性 CLI 操作**：无后台调度。
+- **数据导入分两步**：先 `extract` 提取为结构化 JSON（可审查编辑），再 `embed` 嵌入向量数据库。旧版 `ingest` 命令仍可用。
+- **多语言支持**：提取流程自动扫描 `languages/` 目录，将翻译文件中的本地化名称解析到 `i18n` 字段，嵌入时会包含中文名供中文查询命中。
 - **Embedding 维度**：默认 **1024**（`BAAI/bge-m3`），可通过 `EMBEDDING_DIMENSION` 调整。若切换模型导致维度变化，必须先 `docker compose down -v` 清空数据库后重新迁移。
 - **表名隔离**：使用 `DATABASE_TABLE` 可在不改代码的情况下区分 dev / staging / prod 环境。
 

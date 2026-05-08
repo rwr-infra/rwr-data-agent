@@ -1,7 +1,7 @@
 import { XMLParser } from 'fast-xml-parser';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import type { RWRDocument } from '../types/index.js';
+import type { RWRDocument, StructuredDocument, DocumentType } from '../types/index.js';
 
 const parser = new XMLParser({
   ignoreAttributes: false,
@@ -174,10 +174,6 @@ function extractRootElement(parsed: unknown): Record<string, unknown> {
   return obj;
 }
 
-/**
- * Recursively extract simple key-value text from a parsed XML object.
- * Limits depth to avoid massive nested output from model files.
- */
 function extractText(obj: unknown, depth = 0): string {
   if (depth > 3) return '';
   if (obj === null || obj === undefined) return '';
@@ -217,11 +213,6 @@ function extractKey(attrs: Record<string, unknown>, fallback: string): string {
   return (attrs['@_key'] ?? attrs['@_name'] ?? attrs['@_filename'] ?? fallback) as string;
 }
 
-// ---------------------------------------------------------------------------
-// Flatten XML parsed structure into a single-level attribute map.
-// Example: { "@_key": "g36", "specification": { "@_class": "3" } }
-//   -> { "key": "g36", "class": "3" }
-// ---------------------------------------------------------------------------
 function flattenAttributes(obj: unknown, prefix = ''): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   if (obj === null || obj === undefined) return result;
@@ -264,7 +255,7 @@ function getFlatValue(attrs: Record<string, unknown>, ...keys: string[]): string
 }
 
 // ---------------------------------------------------------------------------
-// Description builders — convert structured attributes into natural language
+// Description builders
 // ---------------------------------------------------------------------------
 
 function describeWeapon(attrs: Record<string, unknown>, resolved?: Record<string, unknown>): string {
@@ -600,34 +591,8 @@ function buildContent(
   return sections.join('\n\n');
 }
 
-function makeDoc(
-  type: RWRDocument['type'],
-  key: string,
-  label: string,
-  description: string,
-  rawData: string,
-  filePath: string,
-  modName: string,
-  extraMetadata: Record<string, unknown> = {}
-): RWRDocument {
-  const content = buildContent(description, rawData);
-  const tags = buildMetadataTags(type, key, extraMetadata);
-  const fullContent = `${tags}\n${label}: ${key}\n${content}`;
-  return {
-    doc_id: '',
-    type,
-    key,
-    content: fullContent,
-    metadata: {
-      mod_name: modName,
-      file_path: filePath,
-      ...extraMetadata,
-    },
-  };
-}
-
 function buildMetadataTags(
-  type: RWRDocument['type'],
+  type: DocumentType,
   key: string,
   extraMetadata: Record<string, unknown>,
 ): string {
@@ -651,9 +616,93 @@ function buildMetadataTags(
 }
 
 // ---------------------------------------------------------------------------
+// StructuredDocument builder
+// ---------------------------------------------------------------------------
+function makeStructuredDoc(
+  type: DocumentType,
+  key: string,
+  label: string,
+  description: string,
+  rawText: string,
+  filePath: string,
+  modName: string,
+  data: unknown,
+  flatAttributes: Record<string, unknown>,
+  extraMetadata: Record<string, unknown> = {},
+): StructuredDocument {
+  return {
+    type,
+    key,
+    label,
+    source_file: filePath,
+    mod_name: modName,
+    description,
+    raw_text: rawText,
+    data,
+    flat_attributes: flatAttributes,
+    metadata: extraMetadata,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Convert StructuredDocument → RWRDocument (for embedding)
+// ---------------------------------------------------------------------------
+function formatFlatAttributes(attrs: Record<string, unknown>): string {
+  const entries = Object.entries(attrs);
+  if (entries.length === 0) return '';
+  const lines: string[] = [];
+  for (const [k, v] of entries) {
+    if (v !== undefined && v !== null && v !== '') {
+      lines.push(`${k}: ${v}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+export function structuredDocToRWRDocument(doc: StructuredDocument): RWRDocument {
+  const sections: string[] = [];
+
+  if (doc.description.trim()) {
+    sections.push(`Description: ${doc.description.trim()}`);
+  }
+
+  const attrsText = formatFlatAttributes(doc.flat_attributes);
+  if (attrsText) {
+    sections.push(`Attributes:\n${attrsText}`);
+  }
+
+  if (doc.i18n && Object.keys(doc.i18n).length > 0) {
+    const lines: string[] = [];
+    for (const [lang, translations] of Object.entries(doc.i18n)) {
+      const entries = Object.entries(translations)
+        .map(([k, v]) => `${k} → ${v}`)
+        .join('; ');
+      lines.push(`[${lang}] ${entries}`);
+    }
+    sections.push(`Localized Names: ${lines.join(' | ')}`);
+  }
+
+  const content = sections.join('\n\n');
+  const tags = buildMetadataTags(doc.type, doc.key, doc.metadata);
+  const fullContent = `${tags}\n${doc.label}: ${doc.key}\n${content}`;
+
+  return {
+    doc_id: '',
+    type: doc.type,
+    key: doc.key,
+    content: fullContent,
+    metadata: {
+      mod_name: doc.mod_name,
+      file_path: doc.source_file,
+      ...doc.metadata,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Call files (<calls><call>...</call></calls>)
 // ---------------------------------------------------------------------------
-export async function parseCallFile(filePath: string, modName: string): Promise<RWRDocument[]> {
+export async function parseCallFile(filePath: string, modName: string): Promise<StructuredDocument[]> {
   const content = await fs.readFile(filePath, 'utf-8');
   const parsed = parser.parse(content);
   const rawCalls = ensureArray(parsed.calls?.call);
@@ -666,7 +715,7 @@ export async function parseCallFile(filePath: string, modName: string): Promise<
     const key = extractKey(attrs, `call_${i}`);
     const description = describeCall(flatAttrs);
     const raw = extractText(c, 0);
-    return makeDoc('call', key, 'Call', description, raw, filePath, modName, {
+    return makeStructuredDoc('call', key, 'Call', description, raw, filePath, modName, c, flatAttrs, {
       name: attrs['@_name'],
       initiation_comment1: attrs['@_initiation_comment1'],
     });
@@ -676,17 +725,15 @@ export async function parseCallFile(filePath: string, modName: string): Promise<
 // ---------------------------------------------------------------------------
 // Faction XML files that contain <soldier> definitions
 // ---------------------------------------------------------------------------
-export async function parseFactionXml(filePath: string, modName: string): Promise<RWRDocument[]> {
+export async function parseFactionXml(filePath: string, modName: string): Promise<StructuredDocument[]> {
   const content = await fs.readFile(filePath, 'utf-8');
   const parsed = parser.parse(content);
-  const docs: RWRDocument[] = [];
+  const docs: StructuredDocument[] = [];
 
-  // Extract faction-level metadata (if root is <faction>)
   if (parsed.faction) {
     const factionAttrs = parsed.faction as Record<string, unknown>;
     const factionName = extractKey(factionAttrs, path.basename(filePath, '.xml'));
 
-    // Each <soldier> inside a faction becomes its own document
     const soldiers = ensureArray(factionAttrs['soldier']);
     for (const s of soldiers) {
       const sAttrs = (s ?? {}) as Record<string, unknown>;
@@ -694,7 +741,7 @@ export async function parseFactionXml(filePath: string, modName: string): Promis
       const soldierName = extractKey(sAttrs, 'unknown_soldier');
       const description = describeSoldier(flatAttrs);
       const raw = extractText(s, 0);
-      docs.push(makeDoc('soldier', soldierName, 'Soldier', description, raw, filePath, modName, {
+      docs.push(makeStructuredDoc('soldier', soldierName, 'Soldier', description, raw, filePath, modName, s, flatAttrs, {
         faction: factionName,
         spawn_score: sAttrs['@_spawn_score'],
         copy_from: sAttrs['@_copy_from'],
@@ -702,22 +749,20 @@ export async function parseFactionXml(filePath: string, modName: string): Promis
       }));
     }
 
-    // If no soldiers found, index the whole faction as a single doc
     if (soldiers.length === 0) {
       const flatAttrs = flattenAttributes(parsed.faction);
       const description = describeSoldier(flatAttrs);
       const raw = extractText(parsed.faction, 0);
-      docs.push(makeDoc('faction', factionName, 'Faction', description, raw, filePath, modName));
+      docs.push(makeStructuredDoc('faction', factionName, 'Faction', description, raw, filePath, modName, parsed.faction, flatAttrs));
     }
   }
 
-  // all_factions.xml style: <factions><faction file="..."/></factions>
   if (parsed.factions?.faction) {
     const factions = ensureArray(parsed.factions.faction);
     for (const f of factions) {
       const fAttrs = (f ?? {}) as Record<string, unknown>;
       const factionFile = (fAttrs['@_file'] ?? 'unknown') as string;
-      docs.push(makeDoc('faction', factionFile, 'Faction reference', '', `file: ${factionFile}`, filePath, modName));
+      docs.push(makeStructuredDoc('faction', factionFile, 'Faction reference', '', `file: ${factionFile}`, filePath, modName, f, flattenAttributes(f)));
     }
   }
 
@@ -727,26 +772,26 @@ export async function parseFactionXml(filePath: string, modName: string): Promis
 // ---------------------------------------------------------------------------
 // Character files
 // ---------------------------------------------------------------------------
-export async function parseCharacterFile(filePath: string, modName: string): Promise<RWRDocument[]> {
+export async function parseCharacterFile(filePath: string, modName: string): Promise<StructuredDocument[]> {
   const content = await fs.readFile(filePath, 'utf-8');
   const parsed = parser.parse(content);
   const flatAttrs = flattenAttributes(parsed);
   const description = describeCharacter(flatAttrs);
   const raw = extractText(parsed, 0);
   const key = path.basename(filePath, '.character');
-  return [makeDoc('character', key, 'Character', description, raw, filePath, modName)];
+  return [makeStructuredDoc('character', key, 'Character', description, raw, filePath, modName, parsed, flatAttrs)];
 }
 
 // ---------------------------------------------------------------------------
 // Carry item files (<carry_items><carry_item>...</carry_item></carry_items>)
 // ---------------------------------------------------------------------------
-export async function parseCarryItemFile(filePath: string, modName: string): Promise<RWRDocument[]> {
+export async function parseCarryItemFile(filePath: string, modName: string): Promise<StructuredDocument[]> {
   const content = await fs.readFile(filePath, 'utf-8');
   const parsed = parser.parse(content);
   const carryItems = ensureArray(parsed.carry_items?.carry_item);
   const sourceDir = path.dirname(filePath);
 
-  const docs: RWRDocument[] = [];
+  const docs: StructuredDocument[] = [];
   for (let i = 0; i < carryItems.length; i++) {
     const ci = (carryItems[i] ?? {}) as Record<string, unknown>;
     const resolved = await resolveInheritance(ci, sourceDir);
@@ -754,7 +799,7 @@ export async function parseCarryItemFile(filePath: string, modName: string): Pro
     const key = extractKey(ci, `carry_item_${i}`);
     const description = describeCarryItem(flatAttrs, resolved);
     const raw = extractText(resolved, 0);
-    docs.push(makeDoc('carry_item', key, 'Carry Item', description, raw, filePath, modName, {
+    docs.push(makeStructuredDoc('carry_item', key, 'Carry Item', description, raw, filePath, modName, resolved, flatAttrs, {
       name: ci['@_name'] ?? resolved['@_name'],
       slot: ci['@_slot'] ?? resolved['@_slot'],
     }));
@@ -765,15 +810,13 @@ export async function parseCarryItemFile(filePath: string, modName: string): Pro
 // ---------------------------------------------------------------------------
 // Generic XML dispatcher
 // ---------------------------------------------------------------------------
-export async function parseXmlFile(filePath: string, modName: string): Promise<RWRDocument[]> {
+export async function parseXmlFile(filePath: string, modName: string): Promise<StructuredDocument[]> {
   const ext = path.extname(filePath).toLowerCase();
 
-  // .call files always use call parser
   if (ext === '.call') {
     return parseCallFile(filePath, modName);
   }
 
-  // .character files
   if (ext === '.character') {
     return parseCharacterFile(filePath, modName);
   }
@@ -781,17 +824,14 @@ export async function parseXmlFile(filePath: string, modName: string): Promise<R
   const content = await fs.readFile(filePath, 'utf-8');
   const parsed = parser.parse(content);
 
-  // If root contains <call> tags (e.g., all_calls.xml)
   if (parsed.calls?.call) {
     return parseCallFile(filePath, modName);
   }
 
-  // If root is <faction> or <factions> (real faction data with soldiers)
   if (parsed.faction || parsed.factions) {
     return parseFactionXml(filePath, modName);
   }
 
-  // If root contains <soldier> directly
   if (parsed.soldier) {
     const soldiers = ensureArray(parsed.soldier);
     return soldiers.map((s: unknown, i: number) => {
@@ -800,15 +840,14 @@ export async function parseXmlFile(filePath: string, modName: string): Promise<R
       const key = extractKey(attrs, `soldier_${i}`);
       const description = describeSoldier(flatAttrs);
       const raw = extractText(s, 0);
-      return makeDoc('soldier', key, 'Soldier', description, raw, filePath, modName);
+      return makeStructuredDoc('soldier', key, 'Soldier', description, raw, filePath, modName, s, flatAttrs);
     });
   }
 
-  // If root contains <weapon> tags
   if (parsed.weapons?.weapon || parsed.weapon) {
     const weapons = ensureArray(parsed.weapons?.weapon ?? parsed.weapon);
     const sourceDir = path.dirname(filePath);
-    const docs: RWRDocument[] = [];
+    const docs: StructuredDocument[] = [];
     for (let i = 0; i < weapons.length; i++) {
       const w = (weapons[i] ?? {}) as Record<string, unknown>;
       const resolved = await resolveInheritance(w, sourceDir);
@@ -816,19 +855,17 @@ export async function parseXmlFile(filePath: string, modName: string): Promise<R
       const key = extractKey(w, `weapon_${i}`);
       const description = describeWeapon(flatAttrs, resolved);
       const raw = extractText(resolved, 0);
-      docs.push(makeDoc('weapon', key, 'Weapon', description, raw, filePath, modName, {
+      docs.push(makeStructuredDoc('weapon', key, 'Weapon', description, raw, filePath, modName, resolved, flatAttrs, {
         weapon_class: w['@_weapon_class'] ?? w['@_class'] ?? resolved['@_weapon_class'] ?? resolved['@_class'],
       }));
     }
     return docs;
   }
 
-  // If root contains <carry_item> tags (plural wrapper)
   if (parsed.carry_items?.carry_item) {
     return parseCarryItemFile(filePath, modName);
   }
 
-  // If root is a single <carry_item> (no wrapper)
   if (parsed.carry_item) {
     const sourceDir = path.dirname(filePath);
     const ci = (parsed.carry_item ?? {}) as Record<string, unknown>;
@@ -837,13 +874,12 @@ export async function parseXmlFile(filePath: string, modName: string): Promise<R
     const key = extractKey(ci, path.basename(filePath, ext));
     const description = describeCarryItem(flatAttrs, resolved);
     const raw = extractText(resolved, 0);
-    return [makeDoc('carry_item', key, 'Carry Item', description, raw, filePath, modName, {
+    return [makeStructuredDoc('carry_item', key, 'Carry Item', description, raw, filePath, modName, resolved, flatAttrs, {
       name: ci['@_name'] ?? resolved['@_name'],
       slot: ci['@_slot'] ?? resolved['@_slot'],
     })];
   }
 
-  // If root contains <vehicle> tags
   if (parsed.vehicles?.vehicle || parsed.vehicle) {
     const vehicles = ensureArray(parsed.vehicles?.vehicle ?? parsed.vehicle);
     return vehicles.map((v: unknown, i: number) => {
@@ -852,11 +888,10 @@ export async function parseXmlFile(filePath: string, modName: string): Promise<R
       const key = extractKey(attrs, `vehicle_${i}`);
       const description = describeVehicle(flatAttrs);
       const raw = extractText(v, 0);
-      return makeDoc('vehicle', key, 'Vehicle', description, raw, filePath, modName);
+      return makeStructuredDoc('vehicle', key, 'Vehicle', description, raw, filePath, modName, v, flatAttrs);
     });
   }
 
-  // If root contains <projectile> tags
   if (parsed.projectiles?.projectile || parsed.projectile) {
     const projectiles = ensureArray(parsed.projectiles?.projectile ?? parsed.projectile);
     return projectiles.map((p: unknown, i: number) => {
@@ -865,14 +900,13 @@ export async function parseXmlFile(filePath: string, modName: string): Promise<R
       const key = extractKey(attrs, `projectile_${i}`);
       const description = describeProjectile(flatAttrs);
       const raw = extractText(p, 0);
-      return makeDoc('projectile', key, 'Projectile', description, raw, filePath, modName);
+      return makeStructuredDoc('projectile', key, 'Projectile', description, raw, filePath, modName, p, flatAttrs);
     });
   }
 
-  // Generic fallback: index the whole XML as one document
   const flatAttrs = flattenAttributes(parsed);
   const description = `This is an XML configuration file.`;
   const raw = extractText(parsed, 0);
   const key = path.basename(filePath, ext);
-  return [makeDoc('script_chunk', key, 'XML Document', description, raw, filePath, modName)];
+  return [makeStructuredDoc('script_chunk', key, 'XML Document', description, raw, filePath, modName, parsed, flatAttrs)];
 }

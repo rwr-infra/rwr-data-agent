@@ -1,6 +1,6 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import type { RWRDocument } from '../types/index.js';
+import type { StructuredDocument } from '../types/index.js';
 
 interface ParsedSoldier {
   key: string;
@@ -91,9 +91,7 @@ function describeSoldierStats(stats: Record<string, string | number>): string {
   return parts.join(' ');
 }
 
-function soldierToText(s: ParsedSoldier): string {
-  const description = describeSoldierStats(s.stats);
-
+function soldierToRawText(s: ParsedSoldier): string {
   const rawLines: string[] = [`Soldier class: ${s.key}`];
   if (Object.keys(s.stats).length) {
     rawLines.push('Stats:');
@@ -107,43 +105,39 @@ function soldierToText(s: ParsedSoldier): string {
   if (s.behaviors.length) {
     rawLines.push(`Behaviors:\n${s.behaviors.join('\n')}`);
   }
-  const raw = rawLines.join('\n');
-
-  const sections: string[] = [];
-  if (description) sections.push(`Description: ${description}`);
-  if (raw) sections.push(`Raw Data:\n${raw}`);
-  return sections.join('\n\n');
+  return rawLines.join('\n');
 }
 
-export async function parseAngelScriptFile(filePath: string, modName: string): Promise<RWRDocument[]> {
+export async function parseAngelScriptFile(filePath: string, modName: string): Promise<StructuredDocument[]> {
   const content = await fs.readFile(filePath, 'utf-8');
   const base = path.basename(filePath, '.as');
 
   const soldiers = extractSoldierBlocks(content);
   if (soldiers.length > 0) {
     return soldiers.map((s) => ({
-      doc_id: '',
       type: 'soldier' as const,
       key: s.key,
-      content: soldierToText(s),
-      metadata: {
-        mod_name: modName,
-        file_path: filePath,
-        ...s.stats,
-        weapons: s.weapons,
-      },
+      label: 'Soldier',
+      source_file: filePath,
+      mod_name: modName,
+      description: describeSoldierStats(s.stats),
+      raw_text: soldierToRawText(s),
+      data: { stats: s.stats, weapons: s.weapons, behaviors: s.behaviors },
+      flat_attributes: { ...s.stats, weapons: s.weapons.join(', ') },
+      metadata: { ...s.stats, weapons: s.weapons },
     }));
   }
 
-  // Fallback: treat entire file as a script chunk
   return [{
-    doc_id: '',
     type: 'script_chunk' as const,
     key: base,
-    content: `AngelScript file: ${base}\n\n${content}`,
-    metadata: {
-      mod_name: modName,
-      file_path: filePath,
-    },
+    label: 'AngelScript',
+    source_file: filePath,
+    mod_name: modName,
+    description: `AngelScript file: ${base}`,
+    raw_text: content,
+    data: { content },
+    flat_attributes: { file: base },
+    metadata: {},
   }];
 }

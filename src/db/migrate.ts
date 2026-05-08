@@ -51,7 +51,7 @@ CREATE INDEX IF NOT EXISTS idx_${tableName}_fts
   ON ${tableName} USING gin (fts);
 `;
 
-async function migrate() {
+export async function runMigrate(): Promise<void> {
   const pool = await getPool();
   const client = await pool.connect();
   try {
@@ -60,11 +60,24 @@ async function migrate() {
     console.log('Database initialized successfully.');
   } catch (err) {
     console.error('Migration failed:', err);
-    process.exit(1);
+    throw err;
   } finally {
     client.release();
+  }
+}
+
+async function main() {
+  try {
+    await runMigrate();
+  } catch (err) {
+    process.exit(1);
+  } finally {
+    const pool = await getPool();
     await pool.end();
   }
 }
 
-migrate();
+const isDirectRun = process.argv[1]?.endsWith('db/migrate.ts') || process.argv[1]?.endsWith('db/migrate.js');
+if (isDirectRun) {
+  main();
+}

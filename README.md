@@ -61,19 +61,48 @@ Creates the configured table, pgvector extension, HNSW and GIN indexes automatic
 
 ### 5. Ingest Data
 
+Data ingestion is a two-step process: **extract** (parse XML/game files → structured JSON) then **embed** (JSON → vector database). You can review and edit the extracted JSON between steps.
+
+#### Step 1: Extract to JSON
+
+```bash
+npm run extract -- --source ./data --mod GFL_Castling
+```
+
+This produces `extracted-documents.json` containing structured documents with:
+- `type`, `key`, `label` — document identity
+- `description` — natural language description
+- `data` — full parsed/resolved XML as JSON (verify inheritance, nested elements, multi-state items)
+- `flat_attributes` — flattened key-value pairs
+- `i18n` — localized names from translation files (e.g. `{"cn": {"GK-Adeline": "Adeline 艾德琳"}}`)
+
+Options:
+```bash
+npm run extract -- --source ./data --mod GFL_Castling --output ./my-data.json    # custom output path
+npm run extract -- --source ./data --mod GFL_Castling --languages ./path/to/languages  # custom language directory
+```
+
+#### Step 2: Embed into Database
+
+```bash
+npm run embed -- --input ./extracted-documents.json
+```
+
+Options:
+```bash
+npm run embed -- --input ./extracted-documents.json --clear           # wipe mod first
+npm run embed -- --input ./extracted-documents.json --resume          # skip existing
+npm run embed -- --input ./extracted-documents.json --filter-type weapon  # only weapons
+npm run embed -- --input ./extracted-documents.json --limit 10        # first 10 docs (testing)
+```
+
+#### Legacy: One-step Ingest
+
+The `ingest` command still works as a combined extract+embed step:
+
 ```bash
 npm run ingest -- --source ./data --mod GFL_Castling
-```
-
-To clear existing data for this mod before ingestion:
-
-```bash
 npm run ingest -- --source ./data --mod GFL_Castling --clear
-```
-
-To resume and skip already-ingested documents:
-
-```bash
 npm run ingest -- --source ./data --mod GFL_Castling --resume
 ```
 
@@ -169,9 +198,22 @@ LLM Generation  (OpenAI Compatible API)
 
 | Extension | Type | Parser |
 |-----------|------|--------|
-| `.weapon`, `.projectile`, `.call`, `.character`, `.xml` | XML | Generic tag-driven parser |
+| `.weapon`, `.projectile`, `.call`, `.character`, `.xml` | XML | Generic tag-driven parser with inheritance resolution |
 | `.as` | AngelScript | Keyword/value extractor |
 | `.ai`, `.resources`, `.name`, `.text_lines` | Plain text | Fallback text chunking |
+
+## Data Pipeline
+
+```
+XML/Game Files ──extract──▶ Structured JSON ──embed──▶ Vector Database
+                       │                          │
+                 (review & edit)            (chunk → embed → store)
+                       │
+                 i18n resolution
+                 (language/ dirs)
+```
+
+The extracted JSON contains the full parsed XML structure (`data` field), flattened attributes (`flat_attributes`), and resolved localized names (`i18n`). Edit this file to correct parsing issues before embedding.
 
 ## Development
 
@@ -179,7 +221,9 @@ LLM Generation  (OpenAI Compatible API)
 npm run dev        # dev mode (hot reload)
 npm run build      # compile TypeScript
 npm run db:migrate # initialize database
-npm run ingest     # CLI ingestion
+npm run extract    # extract game data → JSON
+npm run embed      # embed JSON → vector database
+npm run ingest     # legacy: extract + embed in one step
 npm run format     # Prettier
 npm run lint       # ESLint
 ```
@@ -197,8 +241,11 @@ docker compose up -d
 # Initialize database (run once)
 docker compose run --rm app npm run db:migrate:prod
 
-# Ingest data
-docker compose run --rm app npm run ingest:prod -- --source /app/data --mod GFL_Castling
+# Extract data (Step 1)
+docker compose run --rm app npm run extract:prod -- --source /app/data --mod GFL_Castling
+
+# Embed into database (Step 2)
+docker compose run --rm app npm run embed:prod -- --input /app/extracted-documents.json
 
 # View logs
 docker compose logs -f app
@@ -235,7 +282,8 @@ docker compose down -v      # stop and wipe data
 
 - **Enforced system prompt**: External `system` messages in the request are ignored. The server injects its own RAG system prompt to prevent prompt injection and ensure consistent behavior.
 - **Single-turn only**: No session history is maintained.
-- **Manual ingestion**: CLI-based, no background scheduler.
+- **Two-step ingestion**: `extract` produces a structured JSON (reviewable/editable), then `embed` stores it into the vector database. Legacy `ingest` command still works.
+- **i18n support**: The extract CLI automatically scans `languages/` directories and resolves localized names into the `i18n` field, so Chinese queries can match documents by their translated names.
 - **Embedding dimension**: Default 1024 (`BAAI/bge-m3`). If you switch to a model with a different dimension (e.g., 4096), set `EMBEDDING_DIMENSION` accordingly and recreate the database (`docker compose down -v && docker compose up -d`).
 - **Table isolation**: Use `DATABASE_TABLE` to separate dev / staging / prod environments without code changes.
 

@@ -1,5 +1,24 @@
 export type DocumentType = 'weapon' | 'soldier' | 'faction' | 'script_chunk' | 'projectile' | 'vehicle' | 'call' | 'character' | 'carry_item' | 'resource';
 
+export interface LanguageData {
+  language: string;
+  translations: Record<string, string>;
+}
+
+export interface StructuredDocument {
+  type: DocumentType;
+  key: string;
+  label: string;
+  source_file: string;
+  mod_name: string;
+  description: string;
+  raw_text: string;
+  data: unknown;
+  flat_attributes: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  i18n?: Record<string, Record<string, string>>;
+}
+
 export interface RWRDocument {
   doc_id: string;
   type: DocumentType;

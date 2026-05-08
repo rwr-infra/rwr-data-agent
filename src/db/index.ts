@@ -43,3 +43,8 @@ export async function getDb(): Promise<DrizzleInstance> {
   if (!dbPromise) dbPromise = initDb();
   return dbPromise;
 }
+
+export function resetPool(): void {
+  poolPromise = null;
+  dbPromise = null;
+}

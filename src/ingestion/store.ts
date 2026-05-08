@@ -31,6 +31,18 @@ export async function clearModDocuments(modName: string): Promise<void> {
   }
 }
 
+export async function dropAndRecreateTable(): Promise<void> {
+  const pool = await getPool();
+  const client = await pool.connect();
+  try {
+    console.log(`Dropping table ${tableName}...`);
+    await client.query(`DROP TABLE IF EXISTS ${tableName}`);
+    console.log(`Table dropped.`);
+  } finally {
+    client.release();
+  }
+}
+
 export async function getExistingKeys(modName: string): Promise<Set<string>> {
   const pool = await getPool();
   const client = await pool.connect();

@@ -1,27 +1,22 @@
 import { Command } from 'commander';
-import * as fs from 'fs/promises';
 import * as path from 'path';
 import pLimit from 'p-limit';
-import { parseXmlFile } from './xmlParser.js';
-import { parseAngelScriptFile } from './asParser.js';
+import { collectFiles, parseFile } from './shared.js';
 import { createEmbeddings } from './embeddings.js';
 import { storeDocuments, clearModDocuments, getExistingKeys } from './store.js';
 import { chunkDocuments } from './chunker.js';
+import { structuredDocToRWRDocument } from './xmlParser.js';
 import { config, validateConfig } from '../config/index.js';
-import type { RWRDocument } from '../types/index.js';
 
 const BATCH_SIZE = config.ingestBatchSize;
 const CONCURRENCY = config.ingestConcurrency;
-const BATCH_DELAY_MS = 500; // delay between embedding batches to avoid rate limits
-
-const SUPPORTED_EXTS = new Set(['.xml', '.as', '.call', '.character', '.ai', '.resources', '.models', '.name', '.text_lines', '.weapon', '.projectile', '.carry_item', '.base_weapon', '.animation_base', '.base', '.base_carry_item']);
-const EXCLUDED_DIRS = new Set(['models', 'maps']);
+const BATCH_DELAY_MS = 500;
 
 const program = new Command();
 
 program
   .name('rwr-ingest')
-  .description('Ingest RWR data files into the vector database')
+  .description('Ingest RWR data files into the vector database (extract + embed in one step)')
   .version('1.0.0')
   .requiredOption('-s, --source <path>', 'Source directory containing data files')
   .requiredOption('-m, --mod <name>', 'Mod name to tag documents with')
@@ -52,7 +47,7 @@ async function main() {
   console.log(`Found ${files.length} files.`);
 
   const limit = pLimit(CONCURRENCY);
-  const parsedDocs: RWRDocument[] = [];
+  const parsedDocs: import('../types/index.js').StructuredDocument[] = [];
 
   await Promise.all(
     files.map((file) =>
@@ -62,7 +57,6 @@ async function main() {
           for (const doc of docs) {
             const dedupKey = `${doc.type}:${doc.key}`;
             if (existingKeys.has(dedupKey)) {
-              // Skip already-ingested documents in resume mode
               continue;
             }
             parsedDocs.push(doc);
@@ -76,10 +70,10 @@ async function main() {
 
   console.log(`Parsed ${parsedDocs.length} new documents.`);
 
-  // Split long documents into overlapping chunks for better embedding quality
-  const chunkedDocs = chunkDocuments(parsedDocs);
-  if (chunkedDocs.length !== parsedDocs.length) {
-    console.log(`Chunked into ${chunkedDocs.length} segments (from ${parsedDocs.length} documents).`);
+  const rwrDocs = parsedDocs.map(structuredDocToRWRDocument);
+  const chunkedDocs = chunkDocuments(rwrDocs);
+  if (chunkedDocs.length !== rwrDocs.length) {
+    console.log(`Chunked into ${chunkedDocs.length} segments (from ${rwrDocs.length} documents).`);
   }
 
   if (chunkedDocs.length === 0) {
@@ -87,7 +81,6 @@ async function main() {
     process.exit(0);
   }
 
-  // Batch embeddings with delay between batches
   for (let i = 0; i < chunkedDocs.length; i += BATCH_SIZE) {
     const batch = chunkedDocs.slice(i, i + BATCH_SIZE);
     const contents = batch.map((d) => d.content);
@@ -101,62 +94,6 @@ async function main() {
 
   console.log('Ingestion complete.');
   process.exit(0);
-}
-
-async function collectFiles(dir: string): Promise<string[]> {
-  const entries = await fs.readdir(dir, { withFileTypes: true, recursive: true });
-  const files: string[] = [];
-  for (const entry of entries) {
-    if (!entry.isFile()) continue;
-
-    const fullPath = path.join(entry.parentPath ?? dir, entry.name);
-    const relativePath = path.relative(dir, fullPath);
-    const pathParts = relativePath.split(path.sep);
-
-    // Skip excluded directories (models/ and maps/ contain 3D assets and terrain, not game data)
-    if (pathParts.some((part) => EXCLUDED_DIRS.has(part.toLowerCase()))) {
-      continue;
-    }
-
-    const ext = path.extname(entry.name).toLowerCase();
-    if (SUPPORTED_EXTS.has(ext)) {
-      files.push(fullPath);
-    }
-  }
-  return files;
-}
-
-async function parseFile(filePath: string, modName: string): Promise<RWRDocument[]> {
-  const ext = path.extname(filePath).toLowerCase();
-  // XML-formatted files: .xml, .call, .character, .weapon, .projectile
-  if (ext === '.xml' || ext === '.call' || ext === '.character' || ext === '.weapon' || ext === '.projectile' || ext === '.carry_item' || ext === '.base_weapon' || ext === '.animation_base' || ext === '.base' || ext === '.base_carry_item') {
-    return parseXmlFile(filePath, modName);
-  }
-  if (ext === '.as') {
-    return parseAngelScriptFile(filePath, modName);
-  }
-  // Fallback for .ai, .resources, .models, .name, .text_lines: treat as plain text script chunks
-  if (['.ai', '.resources', '.models', '.name', '.text_lines'].includes(ext)) {
-    return parsePlainTextFile(filePath, modName);
-  }
-  return [];
-}
-
-async function parsePlainTextFile(filePath: string, modName: string): Promise<RWRDocument[]> {
-  const content = await fs.readFile(filePath, 'utf-8');
-  const base = path.basename(filePath);
-  const ext = path.extname(filePath).slice(1);
-  return [{
-    doc_id: '',
-    type: 'script_chunk' as const,
-    key: base,
-    content: `File: ${base} (type: ${ext})\n\n${content}`,
-    metadata: {
-      mod_name: modName,
-      file_path: filePath,
-      source_type: ext,
-    },
-  }];
 }
 
 main().catch((err) => {
