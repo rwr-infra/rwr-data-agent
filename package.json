@@ -5,7 +5,7 @@
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && npm run web:build",
     "dev": "node --import tsx --watch src/api/server.ts",
     "start": "node dist/api/server.js",
     "db:migrate": "node --import tsx src/db/migrate.ts",
@@ -16,6 +16,8 @@
     "embed:prod": "node dist/ingestion/embed.js",
     "ingest": "node --import tsx src/ingestion/cli.ts",
     "ingest:prod": "node dist/ingestion/cli.js",
+    "web:dev": "npm --prefix web run dev",
+    "web:build": "npm --prefix web run build",
     "lint": "eslint src --ext .ts",
     "format": "prettier --write \"src/**/*.ts\""
   },

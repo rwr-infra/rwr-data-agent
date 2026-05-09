@@ -1,5 +1,6 @@
 node_modules/
 dist/
+public/
 .env
 .env.local
 *.log
@@ -10,6 +11,10 @@ drizzle/
 data/
 vanilla-data/
 ww2-data/
+.kilo/
+
+web/node_modules/
+web/dist/
 
 # docs
 docs/

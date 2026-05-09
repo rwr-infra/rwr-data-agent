@@ -21,6 +21,9 @@ COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
 
+COPY web ./web
+RUN npm --prefix web install && npm --prefix web run build
+
 # -----------------------------------------------------------------------------
 # Stage 2: Production
 # -----------------------------------------------------------------------------
@@ -40,6 +43,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/public ./public
 
 # Data directory for ingestion mounts
 RUN mkdir -p /app/data && chown -R appuser:appgroup /app
