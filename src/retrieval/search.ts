@@ -51,10 +51,6 @@ export function extractQueryIntent(query: string): QueryIntent {
     intent.contentPattern = `%class: ${classMatch[1]}%`;
   }
 
-  if (/specification|规格|属性/i.test(query) && !intent.contentPattern) {
-    intent.contentPattern = '%specification:%';
-  }
-
   return intent;
 }
 
@@ -439,42 +435,58 @@ export async function search(
   return reranked;
 }
 
-/**
- * Extract meaningful search terms from a query for ILIKE matching.
- * Filters out stop words and very short tokens.
- */
-function extractSearchTerms(query: string): string[] {
-  const stopWords = new Set([
-    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
-    'should', 'may', 'might', 'can', 'shall', 'to', 'of', 'in', 'for',
-    'on', 'with', 'at', 'by', 'from', 'as', 'into', 'through', 'during',
-    'before', 'after', 'above', 'below', 'between', 'out', 'off', 'over',
-    'under', 'again', 'further', 'then', 'once', 'all', 'each', 'every',
-    'both', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor',
-    'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very',
-    '的', '了', '是', '在', '有', '和', '与', '个', '这', '那',
-    '什么', '怎么', '如何', '哪', '哪些', '多少', '是否', '能',
-  ]);
+const CJK_REGEX = /[\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/;
 
-  return query
-    .split(/[\s,，。！？、；：""''（）\[\]{}]+/)
-    .map((t) => t.trim().toLowerCase())
-    .filter((t) => t.length >= 2 && !stopWords.has(t));
+function splitCJKBoundary(text: string): string[] {
+  const results: string[] = [];
+  let current = '';
+  let prevIsCJK = false;
+
+  for (const ch of text) {
+    const isCJK = CJK_REGEX.test(ch);
+    if (current && isCJK !== prevIsCJK) {
+      results.push(current);
+      current = ch;
+    } else {
+      current += ch;
+    }
+    prevIsCJK = isCJK;
+  }
+  if (current) results.push(current);
+  return results;
 }
 
-/**
- * Extract likely key patterns from an enumeration query.
- * For "G36" → ["g36"], for "M16A4" → ["m16a4"], for "G36 MOD3" → ["g36", "m16a4"].
- * Picks out alphanumeric tokens that look like game item identifiers.
- */
+function tokenizeQuery(query: string): string[] {
+  return query
+    .split(/[\s,，。！？、；：""''（）\[\]{}]+/)
+    .flatMap((t) => splitCJKBoundary(t))
+    .map((t) => t.trim().toLowerCase())
+    .filter((t) => t.length > 0);
+}
+
+const STOP_WORDS = new Set([
+  'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+  'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+  'should', 'may', 'might', 'can', 'shall', 'to', 'of', 'in', 'for',
+  'on', 'with', 'at', 'by', 'from', 'as', 'into', 'through', 'during',
+  'before', 'after', 'above', 'below', 'between', 'out', 'off', 'over',
+  'under', 'again', 'further', 'then', 'once', 'all', 'each', 'every',
+  'both', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor',
+  'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very',
+  '的', '了', '是', '在', '有', '和', '与', '个', '这', '那',
+  '什么', '怎么', '如何', '哪', '哪些', '多少', '是否', '能',
+]);
+
+function extractSearchTerms(query: string): string[] {
+  return tokenizeQuery(query)
+    .filter((t) => t.length >= 2 && !STOP_WORDS.has(t));
+}
+
 function extractKeyPatterns(query: string): string[] {
-  const tokens = query.split(/[\s,，。！？、；：""''（）\[\]{}]+/);
   const patterns: string[] = [];
-  for (const token of tokens) {
-    const lower = token.toLowerCase();
-    if (/[a-z]+\d+/.test(lower) || /\d+[a-z]+/.test(lower)) {
-      patterns.push(lower);
+  for (const token of tokenizeQuery(query)) {
+    if (/[a-z]+\d+/.test(token) || /\d+[a-z]+/.test(token)) {
+      patterns.push(token);
     }
   }
   return patterns;
