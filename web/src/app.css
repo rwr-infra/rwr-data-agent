@@ -41,6 +41,7 @@ header span { font-size: 12px; color: var(--muted); background: var(--border); p
 .msg {
   max-width: 80%; padding: 12px 16px; border-radius: var(--radius);
   line-height: 1.6; font-size: 14px; white-space: pre-wrap; word-break: break-word;
+  animation: fadeIn .3s ease;
 }
 .msg.user { align-self: flex-end; background: var(--user-bg); color: #dbeafe; }
 .msg.ai { align-self: flex-start; background: var(--ai-bg); border: 1px solid var(--border); white-space: normal; }
@@ -48,12 +49,51 @@ header span { font-size: 12px; color: var(--muted); background: var(--border); p
 .msg-meta {
   align-self: flex-start; font-size: 11px; color: var(--muted);
   margin-top: -10px; padding: 0 16px 0 4px; user-select: none;
+  animation: fadeIn .3s ease;
 }
 .typing { align-self: flex-start; color: var(--muted); font-size: 13px; padding: 8px 16px; }
-.typing span { animation: blink 1.2s infinite; }
-.typing span:nth-child(2) { animation-delay: .2s; }
-.typing span:nth-child(3) { animation-delay: .4s; }
-@keyframes blink { 0%, 80%, 100% { opacity: .3; } 40% { opacity: 1; } }
+.thinking-card {
+  align-self: flex-start; max-width: 80%; padding: 16px 20px; border-radius: var(--radius);
+  background: var(--ai-bg); border: 1px solid var(--border);
+  display: flex; align-items: flex-start; gap: 14px;
+  animation: fadeIn .3s ease;
+}
+.thinking-icon {
+  font-size: 22px; line-height: 1; flex-shrink: 0;
+  animation: iconPulse 2s ease-in-out infinite;
+}
+.thinking-body { flex: 1; min-width: 0; }
+.thinking-header {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
+}
+.thinking-label {
+  font-size: 13px; font-weight: 500; color: var(--text);
+  animation: labelFade 2.5s ease-in-out infinite;
+}
+.thinking-timer {
+  font-size: 11px; color: var(--accent); background: rgba(59, 130, 246, 0.12);
+  padding: 1px 7px; border-radius: 99px; font-variant-numeric: tabular-nums;
+}
+.skeleton-lines { display: flex; flex-direction: column; gap: 8px; }
+.skeleton-line {
+  height: 10px; border-radius: 5px; background: var(--border);
+  animation: shimmer 1.8s ease-in-out infinite;
+}
+.skeleton-line.w80 { width: 80%; animation-delay: 0s; }
+.skeleton-line.w60 { width: 60%; animation-delay: .15s; }
+.skeleton-line.w45 { width: 45%; animation-delay: .3s; }
+.streaming-cursor {
+  display: inline-block; width: 2px; height: 1em; background: var(--accent);
+  margin-left: 2px; vertical-align: text-bottom; border-radius: 1px;
+  animation: cursorBlink .8s step-end infinite;
+}
+@keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes iconPulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.15); } }
+@keyframes labelFade { 0%, 100% { opacity: 1; } 50% { opacity: .6; } }
+@keyframes shimmer {
+  0% { opacity: .3; } 50% { opacity: .7; } 100% { opacity: .3; }
+}
+@keyframes cursorBlink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
 #input-area {
   padding: 16px 24px; border-top: 1px solid var(--border);
   background: var(--surface); display: flex; flex-direction: column; gap: 8px;

@@ -10,6 +10,8 @@ export interface Translations {
   placeholder: string;
   send: string;
   thinking: string;
+  searching: string;
+  generating: string;
   defaultTag: string;
   ctxOver: string;
   reqFailed: string;
@@ -29,6 +31,8 @@ const i18n: Record<Lang, Translations> = {
     placeholder: '输入查询，如：有哪些武器？',
     send: '发送',
     thinking: '思考中',
+    searching: '搜索中',
+    generating: '生成中',
     defaultTag: '(默认)',
     ctxOver: '上下文已达上限，请刷新页面开始新对话',
     reqFailed: '请求失败: ',
@@ -47,6 +51,8 @@ const i18n: Record<Lang, Translations> = {
     placeholder: 'Enter query, e.g.: What weapons?',
     send: 'Send',
     thinking: 'Thinking',
+    searching: 'Searching',
+    generating: 'Generating',
     defaultTag: '(Default)',
     ctxOver: 'Context limit reached, please refresh to start a new conversation',
     reqFailed: 'Request failed: ',

@@ -15,6 +15,8 @@
     "vite": "^8.0.11"
   },
   "dependencies": {
-    "@humanspeak/svelte-markdown": "^1.4.5"
+    "@ai-sdk/svelte": "^4.0.177",
+    "@humanspeak/svelte-markdown": "^1.4.5",
+    "ai": "^6.0.177"
   }
 }

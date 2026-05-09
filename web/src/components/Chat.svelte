@@ -1,5 +1,6 @@
 <script lang="ts">
   import Message from './Message.svelte';
+  import ThinkingIndicator from './ThinkingIndicator.svelte';
 
   type DisplayItem =
     | { type: 'message'; role: 'user' | 'ai' | 'error'; content: string }
@@ -8,28 +9,35 @@
   interface Props {
     items: DisplayItem[];
     thinking: boolean;
+    streaming: boolean;
     thinkingText: string;
+    searchingText: string;
+    generatingText: string;
+    elapsed: number;
   }
-  let { items, thinking, thinkingText }: Props = $props();
+  let { items, thinking, streaming, thinkingText, searchingText, generatingText, elapsed }: Props = $props();
+
+  let lastAiIdx = $derived(items.findLastIndex((it) => it.type === 'message' && it.role === 'ai'));
 
   let chatEl: HTMLDivElement | undefined = $state();
 
   $effect(() => {
     items.length;
     thinking;
+    streaming;
     if (chatEl) chatEl.scrollTop = chatEl.scrollHeight;
   });
 </script>
 
 <div id="chat" bind:this={chatEl}>
-  {#each items as item}
+  {#each items as item, i}
     {#if item.type === 'message'}
-      <Message content={item.content} type={item.role} />
+      <Message content={item.content} type={item.role} streaming={streaming && i === lastAiIdx} />
     {:else}
       <div class="msg-meta">{item.text}</div>
     {/if}
   {/each}
   {#if thinking}
-    <div class="typing">{thinkingText}<span>.</span><span>.</span><span>.</span></div>
+    <ThinkingIndicator {thinkingText} {searchingText} {generatingText} {elapsed} />
   {/if}
 </div>
