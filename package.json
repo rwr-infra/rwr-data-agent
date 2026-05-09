@@ -16,6 +16,7 @@
     "embed:prod": "node dist/ingestion/embed.js",
     "ingest": "node --import tsx src/ingestion/cli.ts",
     "ingest:prod": "node dist/ingestion/cli.js",
+    "web:install": "npm --prefix web install",
     "web:dev": "npm --prefix web run dev",
     "web:build": "npm --prefix web run build",
     "lint": "eslint src --ext .ts",
