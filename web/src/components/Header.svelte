@@ -12,8 +12,9 @@
     ontablechange: (table: string) => void;
     ontogglelang: () => void;
     ontoggletheme: () => void;
+    ontogglemenu: () => void;
   }
-  let { lang, tr, selectedTable, theme, ontablechange, ontogglelang, ontoggletheme }: Props = $props();
+  let { lang, tr, selectedTable, theme, ontablechange, ontogglelang, ontoggletheme, ontogglemenu }: Props = $props();
 
   let tables: TableOption[] = $state([]);
 
@@ -38,6 +39,9 @@
 
 <div class="navbar bg-base-200 border-b border-base-300 px-3 sm:px-4">
   <div class="navbar-start gap-2">
+    <button class="btn btn-ghost btn-sm btn-circle" onclick={ontogglemenu} aria-label={tr.sessions}>
+      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
     <h1 class="text-base sm:text-lg font-semibold">RWR Data Agent</h1>
     <span class="badge badge-sm badge-ghost">v1</span>
   </div>

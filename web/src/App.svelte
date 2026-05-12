@@ -1,14 +1,17 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import type { Lang } from './lib/i18n.js';
   import { getInitialLang, t, toggleLang } from './lib/i18n.js';
   import type { Theme } from './lib/theme.js';
   import { getInitialTheme, toggleTheme } from './lib/theme.js';
-  import type { Message, DisplayItem } from './lib/types.js';
+  import type { Message, DisplayItem, Session } from './lib/types.js';
   import { stripMarkdown } from './lib/utils.js';
+  import * as sessionStore from './lib/sessionStore.js';
   import Header from './components/Header.svelte';
   import Chat from './components/Chat.svelte';
   import Welcome from './components/Welcome.svelte';
   import InputArea from './components/InputArea.svelte';
+  import SessionDrawer from './components/SessionDrawer.svelte';
 
   const LOCAL_CACHE_KEY = 'rwr-data-agent-cache';
   type LocalCache = { selectedTable?: string };
@@ -42,8 +45,94 @@
   let elapsed = $state(0);
   let elapsedTimer: ReturnType<typeof setInterval> | null = null;
 
+  let sessions = $state<Session[]>([]);
+  let activeSessionId = $state<string | null>(null);
+  let drawerOpen = $state(false);
+
   let nextId = 0;
   function uid(): string { return `m${nextId++}`; }
+
+  function buildDisplayItems(msgs: Message[]): DisplayItem[] {
+    return msgs.map((m) => ({
+      type: 'message' as const,
+      role: (m.role === 'assistant' ? 'ai' : m.role) as 'user' | 'ai',
+      content: m.content,
+      id: uid(),
+    }));
+  }
+
+  async function saveCurrentSession() {
+    if (!activeSessionId) return;
+    const plainMessages: Message[] = JSON.parse(JSON.stringify(history));
+    if (plainMessages.length === 0) return;
+    const session: Session = {
+      id: activeSessionId,
+      title: sessionStore.generateTitle(plainMessages),
+      createdAt: sessions.find((s) => s.id === activeSessionId)?.createdAt ?? Date.now(),
+      updatedAt: Date.now(),
+      messages: plainMessages,
+      selectedTable: selectedTable || undefined,
+    };
+    await sessionStore.saveSession(session);
+    const idx = sessions.findIndex((s) => s.id === session.id);
+    if (idx >= 0) {
+      sessions[idx] = session;
+      sessions = [...sessions].sort((a, b) => b.updatedAt - a.updatedAt);
+    } else {
+      sessions = [session, ...sessions];
+    }
+  }
+
+  async function newSession() {
+    await saveCurrentSession();
+    const newId = sessionStore.generateId();
+    activeSessionId = newId;
+    history = [];
+    displayItems = [];
+    contextUsed = 0;
+    showWelcome = true;
+    drawerOpen = false;
+    const emptySession: Session = {
+      id: newId,
+      title: '',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      messages: [],
+      selectedTable: selectedTable || undefined,
+    };
+    await sessionStore.saveSession(emptySession);
+    sessions = [emptySession, ...sessions];
+  }
+
+  async function selectSession(id: string) {
+    if (id === activeSessionId) { drawerOpen = false; return; }
+    await saveCurrentSession();
+    const session = await sessionStore.getSession(id);
+    if (!session) return;
+    activeSessionId = id;
+    history = session.messages.slice();
+    nextId = 0;
+    displayItems = buildDisplayItems(history);
+    contextUsed = 0;
+    showWelcome = history.length === 0;
+    if (session.selectedTable !== undefined) {
+      selectedTable = session.selectedTable;
+      writeCache({ selectedTable: session.selectedTable });
+    }
+    drawerOpen = false;
+  }
+
+  async function deleteSessionHandler(id: string) {
+    await sessionStore.deleteSession(id);
+    sessions = sessions.filter((s) => s.id !== id);
+    if (id === activeSessionId) {
+      if (sessions.length > 0) {
+        await selectSession(sessions[0].id);
+      } else {
+        await newSession();
+      }
+    }
+  }
 
   function startTimer() {
     thinkStart = Date.now();
@@ -57,6 +146,36 @@
 
   $effect(() => {
     document.documentElement.lang = tr.htmlLang;
+  });
+
+  onMount(async () => {
+    sessions = await sessionStore.getAllSessions();
+    if (sessions.length > 0) {
+      const latest = sessions[0];
+      activeSessionId = latest.id;
+      history = latest.messages.slice();
+      nextId = 0;
+      displayItems = buildDisplayItems(history);
+      showWelcome = history.length === 0;
+      if (latest.selectedTable !== undefined) {
+        selectedTable = latest.selectedTable;
+      }
+    } else {
+      await newSession();
+    }
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        saveCurrentSession();
+      }
+    };
+    const onBeforeUnload = () => { saveCurrentSession(); };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('beforeunload', onBeforeUnload);
+    };
   });
 
   function estimateTokens(text: string): number {
@@ -87,13 +206,29 @@
     theme = toggleTheme(theme);
   }
 
-  function handleTableChange(table: string) {
+  function handleToggleMenu() {
+    drawerOpen = !drawerOpen;
+  }
+
+  async function handleTableChange(table: string) {
+    await saveCurrentSession();
     selectedTable = table;
     writeCache({ selectedTable: table });
     history = [];
     contextUsed = 0;
     displayItems = [];
     showWelcome = true;
+    activeSessionId = sessionStore.generateId();
+    const emptySession: Session = {
+      id: activeSessionId,
+      title: '',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      messages: [],
+      selectedTable: table || undefined,
+    };
+    await sessionStore.saveSession(emptySession);
+    sessions = [emptySession, ...sessions];
   }
 
   function showToast(message: string) {
@@ -223,6 +358,7 @@
       history.push({ role: 'assistant', content: fullContent });
     }
     loading = false;
+    saveCurrentSession();
   }
 
   function handleAsk(q: string) {
@@ -296,6 +432,7 @@
     }
 
     pendingRecallId = null;
+    saveCurrentSession();
   }
 
   function cancelRecall() {
@@ -334,7 +471,7 @@
 </script>
 
 <div class="flex flex-col h-screen bg-base-100 text-base-content">
-  <Header {lang} {tr} {selectedTable} {theme} ontablechange={handleTableChange} ontogglelang={handleToggleLang} ontoggletheme={handleToggleTheme} />
+  <Header {lang} {tr} {selectedTable} {theme} ontablechange={handleTableChange} ontogglelang={handleToggleLang} ontoggletheme={handleToggleTheme} ontogglemenu={handleToggleMenu} />
   {#if showWelcome}
     <Welcome {tr} onask={handleAsk} />
   {:else}
@@ -365,6 +502,17 @@
     oninputchange={handleInputChange}
     {prefillText}
     onprefillconsumed={handlePrefillConsumed}
+  />
+
+  <SessionDrawer
+    open={drawerOpen}
+    {sessions}
+    {activeSessionId}
+    {tr}
+    onselect={selectSession}
+    onnew={newSession}
+    ondelete={deleteSessionHandler}
+    onclose={() => { drawerOpen = false; }}
   />
 
   {#if toast.visible}

@@ -13,3 +13,11 @@
 .animate-fade-in {
   animation: fadeIn 0.3s ease;
 }
+
+.drawer-backdrop {
+  transition: opacity 0.3s ease;
+}
+
+.drawer-panel {
+  transition: transform 0.3s ease;
+}

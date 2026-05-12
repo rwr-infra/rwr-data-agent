@@ -27,6 +27,13 @@ export interface Translations {
   recallConfirmBtn: string;
   recallCancelBtn: string;
   retryFailed: string;
+  sessions: string;
+  newSession: string;
+  deleteSession: string;
+  deleteConfirm: string;
+  searchSessions: string;
+  noSessions: string;
+  untitledSession: string;
 }
 
 const i18n: Record<Lang, Translations> = {
@@ -58,6 +65,13 @@ const i18n: Record<Lang, Translations> = {
     recallConfirmBtn: '确认撤回',
     recallCancelBtn: '取消',
     retryFailed: '重试失败，请再次尝试',
+    sessions: '会话',
+    newSession: '新建对话',
+    deleteSession: '删除会话',
+    deleteConfirm: '确定删除此会话？',
+    searchSessions: '搜索会话...',
+    noSessions: '暂无会话',
+    untitledSession: '未命名会话',
   },
   en: {
     htmlLang: 'en',
@@ -87,6 +101,13 @@ const i18n: Record<Lang, Translations> = {
     recallConfirmBtn: 'Confirm',
     recallCancelBtn: 'Cancel',
     retryFailed: 'Retry failed, please try again',
+    sessions: 'Sessions',
+    newSession: 'New Chat',
+    deleteSession: 'Delete',
+    deleteConfirm: 'Delete this session?',
+    searchSessions: 'Search sessions...',
+    noSessions: 'No sessions yet',
+    untitledSession: 'Untitled session',
   },
 };
 

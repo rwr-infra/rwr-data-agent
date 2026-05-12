@@ -18,3 +18,12 @@ export interface TableOption {
   value: string;
   label: string;
 }
+
+export interface Session {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  messages: Message[];
+  selectedTable?: string;
+}
