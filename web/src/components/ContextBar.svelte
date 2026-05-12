@@ -6,12 +6,10 @@
   let { used, max }: Props = $props();
 
   let pct = $derived(Math.min((used / max) * 100, 100));
-  let fillClass = $derived(pct > 90 ? 'over' : pct > 70 ? 'warn' : '');
   let display = $derived(used >= 1000 ? (used / 1000).toFixed(1) + 'K' : used);
-  let labelColor = $derived(pct > 90 ? '#f87171' : pct > 70 ? '#fbbf24' : 'var(--muted)');
 </script>
 
-<div id="ctx-bar">
-  <div id="ctx-track"><div id="ctx-fill" class={fillClass} style="width: {pct}%"></div></div>
-  <span style="color: {labelColor}">{display} / 200K tokens</span>
+<div class="flex items-center gap-2 text-xs text-base-content/50 select-none">
+  <progress class="progress progress-primary w-full max-w-[200px] h-1" value={pct} max="100"></progress>
+  <span class:text-error={pct > 90} class:text-warning={pct > 70 && pct <= 90}>{display} / 200K tokens</span>
 </div>

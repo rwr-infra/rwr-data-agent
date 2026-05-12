@@ -29,17 +29,19 @@
   );
 </script>
 
-<div class="thinking-card" role="status" aria-live="polite" aria-label={thinkingText}>
-  <div class="thinking-icon">{current.icon}</div>
-  <div class="thinking-body">
-    <div class="thinking-header">
-      <span class="thinking-label">{current.text()}</span>
-      <span class="thinking-timer">{elapsedDisplay}</span>
-    </div>
-    <div class="skeleton-lines">
-      <div class="skeleton-line w80"></div>
-      <div class="skeleton-line w60"></div>
-      <div class="skeleton-line w45"></div>
+<div class="chat chat-start animate-fade-in" role="status" aria-live="polite" aria-label={thinkingText}>
+  <div class="chat-bubble chat-bubble-base-200 flex items-start gap-3">
+    <span class="text-xl animate-pulse">{current.icon}</span>
+    <div class="flex-1 min-w-0">
+      <div class="flex items-center gap-2 mb-2">
+        <span class="text-sm font-medium text-base-content animate-pulse">{current.text()}</span>
+        <span class="badge badge-primary badge-xs">{elapsedDisplay}</span>
+      </div>
+      <div class="flex flex-col gap-2">
+        <div class="skeleton h-2.5 w-4/5"></div>
+        <div class="skeleton h-2.5 w-3/5"></div>
+        <div class="skeleton h-2.5 w-2/5"></div>
+      </div>
     </div>
   </div>
 </div>

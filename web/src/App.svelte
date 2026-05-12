@@ -1,6 +1,8 @@
 <script lang="ts">
   import type { Lang } from './lib/i18n.js';
   import { getInitialLang, t, toggleLang } from './lib/i18n.js';
+  import type { Theme } from './lib/theme.js';
+  import { getInitialTheme, toggleTheme } from './lib/theme.js';
   import type { Message, DisplayItem } from './lib/types.js';
   import { stripMarkdown } from './lib/utils.js';
   import Header from './components/Header.svelte';
@@ -20,6 +22,7 @@
   }
 
   let lang: Lang = $state(getInitialLang());
+  let theme: Theme = $state(getInitialTheme());
   let tr = $derived(t(lang));
   let history: Message[] = $state([]);
   let displayItems: DisplayItem[] = $state([]);
@@ -78,6 +81,10 @@
 
   function handleToggleLang() {
     lang = toggleLang(lang);
+  }
+
+  function handleToggleTheme() {
+    theme = toggleTheme(theme);
   }
 
   function handleTableChange(table: string) {
@@ -326,39 +333,43 @@
   }
 </script>
 
-<Header {lang} {tr} {selectedTable} ontablechange={handleTableChange} ontogglelang={handleToggleLang} />
-{#if showWelcome}
-  <Welcome {tr} onask={handleAsk} />
-{:else}
-  <Chat
-    items={displayItems}
-    {thinking}
-    {streaming}
-    thinkingText={tr.thinking}
-    searchingText={tr.searching}
-    generatingText={tr.generating}
-    {elapsed}
-    {pendingRecallId}
+<div class="flex flex-col h-screen bg-base-100 text-base-content">
+  <Header {lang} {tr} {selectedTable} {theme} ontablechange={handleTableChange} ontogglelang={handleToggleLang} ontoggletheme={handleToggleTheme} />
+  {#if showWelcome}
+    <Welcome {tr} onask={handleAsk} />
+  {:else}
+    <Chat
+      items={displayItems}
+      {thinking}
+      {streaming}
+      thinkingText={tr.thinking}
+      searchingText={tr.searching}
+      generatingText={tr.generating}
+      {elapsed}
+      {pendingRecallId}
+      {tr}
+      onretry={handleRetry}
+      onrecall={handleRecall}
+      oncopy={handleCopy}
+      onconfirmrecall={confirmRecall}
+      oncancelrecall={cancelRecall}
+      {loading}
+    />
+  {/if}
+  <InputArea
     {tr}
-    onretry={handleRetry}
-    onrecall={handleRecall}
-    oncopy={handleCopy}
-    onconfirmrecall={confirmRecall}
-    oncancelrecall={cancelRecall}
     {loading}
+    contextUsed={effectiveContextUsed}
+    maxContext={MAX_CONTEXT}
+    onsend={sendMessage}
+    oninputchange={handleInputChange}
+    {prefillText}
+    onprefillconsumed={handlePrefillConsumed}
   />
-{/if}
-<InputArea
-  {tr}
-  {loading}
-  contextUsed={effectiveContextUsed}
-  maxContext={MAX_CONTEXT}
-  onsend={sendMessage}
-  oninputchange={handleInputChange}
-  {prefillText}
-  onprefillconsumed={handlePrefillConsumed}
-/>
 
-{#if toast.visible}
-  <div class="toast">{toast.message}</div>
-{/if}
+  {#if toast.visible}
+    <div class="fixed bottom-24 left-1/2 -translate-x-1/2 bg-base-200 border border-base-300 px-5 py-2 rounded-lg text-sm text-base-content z-50 shadow-lg animate-fade-in">
+      {toast.message}
+    </div>
+  {/if}
+</div>

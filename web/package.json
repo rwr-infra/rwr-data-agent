@@ -17,6 +17,10 @@
   "dependencies": {
     "@ai-sdk/svelte": "^4.0.177",
     "@humanspeak/svelte-markdown": "^1.4.5",
-    "ai": "^6.0.177"
+    "@tailwindcss/typography": "^0.5.19",
+    "@tailwindcss/vite": "^4.3.0",
+    "ai": "^6.0.177",
+    "daisyui": "^5.5.19",
+    "tailwindcss": "^4.3.0"
   }
 }

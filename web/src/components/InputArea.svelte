@@ -52,10 +52,10 @@
   });
 </script>
 
-<div id="input-area">
-  <div id="input-row">
+<div class="p-3 sm:p-4 border-t border-base-300 bg-base-200 flex flex-col gap-2">
+  <div class="flex gap-3 items-end">
     <textarea
-      class="chat-input"
+      class="textarea textarea-bordered flex-1 resize-none min-h-[44px] leading-relaxed text-sm sm:text-base"
       rows="1"
       bind:this={textarea}
       bind:value={inputText}
@@ -63,7 +63,7 @@
       oninput={handleInput}
       onkeydown={handleKeydown}
     ></textarea>
-    <button class="send-btn" disabled={loading} onclick={submit}>{tr.send}</button>
+    <button class="btn btn-primary shrink-0" disabled={loading} onclick={submit}>{tr.send}</button>
   </div>
   <ContextBar used={contextUsed} max={maxContext} />
 </div>

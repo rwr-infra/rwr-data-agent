@@ -53,79 +53,80 @@
   });
 </script>
 
-<div id="chat" bind:this={chatEl}>
+<div class="flex-1 overflow-y-auto p-3 sm:p-6 flex flex-col gap-4" bind:this={chatEl}>
   {#each items as item, i}
     {#if item.type === 'message' && item.role === 'ai' && nextIsMeta(i)}
-      <!-- AI message + following meta: wrap in one hover group -->
       {@const metaItem = items[i + 1]}
-      <div class="ai-group" class:dimmed={isDimmed(i) || isDimmed(i + 1)}>
-        <div class="msg-wrap ai">
-          <Message content={item.content} type="ai" id={item.id} streaming={streaming && i === lastAiIdx} />
-        </div>
-        <div class="msg-wrap meta"><div class="msg-meta">{metaItem.text}</div></div>
-        <div class="msg-actions">
-          <button class="action-btn" onclick={() => oncopy(item.id, 'text')} title={tr.copyText}>
+      <div class="group flex flex-col items-start animate-fade-in" class:opacity-50={isDimmed(i) || isDimmed(i + 1)} class:transition-opacity={isDimmed(i) || isDimmed(i + 1)}>
+        <Message content={item.content} type="ai" id={item.id} streaming={streaming && i === lastAiIdx} />
+        <div class="text-xs text-base-content/50 mt-0.5 animate-fade-in">{metaItem.text}</div>
+        <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 sm:group-hover:opacity-100 transition-opacity mt-1 mb-2">
+          <button class="btn btn-ghost btn-xs" onclick={() => oncopy(item.id, 'text')} title={tr.copyText}>
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
           </button>
-          <button class="action-btn md-label" onclick={() => oncopy(item.id, 'markdown')} title={tr.copyMarkdown}>MD</button>
-          <button class="action-btn" onclick={() => onretry(item.id)} title={tr.retry} disabled={loading}>
+          <button class="btn btn-ghost btn-xs font-bold text-xs" onclick={() => oncopy(item.id, 'markdown')} title={tr.copyMarkdown}>MD</button>
+          <button class="btn btn-ghost btn-xs" onclick={() => onretry(item.id)} title={tr.retry} disabled={loading}>
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
           </button>
         </div>
       </div>
     {:else if item.type === 'meta' && prevWasAi(i)}
-      <!-- skip: already rendered inside ai-group -->
     {:else if item.type === 'message'}
       {#if item.role === 'ai' && !nextIsMeta(i) && !(streaming && i === lastAiIdx)}
-        <!-- AI message as last item or without meta, not streaming: wrap in ai-group -->
-        <div class="ai-group" class:dimmed={isDimmed(i)}>
-          <div class="msg-wrap ai">
-            <Message content={item.content} type="ai" id={item.id} />
-          </div>
-          <div class="msg-actions">
-            <button class="action-btn" onclick={() => oncopy(item.id, 'text')} title={tr.copyText}>
+        <div class="group flex flex-col items-start animate-fade-in" class:opacity-50={isDimmed(i)} class:transition-opacity={isDimmed(i)}>
+          <Message content={item.content} type="ai" id={item.id} />
+          <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 sm:group-hover:opacity-100 transition-opacity mt-1 mb-2">
+            <button class="btn btn-ghost btn-xs" onclick={() => oncopy(item.id, 'text')} title={tr.copyText}>
               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
             </button>
-            <button class="action-btn md-label" onclick={() => oncopy(item.id, 'markdown')} title={tr.copyMarkdown}>MD</button>
-            <button class="action-btn" onclick={() => onretry(item.id)} title={tr.retry} disabled={loading}>
+            <button class="btn btn-ghost btn-xs font-bold text-xs" onclick={() => oncopy(item.id, 'markdown')} title={tr.copyMarkdown}>MD</button>
+            <button class="btn btn-ghost btn-xs" onclick={() => onretry(item.id)} title={tr.retry} disabled={loading}>
               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
             </button>
           </div>
         </div>
       {:else}
-        <!-- user message, error, or streaming AI message -->
-        <div class="msg-wrap {item.role}" class:dimmed={isDimmed(i)}>
+        <div class="flex flex-col animate-fade-in"
+          class:items-end={item.role === 'user'}
+          class:items-start={item.role !== 'user'}
+          class:opacity-50={isDimmed(i)}
+          class:transition-opacity={isDimmed(i)}
+        >
           <Message content={item.content} type={item.role} id={item.id} streaming={streaming && i === lastAiIdx} />
           {#if item.role === 'user'}
-            <div class="msg-actions">
-              <button class="action-btn" onclick={() => oncopy(item.id, 'text')} title={tr.copyText}>
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-              </button>
-              <button class="action-btn" onclick={() => onrecall(item.id)} title={tr.recall} disabled={loading}>
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
-              </button>
+            <div class="group">
+              <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 sm:group-hover:opacity-100 transition-opacity mt-1 mb-2 justify-end">
+                <button class="btn btn-ghost btn-xs" onclick={() => oncopy(item.id, 'text')} title={tr.copyText}>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                </button>
+                <button class="btn btn-ghost btn-xs" onclick={() => onrecall(item.id)} title={tr.recall} disabled={loading}>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
+                </button>
+              </div>
             </div>
           {/if}
           {#if item.role === 'error'}
-            <div class="msg-actions">
-              <button class="action-btn" onclick={() => oncopy(item.id, 'text')} title={tr.copyText}>
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-              </button>
+            <div class="group">
+              <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 sm:group-hover:opacity-100 transition-opacity mt-1 mb-2">
+                <button class="btn btn-ghost btn-xs" onclick={() => oncopy(item.id, 'text')} title={tr.copyText}>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                </button>
+              </div>
             </div>
           {/if}
         </div>
       {/if}
     {:else if item.type === 'meta' && !prevWasAi(i)}
-      <div class="msg-wrap meta" class:dimmed={isDimmed(i)}>
-        <div class="msg-meta">{item.text}</div>
+      <div class="flex flex-col items-start animate-fade-in" class:opacity-50={isDimmed(i)} class:transition-opacity={isDimmed(i)}>
+        <div class="text-xs text-base-content/50">{item.text}</div>
       </div>
     {/if}
 
     {#if pendingRecallId && item.id === pendingRecallId}
-      <div class="recall-confirm">
+      <div class="self-start max-w-[80%] p-3 bg-primary/10 border border-primary rounded-lg flex items-center gap-3 text-sm text-base-content animate-fade-in">
         <span>{tr.recallConfirm}</span>
-        <button onclick={onconfirmrecall}>{tr.recallConfirmBtn}</button>
-        <button class="cancel-btn" onclick={oncancelrecall}>{tr.recallCancelBtn}</button>
+        <button class="btn btn-primary btn-xs" onclick={onconfirmrecall}>{tr.recallConfirmBtn}</button>
+        <button class="btn btn-ghost btn-xs" onclick={oncancelrecall}>{tr.recallCancelBtn}</button>
       </div>
     {/if}
   {/each}
