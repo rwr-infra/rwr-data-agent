@@ -9,8 +9,10 @@
     maxContext: number;
     onsend: (text: string) => void;
     oninputchange: (text: string) => void;
+    prefillText?: string;
+    onprefillconsumed?: () => void;
   }
-  let { tr, loading, contextUsed, maxContext, onsend, oninputchange }: Props = $props();
+  let { tr, loading, contextUsed, maxContext, onsend, oninputchange, prefillText = '', onprefillconsumed }: Props = $props();
 
   let inputText = $state('');
   let textarea: HTMLTextAreaElement | undefined = $state();
@@ -37,6 +39,17 @@
     if (textarea) textarea.style.height = 'auto';
     onsend(text);
   }
+
+  $effect(() => {
+    if (prefillText) {
+      inputText = prefillText;
+      handleInput();
+      setTimeout(() => {
+        if (textarea) textarea.focus();
+        onprefillconsumed?.();
+      }, 100);
+    }
+  });
 </script>
 
 <div id="input-area">

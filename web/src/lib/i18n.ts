@@ -18,6 +18,15 @@ export interface Translations {
   netError: string;
   metaFormat: (ttfb: string | number, total: number, inp: string | number, out: string | number) => string;
   langLabel: string;
+  retry: string;
+  copyText: string;
+  copyMarkdown: string;
+  copied: string;
+  recall: string;
+  recallConfirm: string;
+  recallConfirmBtn: string;
+  recallCancelBtn: string;
+  retryFailed: string;
 }
 
 const i18n: Record<Lang, Translations> = {
@@ -40,6 +49,15 @@ const i18n: Record<Lang, Translations> = {
     metaFormat: (ttfb, total, inp, out) =>
       `TTFB ${ttfb}ms · 总耗时 ${total}ms · 输入 ${inp} tokens · 输出 ${out} tokens`,
     langLabel: 'EN',
+    retry: '重试',
+    copyText: '复制文本',
+    copyMarkdown: '复制 Markdown',
+    copied: '已复制',
+    recall: '撤回',
+    recallConfirm: '撤回此消息及后续对话？',
+    recallConfirmBtn: '确认撤回',
+    recallCancelBtn: '取消',
+    retryFailed: '重试失败，请再次尝试',
   },
   en: {
     htmlLang: 'en',
@@ -60,6 +78,15 @@ const i18n: Record<Lang, Translations> = {
     metaFormat: (ttfb, total, inp, out) =>
       `TTFB ${ttfb}ms · Total ${total}ms · In ${inp} tokens · Out ${out} tokens`,
     langLabel: '中文',
+    retry: 'Retry',
+    copyText: 'Copy text',
+    copyMarkdown: 'Copy Markdown',
+    copied: 'Copied',
+    recall: 'Recall',
+    recallConfirm: 'Recall this message and following conversation?',
+    recallConfirmBtn: 'Confirm',
+    recallCancelBtn: 'Cancel',
+    retryFailed: 'Retry failed, please try again',
   },
 };
 

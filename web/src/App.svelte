@@ -1,16 +1,23 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import type { Lang } from './lib/i18n.js';
   import { getInitialLang, t, toggleLang } from './lib/i18n.js';
-  import type { Message } from './lib/types.js';
+  import type { Message, DisplayItem } from './lib/types.js';
+  import { stripMarkdown } from './lib/utils.js';
   import Header from './components/Header.svelte';
   import Chat from './components/Chat.svelte';
   import Welcome from './components/Welcome.svelte';
   import InputArea from './components/InputArea.svelte';
 
-  type DisplayItem =
-    | { type: 'message'; role: 'user' | 'ai' | 'error'; content: string }
-    | { type: 'meta'; text: string };
+  const LOCAL_CACHE_KEY = 'rwr-data-agent-cache';
+  type LocalCache = { selectedTable?: string };
+  function readCache(): LocalCache {
+    try { return JSON.parse(localStorage.getItem(LOCAL_CACHE_KEY) || '{}'); } catch { return {}; }
+  }
+  function writeCache(partial: Partial<LocalCache>) {
+    const cache = readCache();
+    Object.assign(cache, partial);
+    localStorage.setItem(LOCAL_CACHE_KEY, JSON.stringify(cache));
+  }
 
   let lang: Lang = $state(getInitialLang());
   let tr = $derived(t(lang));
@@ -20,13 +27,20 @@
   let thinking = $state(false);
   let streaming = $state(false);
   let showWelcome = $state(true);
-  let selectedTable = $state('');
+  let selectedTable = $state(readCache().selectedTable ?? '');
   let contextUsed = $state(0);
   const MAX_CONTEXT = 200000;
+  let pendingRecallId: string | null = $state(null);
+  let prefillText = $state('');
+  let toast = $state<{ message: string; visible: boolean }>({ message: '', visible: false });
+  let toastTimer: ReturnType<typeof setTimeout>;
 
   let thinkStart = $state(0);
   let elapsed = $state(0);
   let elapsedTimer: ReturnType<typeof setInterval> | null = null;
+
+  let nextId = 0;
+  function uid(): string { return `m${nextId++}`; }
 
   function startTimer() {
     thinkStart = Date.now();
@@ -68,27 +82,44 @@
 
   function handleTableChange(table: string) {
     selectedTable = table;
+    writeCache({ selectedTable: table });
     history = [];
     contextUsed = 0;
     displayItems = [];
     showWelcome = true;
   }
 
+  function showToast(message: string) {
+    clearTimeout(toastTimer);
+    toast = { message, visible: true };
+    toastTimer = setTimeout(() => { toast = { ...toast, visible: false }; }, 2000);
+  }
+
   async function sendMessage(text: string) {
+    await sendMessageInternal(text, false);
+  }
+
+  async function sendMessageInternal(text: string, isRetry: boolean) {
     if (!text || loading) return;
-    const checkBase = contextUsed > 0 ? contextUsed : estimateHistoryTokens();
-    if (checkBase + estimateTokens(text) >= MAX_CONTEXT) {
+
+    if (!isRetry) {
+      const checkBase = contextUsed > 0 ? contextUsed : estimateHistoryTokens();
+      if (checkBase + estimateTokens(text) >= MAX_CONTEXT) {
+        showWelcome = false;
+        displayItems.push({ type: 'message', role: 'error', content: tr.ctxOver, id: uid() });
+        displayItems = displayItems;
+        return;
+      }
+
+      loading = true;
       showWelcome = false;
-      displayItems.push({ type: 'message', role: 'error', content: tr.ctxOver });
+      displayItems.push({ type: 'message', role: 'user', content: text, id: uid() });
       displayItems = displayItems;
-      return;
+      history.push({ role: 'user', content: text });
+    } else {
+      loading = true;
     }
 
-    loading = true;
-    showWelcome = false;
-    displayItems.push({ type: 'message', role: 'user', content: text });
-    displayItems = displayItems;
-    history.push({ role: 'user', content: text });
     thinking = true;
     startTimer();
 
@@ -96,7 +127,6 @@
     let firstChunkTime = 0;
     let fullContent = '';
     let aiItemIdx = -1;
-    let errorOccurred = false;
 
     try {
       const res = await fetch('/v1/chat/completions', {
@@ -137,13 +167,13 @@
                   firstChunkTime = performance.now();
                   thinking = false;
                   streaming = true;
-                  displayItems.push({ type: 'message', role: 'ai', content: '' });
+                  displayItems.push({ type: 'message', role: 'ai', content: '', id: uid() });
                   aiItemIdx = displayItems.length - 1;
                   displayItems = displayItems;
                 }
                 fullContent += content;
                 if (aiItemIdx >= 0) {
-                  displayItems[aiItemIdx] = { type: 'message', role: 'ai', content: fullContent };
+                  displayItems[aiItemIdx] = { ...displayItems[aiItemIdx], type: 'message', role: 'ai', content: fullContent };
                   displayItems = displayItems;
                 }
               }
@@ -157,25 +187,25 @@
               const ttfb = firstChunkTime > 0 ? Math.round(firstChunkTime - t0) : '-';
               const inTokens = usage?.promptTokens ?? '-';
               const outTokens = usage?.completionTokens ?? '-';
-              displayItems.push({ type: 'meta', text: tr.metaFormat(ttfb, totalTime, inTokens, outTokens) });
+              displayItems.push({ type: 'meta', text: tr.metaFormat(ttfb, totalTime, inTokens, outTokens), id: uid() });
               displayItems = displayItems;
-              console.log(`[frontend] TTFB=${ttfb}ms total=${totalTime}ms in=${inTokens} out=${outTokens}`);
             }
           } catch {}
         }
       }
     } catch (err: any) {
-      errorOccurred = true;
       thinking = false;
       streaming = false;
       stopTimer();
-      history.pop();
-      displayItems.push({
-        type: 'message',
-        role: 'error',
-        content: (err.message?.includes('Failed to fetch') ? tr.netError : tr.reqFailed) + (err.message ?? ''),
-      });
+      if (!isRetry) {
+        history.pop();
+      }
+      const errorMsg = (err.message?.includes('Failed to fetch') ? tr.netError : tr.reqFailed) + (err.message ?? '');
+      displayItems.push({ type: 'message', role: 'error', content: errorMsg, id: uid() });
       displayItems = displayItems;
+      if (isRetry) {
+        showToast(tr.retryFailed);
+      }
     }
 
     thinking = false;
@@ -191,12 +221,144 @@
   function handleAsk(q: string) {
     sendMessage(q);
   }
+
+  async function handleRetry(aiMessageId: string) {
+    if (loading) return;
+
+    const aiIdx = displayItems.findIndex(it => it.id === aiMessageId);
+    if (aiIdx < 0) return;
+
+    let userContent = '';
+    for (let i = aiIdx - 1; i >= 0; i--) {
+      const item = displayItems[i];
+      if (item.type === 'message' && item.role === 'user') {
+        userContent = item.content;
+        break;
+      }
+    }
+    if (!userContent) return;
+
+    let removeEnd = aiIdx + 1;
+    while (removeEnd < displayItems.length && displayItems[removeEnd].type === 'meta') {
+      removeEnd++;
+    }
+    displayItems.splice(aiIdx, removeEnd - aiIdx);
+    displayItems = displayItems;
+
+    for (let i = history.length - 1; i >= 0; i--) {
+      if (history[i].role === 'assistant') {
+        history.splice(i, 1);
+        break;
+      }
+    }
+    history = history;
+
+    contextUsed = 0;
+    await sendMessageInternal(userContent, true);
+  }
+
+  function handleRecall(userMessageId: string) {
+    if (loading) return;
+    pendingRecallId = userMessageId;
+  }
+
+  function confirmRecall() {
+    if (!pendingRecallId) return;
+
+    const idx = displayItems.findIndex(it => it.id === pendingRecallId);
+    if (idx < 0) { pendingRecallId = null; return; }
+
+    const item = displayItems[idx];
+    const recalledContent = item.type === 'message' ? item.content : '';
+
+    displayItems.splice(idx);
+    displayItems = displayItems;
+
+    history = displayItems
+      .filter((it): it is DisplayItem & { type: 'message' } => it.type === 'message' && (it.role === 'user' || it.role === 'ai'))
+      .map(it => ({
+        role: it.role === 'ai' ? 'assistant' : it.role,
+        content: it.content,
+      }));
+
+    contextUsed = 0;
+    prefillText = recalledContent;
+
+    if (displayItems.length === 0) {
+      showWelcome = true;
+    }
+
+    pendingRecallId = null;
+  }
+
+  function cancelRecall() {
+    pendingRecallId = null;
+  }
+
+  function handleCopy(messageId: string, format: 'text' | 'markdown') {
+    const item = displayItems.find(it => it.id === messageId);
+    if (!item || item.type !== 'message') return;
+
+    let text: string;
+    if (format === 'markdown') {
+      text = item.content;
+    } else {
+      text = item.role === 'ai' ? stripMarkdown(item.content) : item.content;
+    }
+
+    navigator.clipboard.writeText(text).then(() => {
+      showToast(tr.copied);
+    }).catch(() => {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      showToast(tr.copied);
+    });
+  }
+
+  function handlePrefillConsumed() {
+    prefillText = '';
+  }
 </script>
 
 <Header {lang} {tr} {selectedTable} ontablechange={handleTableChange} ontogglelang={handleToggleLang} />
 {#if showWelcome}
   <Welcome {tr} onask={handleAsk} />
 {:else}
-  <Chat items={displayItems} {thinking} {streaming} thinkingText={tr.thinking} searchingText={tr.searching} generatingText={tr.generating} {elapsed} />
+  <Chat
+    items={displayItems}
+    {thinking}
+    {streaming}
+    thinkingText={tr.thinking}
+    searchingText={tr.searching}
+    generatingText={tr.generating}
+    {elapsed}
+    {pendingRecallId}
+    {tr}
+    onretry={handleRetry}
+    onrecall={handleRecall}
+    oncopy={handleCopy}
+    onconfirmrecall={confirmRecall}
+    oncancelrecall={cancelRecall}
+    {loading}
+  />
 {/if}
-<InputArea {tr} {loading} contextUsed={effectiveContextUsed} maxContext={MAX_CONTEXT} onsend={sendMessage} oninputchange={handleInputChange} />
+<InputArea
+  {tr}
+  {loading}
+  contextUsed={effectiveContextUsed}
+  maxContext={MAX_CONTEXT}
+  onsend={sendMessage}
+  oninputchange={handleInputChange}
+  {prefillText}
+  onprefillconsumed={handlePrefillConsumed}
+/>
+
+{#if toast.visible}
+  <div class="toast">{toast.message}</div>
+{/if}

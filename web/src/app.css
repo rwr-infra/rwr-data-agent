@@ -39,16 +39,16 @@ header span { font-size: 12px; color: var(--muted); background: var(--border); p
   display: flex; flex-direction: column; gap: 16px;
 }
 .msg {
-  max-width: 80%; padding: 12px 16px; border-radius: var(--radius);
+  padding: 12px 16px; border-radius: var(--radius);
   line-height: 1.6; font-size: 14px; white-space: pre-wrap; word-break: break-word;
   animation: fadeIn .3s ease;
 }
-.msg.user { align-self: flex-end; background: var(--user-bg); color: #dbeafe; }
-.msg.ai { align-self: flex-start; background: var(--ai-bg); border: 1px solid var(--border); white-space: normal; }
+.msg.user { background: var(--user-bg); color: #dbeafe; }
+.msg.ai { background: var(--ai-bg); border: 1px solid var(--border); white-space: normal; }
 .msg.error { background: #3b1219; border: 1px solid #7f1d1d; color: #fca5a5; }
 .msg-meta {
-  align-self: flex-start; font-size: 11px; color: var(--muted);
-  margin-top: -10px; padding: 0 16px 0 4px; user-select: none;
+  font-size: 11px; color: var(--muted);
+  margin-top: 2px; user-select: none;
   animation: fadeIn .3s ease;
 }
 .typing { align-self: flex-start; color: var(--muted); font-size: 13px; padding: 8px 16px; }
@@ -137,7 +137,7 @@ header span { font-size: 12px; color: var(--muted); background: var(--border); p
   header h1 { font-size: 15px; }
   .table-select { font-size: 11px; max-width: 140px; }
   #chat { padding: 12px 8px; gap: 12px; }
-  .msg { max-width: 92%; font-size: 13px; padding: 10px 12px; }
+  .msg-wrap .msg { max-width: 92%; font-size: 13px; padding: 10px 12px; }
   #input-area { padding: 10px 12px; }
   .chat-input { font-size: 16px; padding: 10px 12px; }
   .send-btn { padding: 0 14px; height: 40px; font-size: 13px; }
@@ -191,4 +191,60 @@ header span { font-size: 12px; color: var(--muted); background: var(--border); p
 .md-fallback {
   white-space: pre-wrap; word-break: break-word; font-family: inherit;
   font-size: 14px; line-height: 1.6; margin: 0;
+}
+
+.msg-wrap { display: flex; flex-direction: column; animation: fadeIn .3s ease; }
+.msg-wrap.user { align-items: flex-end; }
+.msg-wrap.ai, .msg-wrap.error, .msg-wrap.meta { align-items: flex-start; }
+.msg-wrap .msg { max-width: 80%; }
+.msg-wrap.dimmed { opacity: 0.5; transition: opacity .2s ease; }
+.msg-actions {
+  display: flex; align-items: center; gap: 2px;
+  opacity: 0; transition: opacity .2s ease;
+  margin-top: 4px; margin-bottom: 8px;
+}
+.msg-wrap.user .msg-actions { justify-content: flex-end; }
+.ai-actions { justify-content: flex-start; margin-left: 0; }
+.msg-wrap:hover .msg-actions,
+.msg-actions-focus,
+.ai-actions:hover { opacity: 1; }
+@media (max-width: 640px) { .msg-actions, .ai-actions { opacity: 0.6; } }
+.action-btn {
+  background: none; border: 1px solid transparent; color: var(--muted);
+  border-radius: 6px; padding: 4px 6px; cursor: pointer; font-size: 11px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 3px;
+  transition: color .15s, background .15s, border-color .15s; white-space: nowrap;
+  height: 26px; line-height: 1;
+}
+.action-btn:hover { color: var(--text); background: var(--border); border-color: var(--border); }
+.action-btn:disabled { opacity: .4; cursor: not-allowed; }
+.action-btn svg { width: 14px; height: 14px; }
+.action-btn.md-label { font-size: 10px; font-weight: 600; letter-spacing: .02em; padding: 4px 7px; }
+.recall-confirm {
+  align-self: flex-start; max-width: 80%; padding: 12px 16px;
+  background: rgba(59, 130, 246, 0.08); border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  display: flex; align-items: center; gap: 12px; font-size: 13px;
+  color: var(--text);
+}
+.recall-confirm button {
+  background: var(--accent); color: #fff; border: none;
+  border-radius: 6px; padding: 5px 14px; font-size: 12px;
+  cursor: pointer; font-weight: 500; transition: background .15s;
+}
+.recall-confirm button:hover { background: var(--accent-hover); }
+.recall-confirm button.cancel-btn {
+  background: none; color: var(--muted); border: 1px solid var(--border);
+}
+.recall-confirm button.cancel-btn:hover { color: var(--text); border-color: var(--muted); }
+.toast {
+  position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%);
+  background: var(--surface); border: 1px solid var(--border);
+  padding: 8px 20px; border-radius: 8px; font-size: 13px; color: var(--text);
+  z-index: 1000; animation: toastIn .3s ease;
+  box-shadow: 0 4px 12px rgba(0,0,0,.3);
+}
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
