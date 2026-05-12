@@ -35,6 +35,14 @@
     return recallStartIdx >= 0 && i >= recallStartIdx;
   }
 
+  function prevWasAi(i: number): boolean {
+    return i > 0 && items[i - 1].type === 'message' && items[i - 1].role === 'ai';
+  }
+
+  function nextIsMeta(i: number): boolean {
+    return i + 1 < items.length && items[i + 1].type === 'meta';
+  }
+
   let chatEl: HTMLDivElement | undefined = $state();
 
   $effect(() => {
@@ -47,50 +55,70 @@
 
 <div id="chat" bind:this={chatEl}>
   {#each items as item, i}
-    {#if item.type === 'message'}
-      <div class="msg-wrap {item.role}" class:dimmed={isDimmed(i)}>
-        <Message
-          content={item.content}
-          type={item.role}
-          id={item.id}
-          streaming={streaming && i === lastAiIdx}
-        />
-        <!-- user & error: actions right after the bubble -->
-        {#if item.role === 'user'}
-          <div class="msg-actions">
-            <button class="action-btn" onclick={() => oncopy(item.id, 'text')} title={tr.copyText}>
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-            </button>
-            <button class="action-btn" onclick={() => onrecall(item.id)} title={tr.recall} disabled={loading}>
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
-            </button>
-          </div>
-        {/if}
-        {#if item.role === 'error'}
-          <div class="msg-actions">
-            <button class="action-btn" onclick={() => oncopy(item.id, 'text')} title={tr.copyText}>
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-            </button>
-          </div>
-        {/if}
-      </div>
-    {:else}
-      <!-- meta line -->
-      <div class="msg-wrap meta" class:dimmed={isDimmed(i)}>
-        <div class="msg-meta">{item.text}</div>
-      </div>
-      <!-- AI actions go AFTER the meta line that follows an AI message -->
-      {#if i > 0 && items[i - 1].type === 'message' && items[i - 1].role === 'ai'}
-        <div class="msg-actions ai-actions">
-          <button class="action-btn" onclick={() => oncopy(items[i - 1].id, 'text')} title={tr.copyText}>
+    {#if item.type === 'message' && item.role === 'ai' && nextIsMeta(i)}
+      <!-- AI message + following meta: wrap in one hover group -->
+      {@const metaItem = items[i + 1]}
+      <div class="ai-group" class:dimmed={isDimmed(i) || isDimmed(i + 1)}>
+        <div class="msg-wrap ai">
+          <Message content={item.content} type="ai" id={item.id} streaming={streaming && i === lastAiIdx} />
+        </div>
+        <div class="msg-wrap meta"><div class="msg-meta">{metaItem.text}</div></div>
+        <div class="msg-actions">
+          <button class="action-btn" onclick={() => oncopy(item.id, 'text')} title={tr.copyText}>
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
           </button>
-          <button class="action-btn md-label" onclick={() => oncopy(items[i - 1].id, 'markdown')} title={tr.copyMarkdown}>MD</button>
-          <button class="action-btn" onclick={() => onretry(items[i - 1].id)} title={tr.retry} disabled={loading}>
+          <button class="action-btn md-label" onclick={() => oncopy(item.id, 'markdown')} title={tr.copyMarkdown}>MD</button>
+          <button class="action-btn" onclick={() => onretry(item.id)} title={tr.retry} disabled={loading}>
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
           </button>
         </div>
+      </div>
+    {:else if item.type === 'meta' && prevWasAi(i)}
+      <!-- skip: already rendered inside ai-group -->
+    {:else if item.type === 'message'}
+      {#if item.role === 'ai' && !nextIsMeta(i) && !(streaming && i === lastAiIdx)}
+        <!-- AI message as last item or without meta, not streaming: wrap in ai-group -->
+        <div class="ai-group" class:dimmed={isDimmed(i)}>
+          <div class="msg-wrap ai">
+            <Message content={item.content} type="ai" id={item.id} />
+          </div>
+          <div class="msg-actions">
+            <button class="action-btn" onclick={() => oncopy(item.id, 'text')} title={tr.copyText}>
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+            </button>
+            <button class="action-btn md-label" onclick={() => oncopy(item.id, 'markdown')} title={tr.copyMarkdown}>MD</button>
+            <button class="action-btn" onclick={() => onretry(item.id)} title={tr.retry} disabled={loading}>
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
+            </button>
+          </div>
+        </div>
+      {:else}
+        <!-- user message, error, or streaming AI message -->
+        <div class="msg-wrap {item.role}" class:dimmed={isDimmed(i)}>
+          <Message content={item.content} type={item.role} id={item.id} streaming={streaming && i === lastAiIdx} />
+          {#if item.role === 'user'}
+            <div class="msg-actions">
+              <button class="action-btn" onclick={() => oncopy(item.id, 'text')} title={tr.copyText}>
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+              </button>
+              <button class="action-btn" onclick={() => onrecall(item.id)} title={tr.recall} disabled={loading}>
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
+              </button>
+            </div>
+          {/if}
+          {#if item.role === 'error'}
+            <div class="msg-actions">
+              <button class="action-btn" onclick={() => oncopy(item.id, 'text')} title={tr.copyText}>
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+              </button>
+            </div>
+          {/if}
+        </div>
       {/if}
+    {:else if item.type === 'meta' && !prevWasAi(i)}
+      <div class="msg-wrap meta" class:dimmed={isDimmed(i)}>
+        <div class="msg-meta">{item.text}</div>
+      </div>
     {/if}
 
     {#if pendingRecallId && item.id === pendingRecallId}
@@ -101,19 +129,6 @@
       </div>
     {/if}
   {/each}
-
-  <!-- handle case: AI message is the last item (still streaming or no meta yet) -->
-  {#if items.length > 0 && items[items.length - 1].type === 'message' && items[items.length - 1].role === 'ai' && !(streaming && items.length - 1 === lastAiIdx)}
-    <div class="msg-actions ai-actions">
-      <button class="action-btn" onclick={() => oncopy(items[items.length - 1].id, 'text')} title={tr.copyText}>
-        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-      </button>
-      <button class="action-btn md-label" onclick={() => oncopy(items[items.length - 1].id, 'markdown')} title={tr.copyMarkdown}>MD</button>
-      <button class="action-btn" onclick={() => onretry(items[items.length - 1].id)} title={tr.retry} disabled={loading}>
-        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
-      </button>
-    </div>
-  {/if}
 
   {#if thinking}
     <ThinkingIndicator {thinkingText} {searchingText} {generatingText} {elapsed} />
