@@ -3,6 +3,7 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { streamText, streamObject } from 'ai';
 import { startObservation } from '@langfuse/tracing';
 import { config, validateConfig } from '../../config/index.js';
+import { flushLangfuse } from '../../observability/langfuse.js';
 import { search } from '../../retrieval/search.js';
 import { SYSTEM_PROMPT, buildUserPrompt } from '../../retrieval/prompt.js';
 import { buildSearchQuery } from '../../retrieval/queryRewrite.js';
@@ -229,6 +230,9 @@ export async function chatRoutes(app: FastifyInstance) {
         console.log(`[chat] FAILED | ${elapsed}ms | mode=${useStructured ? 'structured' : 'text'} | error=${llmError.message}`);
       } else {
         console.log(`[chat] COMPLETED | total=${elapsed}ms | mode=${useStructured ? 'structured' : 'text'}`);
+      }
+      if (config.langfuseEnabled) {
+        await flushLangfuse();
       }
     }
   });
