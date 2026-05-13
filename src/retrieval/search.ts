@@ -5,7 +5,8 @@ import { config } from '../config/index.js';
 import { expandQuery } from './queryRewrite.js';
 import { FTS_CONFIG } from '../db/schema.js';
 import { getCachedSearch, setCachedSearch, generateCacheKey } from '../cache/index.js';
-import type { TraceHandle } from '../observability/langfuse.js';
+import { getTracer } from '../observability/langfuse.js';
+import { SpanStatusCode } from '@opentelemetry/api';
 import type { DocumentType, SearchFilters, SearchResult } from '../types/index.js';
 
 interface QueryIntent {
@@ -130,59 +131,107 @@ export async function search(
   topK = 5,
   tableName?: string,
   searchQuery?: string,
-  trace?: TraceHandle,
 ): Promise<SearchResult[]> {
-  const searchSpan = trace?.span('search', { query, filters, topK });
+  return getTracer().startActiveSpan('search', async (searchSpan) => {
+    searchSpan.setAttribute('query', query);
+    searchSpan.setAttribute('topK', topK);
 
-  const table = tableName && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName) ? tableName : config.databaseTable;
-  const cacheKey = generateCacheKey(query, table, JSON.stringify(filters), String(topK));
-  const cached = await getCachedSearch(cacheKey);
-  if (cached) {
-    searchSpan?.end({ cacheHit: true, resultCount: cached.length });
-    return cached;
-  }
+    const table = tableName && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName) ? tableName : config.databaseTable;
+    const cacheKey = generateCacheKey(query, table, JSON.stringify(filters), String(topK));
+    const cached = await getCachedSearch(cacheKey);
+    if (cached) {
+      searchSpan.setAttribute('cacheHit', true);
+      searchSpan.setAttribute('resultCount', cached.length);
+      searchSpan.end();
+      return cached;
+    }
 
-  const pool = await getPool();
-  const intent = extractQueryIntent(query);
-  const baseQuery = searchQuery ?? query;
-  const expandedQuery = expandQuery(query);
-  // For embedding, append bilingual synonyms to the enriched query
-  const embeddingQuery = expandedQuery !== query ? `${baseQuery} ${expandedQuery.replace(query, '').trim()}` : baseQuery;
+    searchSpan.setAttribute('cacheHit', false);
 
-  // -----------------------------------------------------------------------
-  // Fast path: exact key lookup — bypass embedding entirely
-  // -----------------------------------------------------------------------
-  if (intent.isExactKeyQuery && intent.exactKey) {
-    const client = await pool.connect();
-    try {
-      const conditions: string[] = [`key = $1`];
-      const params: (string | number)[] = [intent.exactKey];
-      let paramIdx = 2;
+    const pool = await getPool();
+    const intent = extractQueryIntent(query);
+    const baseQuery = searchQuery ?? query;
+    const expandedQuery = expandQuery(query);
+    const embeddingQuery = expandedQuery !== query ? `${baseQuery} ${expandedQuery.replace(query, '').trim()}` : baseQuery;
 
-      if (filters.type) {
-        conditions.push(`type = $${paramIdx++}`);
-        params.push(filters.type);
-      } else if (intent.inferredType) {
-        conditions.push(`type = $${paramIdx++}`);
-        params.push(intent.inferredType);
-      }
-      if (filters.mod_name) {
-        conditions.push(`metadata->>'mod_name' = $${paramIdx++}`);
-        params.push(filters.mod_name);
-      }
+    searchSpan.setAttribute('intent.isEnumeration', intent.isEnumeration);
+    searchSpan.setAttribute('intent.isExactKey', intent.isExactKeyQuery);
+    if (intent.inferredType) searchSpan.setAttribute('intent.inferredType', intent.inferredType);
 
-      const whereClause = `WHERE ${conditions.join(' AND ')}`;
-      const exactSql = `
-        SELECT doc_id, type, key, content, metadata, 0.0 AS distance
-        FROM ${table}
-        ${whereClause}
-        LIMIT $${paramIdx}
-      `;
-      params.push(topK);
+    // -----------------------------------------------------------------------
+    // Fast path: exact key lookup — bypass embedding entirely
+    // -----------------------------------------------------------------------
+    if (intent.isExactKeyQuery && intent.exactKey) {
+      const client = await pool.connect();
+      try {
+        const conditions: string[] = [`key = $1`];
+        const params: (string | number)[] = [intent.exactKey];
+        let paramIdx = 2;
 
-      const res = await client.query(exactSql, params);
-      if (res.rows.length > 0) {
-        return res.rows.map((row) => ({
+        if (filters.type) {
+          conditions.push(`type = $${paramIdx++}`);
+          params.push(filters.type);
+        } else if (intent.inferredType) {
+          conditions.push(`type = $${paramIdx++}`);
+          params.push(intent.inferredType);
+        }
+        if (filters.mod_name) {
+          conditions.push(`metadata->>'mod_name' = $${paramIdx++}`);
+          params.push(filters.mod_name);
+        }
+
+        const whereClause = `WHERE ${conditions.join(' AND ')}`;
+        const exactSql = `
+          SELECT doc_id, type, key, content, metadata, 0.0 AS distance
+          FROM ${table}
+          ${whereClause}
+          LIMIT $${paramIdx}
+        `;
+        params.push(topK);
+
+        const res = await client.query(exactSql, params);
+        if (res.rows.length > 0) {
+          const results = res.rows.map((row) => ({
+            doc_id: row.doc_id,
+            type: row.type,
+            key: row.key,
+            content: row.content,
+            metadata: row.metadata,
+            distance: parseFloat(row.distance),
+          }));
+          searchSpan.setAttribute('path', 'exact-key');
+          searchSpan.setAttribute('resultCount', results.length);
+          searchSpan.end();
+          return results;
+        }
+
+        const likeConditions: string[] = [`key ILIKE $1`];
+        const likeParams: (string | number)[] = [`%${intent.exactKey}%`];
+        let likeParamIdx = 2;
+
+        if (filters.type) {
+          likeConditions.push(`type = $${likeParamIdx++}`);
+          likeParams.push(filters.type);
+        } else if (intent.inferredType) {
+          likeConditions.push(`type = $${likeParamIdx++}`);
+          likeParams.push(intent.inferredType);
+        }
+        if (filters.mod_name) {
+          likeConditions.push(`metadata->>'mod_name' = $${likeParamIdx++}`);
+          likeParams.push(filters.mod_name);
+        }
+
+        const likeWhere = `WHERE ${likeConditions.join(' AND ')}`;
+        const likeSql = `
+          SELECT doc_id, type, key, content, metadata, 0.0 AS distance
+          FROM ${table}
+          ${likeWhere}
+          LIMIT $${likeParamIdx}
+        `;
+        likeParams.push(topK);
+
+        const likeRes = await client.query(likeSql, likeParams);
+        const results = likeRes.rows.map((row) => ({
           doc_id: row.doc_id,
           type: row.type,
           key: row.key,
@@ -190,191 +239,99 @@ export async function search(
           metadata: row.metadata,
           distance: parseFloat(row.distance),
         }));
+        searchSpan.setAttribute('path', 'exact-key-like');
+        searchSpan.setAttribute('resultCount', results.length);
+        searchSpan.end();
+        return results;
+      } finally {
+        client.release();
       }
-
-      const likeConditions: string[] = [`key ILIKE $1`];
-      const likeParams: (string | number)[] = [`%${intent.exactKey}%`];
-      let likeParamIdx = 2;
-
-      if (filters.type) {
-        likeConditions.push(`type = $${likeParamIdx++}`);
-        likeParams.push(filters.type);
-      } else if (intent.inferredType) {
-        likeConditions.push(`type = $${likeParamIdx++}`);
-        likeParams.push(intent.inferredType);
-      }
-      if (filters.mod_name) {
-        likeConditions.push(`metadata->>'mod_name' = $${likeParamIdx++}`);
-        likeParams.push(filters.mod_name);
-      }
-
-      const likeWhere = `WHERE ${likeConditions.join(' AND ')}`;
-      const likeSql = `
-        SELECT doc_id, type, key, content, metadata, 0.0 AS distance
-        FROM ${table}
-        ${likeWhere}
-        LIMIT $${likeParamIdx}
-      `;
-      likeParams.push(topK);
-
-      const likeRes = await client.query(likeSql, likeParams);
-      return likeRes.rows.map((row) => ({
-        doc_id: row.doc_id,
-        type: row.type,
-        key: row.key,
-        content: row.content,
-        metadata: row.metadata,
-        distance: parseFloat(row.distance),
-      }));
-    } finally {
-      client.release();
-    }
-  }
-
-  // For enumeration queries, ensure we return enough results
-  const effectiveTopK = intent.isEnumeration ? Math.max(topK, 30) : topK;
-
-  // -----------------------------------------------------------------------
-  // Hybrid search: Vector + Full-Text (tsvector) with RRF fusion
-  // -----------------------------------------------------------------------
-  const candidatePool = intent.isEnumeration ? 200 : Math.max(topK * 12, 60);
-  const vectorPool = Math.ceil(candidatePool * 0.6);
-  const ftsPool = Math.ceil(candidatePool * 0.4);
-
-  const { where: whereClause, params: whereParams, idx: paramIdx } = buildWhereClause(filters, intent, 1);
-
-  // --- Stage A: Vector search ---
-  const embedding = await createEmbedding(embeddingQuery);
-  const vectorLiteral = `[${embedding.join(',')}]`;
-
-  const vectorSql = `
-    SELECT doc_id, type, key, content, metadata,
-           embedding <=> $${paramIdx}::vector AS distance
-    FROM ${table}
-    ${whereClause}
-    ORDER BY embedding <=> $${paramIdx}::vector
-    LIMIT $${paramIdx + 1}
-  `;
-  const vectorParams = [...whereParams, vectorLiteral, vectorPool];
-
-  // --- Stage B: Full-text search (tsvector with ranking) ---
-  // Use plainto_tsquery for safe user input; combine with ILIKE fallback
-  const ftsWherePrefix = whereClause ? `${whereClause} AND` : 'WHERE';
-  const ftsTsquery = `plainto_tsquery('${FTS_CONFIG}', $${paramIdx})`;
-  const ftsSql = `
-    SELECT doc_id, type, key, content, metadata,
-           ts_rank_cd(fts, ${ftsTsquery}) AS fts_rank
-    FROM ${table}
-    ${ftsWherePrefix} fts @@ ${ftsTsquery}
-    ORDER BY ts_rank_cd(fts, ${ftsTsquery}) DESC
-    LIMIT $${paramIdx + 1}
-  `;
-  const ftsParams = [...whereParams.slice(0, paramIdx - 1), expandedQuery, ftsPool];
-
-  // --- Stage C: ILIKE fallback for term matching (catches partial keys/names) ---
-  // Uses expanded query (with bilingual synonyms) for ILIKE matching
-  const terms = extractSearchTerms(expandedQuery);
-  let ilikeResults: SearchResult[] = [];
-  if (terms.length > 0) {
-    const ilikeConditions: string[] = [];
-    const ilikeParams: (string | number)[] = [];
-    let ilikeIdx = 1;
-
-    if (filters.type) {
-      ilikeConditions.push(`type = $${ilikeIdx++}`);
-      ilikeParams.push(filters.type);
-    } else if (intent.inferredType) {
-      ilikeConditions.push(`type = $${ilikeIdx++}`);
-      ilikeParams.push(intent.inferredType);
-    }
-    if (filters.mod_name) {
-      ilikeConditions.push(`metadata->>'mod_name' = $${ilikeIdx++}`);
-      ilikeParams.push(filters.mod_name);
     }
 
-    const termOrParts: string[] = [];
-    for (const t of terms) {
-      ilikeParams.push(`%${t}%`);
-      const p1 = ilikeIdx++;
-      ilikeParams.push(`%${t}%`);
-      const p2 = ilikeIdx++;
-      termOrParts.push(`(key ILIKE $${p1} OR content ILIKE $${p2})`);
-    }
-    if (termOrParts.length > 0) {
-      ilikeConditions.push(`(${termOrParts.join(' OR ')})`);
-    }
+    // For enumeration queries, ensure we return enough results
+    const effectiveTopK = intent.isEnumeration ? Math.max(topK, 30) : topK;
 
-    const ilikeWhere = ilikeConditions.length > 0 ? `WHERE ${ilikeConditions.join(' AND ')}` : '';
-    const ilikeSql = `
-      SELECT doc_id, type, key, content, metadata, 0.0 AS distance
+    // -----------------------------------------------------------------------
+    // Hybrid search: Vector + Full-Text (tsvector) with RRF fusion
+    // -----------------------------------------------------------------------
+    const candidatePool = intent.isEnumeration ? 200 : Math.max(topK * 12, 60);
+    const vectorPool = Math.ceil(candidatePool * 0.6);
+    const ftsPool = Math.ceil(candidatePool * 0.4);
+
+    const { where: whereClause, params: whereParams, idx: paramIdx } = buildWhereClause(filters, intent, 1);
+
+    // --- Stage A: Vector search ---
+    const embedding = await createEmbedding(embeddingQuery);
+    const vectorLiteral = `[${embedding.join(',')}]`;
+
+    const vectorSql = `
+      SELECT doc_id, type, key, content, metadata,
+             embedding <=> $${paramIdx}::vector AS distance
       FROM ${table}
-      ${ilikeWhere}
-      LIMIT $${ilikeIdx}
+      ${whereClause}
+      ORDER BY embedding <=> $${paramIdx}::vector
+      LIMIT $${paramIdx + 1}
     `;
-    ilikeParams.push(candidatePool);
+    const vectorParams = [...whereParams, vectorLiteral, vectorPool];
 
-    const ilikeClient = await pool.connect();
-    try {
-      const ilikeRes = await ilikeClient.query(ilikeSql, ilikeParams);
-      ilikeResults = ilikeRes.rows.map((row) => ({
-        doc_id: row.doc_id,
-        type: row.type,
-        key: row.key,
-        content: row.content,
-        metadata: row.metadata,
-        distance: parseFloat(row.distance),
-      }));
-    } finally {
-      ilikeClient.release();
-    }
-  }
+    // --- Stage B: Full-text search (tsvector with ranking) ---
+    const ftsWherePrefix = whereClause ? `${whereClause} AND` : 'WHERE';
+    const ftsTsquery = `plainto_tsquery('${FTS_CONFIG}', $${paramIdx})`;
+    const ftsSql = `
+      SELECT doc_id, type, key, content, metadata,
+             ts_rank_cd(fts, ${ftsTsquery}) AS fts_rank
+      FROM ${table}
+      ${ftsWherePrefix} fts @@ ${ftsTsquery}
+      ORDER BY ts_rank_cd(fts, ${ftsTsquery}) DESC
+      LIMIT $${paramIdx + 1}
+    `;
+    const ftsParams = [...whereParams.slice(0, paramIdx - 1), expandedQuery, ftsPool];
 
-  // --- Stage D: Key-pattern enumeration search (for "list all X" queries) ---
-  // Extracts a likely key fragment (e.g., "G36" → "g36") and does a direct
-  // ILIKE on the key column with type filter. This catches all variants that
-  // share a name prefix but might be missed by vector/FTS/term-ILIKE.
-  let keyPatternResults: SearchResult[] = [];
-  if (intent.isEnumeration) {
-    const keyPatterns = extractKeyPatterns(query);
-    if (keyPatterns.length > 0) {
-      const kpConditions: string[] = [];
-      const kpParams: (string | number)[] = [];
-      let kpIdx = 1;
+    // --- Stage C: ILIKE fallback ---
+    const terms = extractSearchTerms(expandedQuery);
+    let ilikeResults: SearchResult[] = [];
+    if (terms.length > 0) {
+      const ilikeConditions: string[] = [];
+      const ilikeParams: (string | number)[] = [];
+      let ilikeIdx = 1;
 
       if (filters.type) {
-        kpConditions.push(`type = $${kpIdx++}`);
-        kpParams.push(filters.type);
+        ilikeConditions.push(`type = $${ilikeIdx++}`);
+        ilikeParams.push(filters.type);
       } else if (intent.inferredType) {
-        kpConditions.push(`type = $${kpIdx++}`);
-        kpParams.push(intent.inferredType);
+        ilikeConditions.push(`type = $${ilikeIdx++}`);
+        ilikeParams.push(intent.inferredType);
       }
       if (filters.mod_name) {
-        kpConditions.push(`metadata->>'mod_name' = $${kpIdx++}`);
-        kpParams.push(filters.mod_name);
+        ilikeConditions.push(`metadata->>'mod_name' = $${ilikeIdx++}`);
+        ilikeParams.push(filters.mod_name);
       }
 
-      const kpOrParts = keyPatterns.map((p) => {
-        kpParams.push(`%${p}%`);
-        return `key ILIKE $${kpIdx++}`;
-      });
-      if (kpOrParts.length === 1) {
-        kpConditions.push(kpOrParts[0]);
-      } else {
-        kpConditions.push(`(${kpOrParts.join(' OR ')})`);
+      const termOrParts: string[] = [];
+      for (const t of terms) {
+        ilikeParams.push(`%${t}%`);
+        const p1 = ilikeIdx++;
+        ilikeParams.push(`%${t}%`);
+        const p2 = ilikeIdx++;
+        termOrParts.push(`(key ILIKE $${p1} OR content ILIKE $${p2})`);
+      }
+      if (termOrParts.length > 0) {
+        ilikeConditions.push(`(${termOrParts.join(' OR ')})`);
       }
 
-      const kpWhere = kpConditions.length > 0 ? `WHERE ${kpConditions.join(' AND ')}` : '';
-      const kpSql = `
+      const ilikeWhere = ilikeConditions.length > 0 ? `WHERE ${ilikeConditions.join(' AND ')}` : '';
+      const ilikeSql = `
         SELECT doc_id, type, key, content, metadata, 0.0 AS distance
         FROM ${table}
-        ${kpWhere}
-        LIMIT 200
+        ${ilikeWhere}
+        LIMIT $${ilikeIdx}
       `;
+      ilikeParams.push(candidatePool);
 
-      const kpClient = await pool.connect();
+      const ilikeClient = await pool.connect();
       try {
-        const kpRes = await kpClient.query(kpSql, kpParams);
-        keyPatternResults = kpRes.rows.map((row) => ({
+        const ilikeRes = await ilikeClient.query(ilikeSql, ilikeParams);
+        ilikeResults = ilikeRes.rows.map((row) => ({
           doc_id: row.doc_id,
           type: row.type,
           key: row.key,
@@ -383,71 +340,136 @@ export async function search(
           distance: parseFloat(row.distance),
         }));
       } finally {
-        kpClient.release();
+        ilikeClient.release();
       }
     }
-  }
 
-  // Execute vector and FTS queries in parallel
-  const vectorClient = await pool.connect();
-  const ftsClient = await pool.connect();
+    // --- Stage D: Key-pattern enumeration ---
+    let keyPatternResults: SearchResult[] = [];
+    if (intent.isEnumeration) {
+      const keyPatterns = extractKeyPatterns(query);
+      if (keyPatterns.length > 0) {
+        const kpConditions: string[] = [];
+        const kpParams: (string | number)[] = [];
+        let kpIdx = 1;
 
-  let vectorResults: SearchResult[] = [];
-  let ftsResults: SearchResult[] = [];
+        if (filters.type) {
+          kpConditions.push(`type = $${kpIdx++}`);
+          kpParams.push(filters.type);
+        } else if (intent.inferredType) {
+          kpConditions.push(`type = $${kpIdx++}`);
+          kpParams.push(intent.inferredType);
+        }
+        if (filters.mod_name) {
+          kpConditions.push(`metadata->>'mod_name' = $${kpIdx++}`);
+          kpParams.push(filters.mod_name);
+        }
 
-  try {
-    const [vRes, fRes] = await Promise.all([
-      vectorClient.query(vectorSql, vectorParams),
-      ftsClient.query(ftsSql, ftsParams).catch(() => ({ rows: [] })),
-    ]);
+        const kpOrParts = keyPatterns.map((p) => {
+          kpParams.push(`%${p}%`);
+          return `key ILIKE $${kpIdx++}`;
+        });
+        if (kpOrParts.length === 1) {
+          kpConditions.push(kpOrParts[0]);
+        } else {
+          kpConditions.push(`(${kpOrParts.join(' OR ')})`);
+        }
 
-    vectorResults = vRes.rows.map((row) => ({
-      doc_id: row.doc_id,
-      type: row.type,
-      key: row.key,
-      content: row.content,
-      metadata: row.metadata,
-      distance: parseFloat(row.distance),
-    }));
+        const kpWhere = kpConditions.length > 0 ? `WHERE ${kpConditions.join(' AND ')}` : '';
+        const kpSql = `
+          SELECT doc_id, type, key, content, metadata, 0.0 AS distance
+          FROM ${table}
+          ${kpWhere}
+          LIMIT 200
+        `;
 
-    ftsResults = (fRes as { rows: { doc_id: string; type: string; key: string; content: string; metadata: Record<string, unknown>; fts_rank: number }[] }).rows.map((row) => ({
-      doc_id: row.doc_id,
-      type: row.type as DocumentType,
-      key: row.key,
-      content: row.content,
-      metadata: row.metadata as SearchResult['metadata'],
-      distance: -row.fts_rank,
-    }));
-  } finally {
-    vectorClient.release();
-    ftsClient.release();
-  }
+        const kpClient = await pool.connect();
+        try {
+          const kpRes = await kpClient.query(kpSql, kpParams);
+          keyPatternResults = kpRes.rows.map((row) => ({
+            doc_id: row.doc_id,
+            type: row.type,
+            key: row.key,
+            content: row.content,
+            metadata: row.metadata,
+            distance: parseFloat(row.distance),
+          }));
+        } finally {
+          kpClient.release();
+        }
+      }
+    }
 
-  // RRF fusion of vector, FTS, ILIKE, and key-pattern results
-  const rankedLists = [vectorResults, ftsResults, ilikeResults, keyPatternResults].filter((l) => l.length > 0);
-  let candidates: SearchResult[];
+    // Execute vector and FTS queries in parallel
+    const vectorClient = await pool.connect();
+    const ftsClient = await pool.connect();
 
-  if (rankedLists.length <= 1) {
-    candidates = rankedLists[0] ?? vectorResults;
-  } else {
-    candidates = reciprocalRankFusion(rankedLists);
-  }
+    let vectorResults: SearchResult[] = [];
+    let ftsResults: SearchResult[] = [];
 
-  // Deduplicate by doc_id (in case same doc appears in multiple result sets)
-  const seen = new Set<string>();
-  candidates = candidates.filter((c) => {
-    if (seen.has(c.doc_id)) return false;
-    seen.add(c.doc_id);
-    return true;
+    try {
+      const [vRes, fRes] = await Promise.all([
+        vectorClient.query(vectorSql, vectorParams),
+        ftsClient.query(ftsSql, ftsParams).catch(() => ({ rows: [] })),
+      ]);
+
+      vectorResults = vRes.rows.map((row) => ({
+        doc_id: row.doc_id,
+        type: row.type,
+        key: row.key,
+        content: row.content,
+        metadata: row.metadata,
+        distance: parseFloat(row.distance),
+      }));
+
+      ftsResults = (fRes as { rows: { doc_id: string; type: string; key: string; content: string; metadata: Record<string, unknown>; fts_rank: number }[] }).rows.map((row) => ({
+        doc_id: row.doc_id,
+        type: row.type as DocumentType,
+        key: row.key,
+        content: row.content,
+        metadata: row.metadata as SearchResult['metadata'],
+        distance: -row.fts_rank,
+      }));
+    } finally {
+      vectorClient.release();
+      ftsClient.release();
+    }
+
+    searchSpan.setAttribute('vectorResults', vectorResults.length);
+    searchSpan.setAttribute('ftsResults', ftsResults.length);
+    searchSpan.setAttribute('ilikeResults', ilikeResults.length);
+    searchSpan.setAttribute('keyPatternResults', keyPatternResults.length);
+
+    // RRF fusion
+    const rankedLists = [vectorResults, ftsResults, ilikeResults, keyPatternResults].filter((l) => l.length > 0);
+    let candidates: SearchResult[];
+
+    if (rankedLists.length <= 1) {
+      candidates = rankedLists[0] ?? vectorResults;
+    } else {
+      candidates = reciprocalRankFusion(rankedLists);
+    }
+
+    // Deduplicate
+    const seen = new Set<string>();
+    candidates = candidates.filter((c) => {
+      if (seen.has(c.doc_id)) return false;
+      seen.add(c.doc_id);
+      return true;
+    });
+
+    // Stage 2: rerank
+    const rerankInput = candidates.slice(0, Math.min(candidates.length, candidatePool));
+    const reranked = await rerankCandidates(query, rerankInput, effectiveTopK, searchQuery);
+
+    searchSpan.setAttribute('candidateCount', candidates.length);
+    searchSpan.setAttribute('resultCount', reranked.length);
+    searchSpan.setAttribute('path', 'hybrid');
+    setCachedSearch(cacheKey, query, reranked).catch(() => {});
+
+    searchSpan.end();
+    return reranked;
   });
-
-  // Stage 2: rerank candidates for better precision
-  const rerankInput = candidates.slice(0, Math.min(candidates.length, candidatePool));
-  const reranked = await rerankCandidates(query, rerankInput, effectiveTopK, searchQuery);
-
-  setCachedSearch(cacheKey, query, reranked).catch(() => {});
-
-  return reranked;
 }
 
 const CJK_REGEX = /[\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/;

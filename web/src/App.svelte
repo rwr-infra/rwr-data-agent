@@ -273,7 +273,10 @@
     try {
       const res = await fetch('/v1/chat/completions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(activeSessionId ? { 'x-session-id': activeSessionId } : {}),
+        },
         body: JSON.stringify({
           model: 'rwr-agent',
           messages: history.slice(),
