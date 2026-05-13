@@ -63,4 +63,5 @@ export interface ChatCompletionRequest {
   max_tokens?: number;
   top_p?: number;
   table?: string;
+  response_format?: { type: 'json_object' | 'text' };
 }

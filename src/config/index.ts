@@ -18,6 +18,14 @@ export const config = {
   ingestConcurrency: parseInt(process.env.INGEST_CONCURRENCY ?? '2', 10),
   port: parseInt(process.env.PORT ?? '3000', 10),
   maxContextTokens: parseInt(process.env.MAX_CONTEXT_TOKENS ?? '200000', 10),
+  cacheEnabled: process.env.CACHE_ENABLED !== 'false',
+  cacheTtlSeconds: parseInt(process.env.CACHE_TTL_SECONDS ?? '600', 10),
+  langfuseEnabled: process.env.LANGFUSE_ENABLED === 'true',
+  langfusePublicKey: process.env.LANGFUSE_PUBLIC_KEY ?? '',
+  langfuseSecretKey: process.env.LANGFUSE_SECRET_KEY ?? '',
+  langfuseBaseUrl: process.env.LANGFUSE_BASE_URL ?? 'https://cloud.langfuse.com',
+  summaryIntervalTurns: parseInt(process.env.SUMMARY_INTERVAL_TURNS ?? '3', 10),
+  summaryModel: process.env.SUMMARY_MODEL ?? process.env.LLM_MODEL ?? 'Qwen/Qwen2.5-7B-Instruct',
 };
 
 export function validateConfig() {

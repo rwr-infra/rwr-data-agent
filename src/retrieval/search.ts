@@ -4,6 +4,8 @@ import { rerankCandidates } from './rerank.js';
 import { config } from '../config/index.js';
 import { expandQuery } from './queryRewrite.js';
 import { FTS_CONFIG } from '../db/schema.js';
+import { getCachedSearch, setCachedSearch, generateCacheKey } from '../cache/index.js';
+import type { TraceHandle } from '../observability/langfuse.js';
 import type { DocumentType, SearchFilters, SearchResult } from '../types/index.js';
 
 interface QueryIntent {
@@ -128,10 +130,20 @@ export async function search(
   topK = 5,
   tableName?: string,
   searchQuery?: string,
+  trace?: TraceHandle,
 ): Promise<SearchResult[]> {
+  const searchSpan = trace?.span('search', { query, filters, topK });
+
+  const table = tableName && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName) ? tableName : config.databaseTable;
+  const cacheKey = generateCacheKey(query, table, JSON.stringify(filters), String(topK));
+  const cached = await getCachedSearch(cacheKey);
+  if (cached) {
+    searchSpan?.end({ cacheHit: true, resultCount: cached.length });
+    return cached;
+  }
+
   const pool = await getPool();
   const intent = extractQueryIntent(query);
-  const table = tableName && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName) ? tableName : config.databaseTable;
   const baseQuery = searchQuery ?? query;
   const expandedQuery = expandQuery(query);
   // For embedding, append bilingual synonyms to the enriched query
@@ -432,6 +444,9 @@ export async function search(
   // Stage 2: rerank candidates for better precision
   const rerankInput = candidates.slice(0, Math.min(candidates.length, candidatePool));
   const reranked = await rerankCandidates(query, rerankInput, effectiveTopK, searchQuery);
+
+  setCachedSearch(cacheKey, query, reranked).catch(() => {});
+
   return reranked;
 }
 

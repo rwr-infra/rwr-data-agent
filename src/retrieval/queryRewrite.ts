@@ -3,6 +3,12 @@ export interface HistoryMessage {
   content: string;
 }
 
+export interface SummaryContext {
+  summary: string;
+  mentionedEntities: string[];
+  currentTopic: string;
+}
+
 const BILINGUAL_MAP: Record<string, string[]> = {
   '武器': ['weapon'],
   '枪': ['weapon', 'gun'],
@@ -72,10 +78,29 @@ export function expandQuery(query: string): string {
   return expandWithSynonyms(query);
 }
 
-export function buildSearchQuery(currentQuery: string, history: HistoryMessage[]): string {
-  if (history.length === 0) return currentQuery;
-
+export function buildSearchQuery(currentQuery: string, history: HistoryMessage[], summary?: SummaryContext): string {
   const parts: string[] = [];
+
+  if (summary) {
+    if (summary.summary) {
+      parts.push(summary.summary.slice(0, 150));
+    }
+    if (summary.mentionedEntities.length > 0) {
+      parts.push(summary.mentionedEntities.slice(0, 5).join(' '));
+    }
+  }
+
+  if (history.length === 0 && parts.length > 0) {
+    parts.push(currentQuery);
+    const seen = new Set<string>();
+    return parts.filter(p => {
+      if (seen.has(p)) return false;
+      seen.add(p);
+      return true;
+    }).join(' ');
+  }
+
+  if (history.length === 0) return currentQuery;
 
   const recentUserQueries = history
     .filter(m => m.role === 'user')

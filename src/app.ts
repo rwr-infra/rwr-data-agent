@@ -7,6 +7,8 @@ import { chatRoutes } from './api/routes/chat.js';
 import { modelsRoutes } from './api/routes/models.js';
 import { healthRoutes } from './api/routes/health.js';
 import { tablesRoutes } from './api/routes/tables.js';
+import { shutdownLangfuse } from './observability/langfuse.js';
+import { config } from './config/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isVercel = !!process.env.VERCEL;
@@ -60,6 +62,12 @@ export async function buildApp() {
     reply.status(500).send({
       error: { message: error.message, type: 'internal_error' },
     });
+  });
+
+  app.addHook('onClose', async () => {
+    if (config.langfuseEnabled) {
+      await shutdownLangfuse();
+    }
   });
 
   return app;

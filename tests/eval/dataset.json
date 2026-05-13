@@ -1,0 +1,242 @@
+[
+  {
+    "id": "weapon-g36-by-name",
+    "query": "G36的伤害是多少",
+    "expectedKeys": ["gkw_g36.weapon"],
+    "expectedType": "weapon",
+    "category": "specific-item",
+    "notes": "Should match G36 assault rifle document"
+  },
+  {
+    "id": "weapon-m4a1-attributes",
+    "query": "M4A1属性",
+    "expectedKeys": ["gkw_m4a1.weapon"],
+    "expectedType": "weapon",
+    "category": "specific-item",
+    "notes": "Should match M4A1 and return its specification attributes"
+  },
+  {
+    "id": "weapon-hk416-english",
+    "query": "What are the specs of HK416?",
+    "expectedKeys": ["gkw_hk416.weapon"],
+    "expectedType": "weapon",
+    "category": "specific-item",
+    "notes": "English query for HK416"
+  },
+  {
+    "id": "weapon-ak47-damage",
+    "query": "AK-47伤害",
+    "expectedKeys": ["gkw_ak47.weapon"],
+    "expectedType": "weapon",
+    "category": "specific-item",
+    "notes": "Should match AK-47"
+  },
+  {
+    "id": "weapon-sniper-m82a1",
+    "query": "Barrett M82A1射程",
+    "expectedKeys": ["gkw_m82a1.weapon"],
+    "expectedType": "weapon",
+    "category": "specific-item",
+    "notes": "Anti-materiel rifle query"
+  },
+  {
+    "id": "weapon-mp5-smg",
+    "query": "MP5冲锋枪弹匣容量",
+    "expectedKeys": ["gkw_mp5.weapon"],
+    "expectedType": "weapon",
+    "category": "specific-item",
+    "notes": "SMG with Chinese category name"
+  },
+  {
+    "id": "weapon-p90",
+    "query": "P90 weapon stats",
+    "expectedKeys": ["gkw_p90.weapon"],
+    "expectedType": "weapon",
+    "category": "specific-item",
+    "notes": "English query for P90"
+  },
+  {
+    "id": "weapon-desert-eagle",
+    "query": "沙鹰手枪属性",
+    "expectedKeys": ["gkw_desert_eagle.weapon"],
+    "expectedType": "weapon",
+    "category": "specific-item",
+    "notes": "Chinese nickname for Desert Eagle"
+  },
+  {
+    "id": "weapon-spas12-shotgun",
+    "query": "SPAS-12霰弹枪",
+    "expectedKeys": ["gkw_spas12.weapon"],
+    "expectedType": "weapon",
+    "category": "specific-item",
+    "notes": "Shotgun with bilingual query"
+  },
+  {
+    "id": "weapon-vector-smg",
+    "query": "Vector冲锋枪射速",
+    "expectedKeys": ["gkw_vector.weapon"],
+    "expectedType": "weapon",
+    "category": "specific-item",
+    "notes": "Rate of fire query for Vector"
+  },
+  {
+    "id": "enum-all-weapons",
+    "query": "有哪些武器",
+    "expectedKeys": ["gkw_g36.weapon", "gkw_m4a1.weapon", "gkw_hk416.weapon", "gkw_ak47.weapon"],
+    "expectedType": "weapon",
+    "category": "enumeration",
+    "notes": "Should return many weapons; partial match on first 4 is sufficient"
+  },
+  {
+    "id": "enum-list-weapons-english",
+    "query": "list all weapons",
+    "expectedKeys": ["gkw_g36.weapon", "gkw_m4a1.weapon"],
+    "expectedType": "weapon",
+    "category": "enumeration",
+    "notes": "English enumeration query"
+  },
+  {
+    "id": "enum-all-vehicles",
+    "query": "有哪些载具",
+    "expectedKeys": ["t14_gk.vehicle", "rubber_airboat.vehicle"],
+    "expectedType": "vehicle",
+    "category": "enumeration",
+    "notes": "Vehicle enumeration"
+  },
+  {
+    "id": "enum-all-factions",
+    "query": "列出所有派系",
+    "expectedKeys": ["gk.xml"],
+    "expectedType": "faction",
+    "category": "enumeration",
+    "notes": "Faction enumeration; at least G&K PMC should appear"
+  },
+  {
+    "id": "enum-carry-items",
+    "query": "有哪些装备",
+    "expectedKeys": ["bp_t6.carry_item", "vest_40hp.carry_item"],
+    "expectedType": "carry_item",
+    "category": "enumeration",
+    "notes": "Equipment/carry_item enumeration"
+  },
+  {
+    "id": "exact-key-g36",
+    "query": "key=gkw_g36.weapon",
+    "expectedKeys": ["gkw_g36.weapon"],
+    "expectedType": "weapon",
+    "category": "exact-key",
+    "notes": "Exact key lookup should bypass embedding"
+  },
+  {
+    "id": "exact-key-m4a1",
+    "query": "key=gkw_m4a1.weapon",
+    "expectedKeys": ["gkw_m4a1.weapon"],
+    "expectedType": "weapon",
+    "category": "exact-key",
+    "notes": "Exact key lookup for M4A1"
+  },
+  {
+    "id": "exact-key-vehicle",
+    "query": "key=t14_gk.vehicle",
+    "expectedKeys": ["t14_gk.vehicle"],
+    "expectedType": "vehicle",
+    "category": "exact-key",
+    "notes": "Exact key lookup for vehicle"
+  },
+  {
+    "id": "exact-key-chinese-format",
+    "query": "key为gkw_ak47.weapon",
+    "expectedKeys": ["gkw_ak47.weapon"],
+    "expectedType": "weapon",
+    "category": "exact-key",
+    "notes": "Chinese format key query"
+  },
+  {
+    "id": "comparison-g36-vs-m4a1",
+    "query": "G36和M4A1哪个伤害高",
+    "expectedKeys": ["gkw_g36.weapon", "gkw_m4a1.weapon"],
+    "expectedType": "weapon",
+    "category": "comparison",
+    "notes": "Comparison query should return both weapons"
+  },
+  {
+    "id": "comparison-ar-vs-smg",
+    "query": "步枪和冲锋枪有什么区别",
+    "expectedKeys": ["gkw_g36.weapon", "gkw_mp5.weapon"],
+    "expectedType": "weapon",
+    "category": "comparison",
+    "notes": "Category comparison; should return weapons of both types"
+  },
+  {
+    "id": "comparison-tanks",
+    "query": "T14和M1A1坦克对比",
+    "expectedKeys": ["t14_gk.vehicle", "m1a1_base.vehicle"],
+    "expectedType": "vehicle",
+    "category": "comparison",
+    "notes": "Vehicle comparison"
+  },
+  {
+    "id": "bilingual-sniper-range",
+    "query": "sniper rifle 射程",
+    "expectedKeys": ["gkw_svd.weapon", "gkw_kar98k.weapon"],
+    "expectedType": "weapon",
+    "category": "bilingual",
+    "notes": "Bilingual query mixing English weapon type with Chinese attribute"
+  },
+  {
+    "id": "bilingual-vehicle-armor",
+    "query": "vehicle 装甲",
+    "expectedKeys": ["t14_gk.vehicle"],
+    "expectedType": "vehicle",
+    "category": "bilingual",
+    "notes": "English type with Chinese attribute"
+  },
+  {
+    "id": "bilingual-smg-magazine",
+    "query": "SMG 弹匣容量",
+    "expectedKeys": ["gkw_mp5.weapon", "gkw_vector.weapon"],
+    "expectedType": "weapon",
+    "category": "bilingual",
+    "notes": "English abbreviation with Chinese attribute"
+  },
+  {
+    "id": "edge-nonexistent-item",
+    "query": "激光剑的伤害是多少",
+    "expectedKeys": [],
+    "expectedType": null,
+    "category": "edge-case",
+    "notes": "Non-existent item; should return empty or no relevant results"
+  },
+  {
+    "id": "edge-typo-query",
+    "query": "G36伤害",
+    "expectedKeys": ["gkw_g36.weapon"],
+    "expectedType": "weapon",
+    "category": "edge-case",
+    "notes": "Short query that should still match via fuzzy search"
+  },
+  {
+    "id": "edge-very-long-query",
+    "query": "我想知道在Running With Rifles游戏中GFL_Castling模组里G36突击步枪的详细属性数据包括伤害射速射程弹匣容量等所有信息",
+    "expectedKeys": ["gkw_g36.weapon"],
+    "expectedType": "weapon",
+    "category": "edge-case",
+    "notes": "Very long verbose query; should still find G36"
+  },
+  {
+    "id": "soldier-gk-default",
+    "query": "G&K PMC默认士兵配置",
+    "expectedKeys": ["gk.xml"],
+    "expectedType": "soldier",
+    "category": "specific-item",
+    "notes": "Soldier query within faction data"
+  },
+  {
+    "id": "call-support",
+    "query": "有哪些支援呼叫",
+    "expectedKeys": ["martina.call", "chiara.call", "pierre.call"],
+    "expectedType": "call",
+    "category": "enumeration",
+    "notes": "Call/support enumeration"
+  }
+]

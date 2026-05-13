@@ -1,11 +1,14 @@
 import type { FastifyInstance } from 'fastify';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
-import { streamText } from 'ai';
+import { streamText, streamObject } from 'ai';
 import { config, validateConfig } from '../../config/index.js';
 import { search } from '../../retrieval/search.js';
 import { SYSTEM_PROMPT, buildUserPrompt } from '../../retrieval/prompt.js';
 import { buildSearchQuery } from '../../retrieval/queryRewrite.js';
 import { extractQueryIntent } from '../../retrieval/search.js';
+import { classifyQuery } from '../../retrieval/intent.js';
+import { EnumResultSchema, ComparisonResultSchema } from '../../types/schemas.js';
+import { getSummary, generateSummary, shouldGenerateSummary } from '../../memory/summarizer.js';
 import type { ChatCompletionRequest } from '../../types/index.js';
 
 let provider: ReturnType<typeof createOpenAICompatible> | null = null;
@@ -62,11 +65,18 @@ export async function chatRoutes(app: FastifyInstance) {
 
     let results;
     try {
+      const sessionId = (request.headers['x-session-id'] as string) ?? 'default';
       const historyForSearch = nonSystemMessages.slice(0, -1).map((m) => ({
         role: m.role as 'user' | 'assistant',
         content: m.content,
       }));
-      const enrichedQuery = buildSearchQuery(query, historyForSearch);
+
+      let summary = getSummary(sessionId);
+      if (shouldGenerateSummary(sessionId, nonSystemMessages.length)) {
+        generateSummary(sessionId, nonSystemMessages).catch(() => {});
+      }
+
+      const enrichedQuery = buildSearchQuery(query, historyForSearch, summary);
       if (enrichedQuery !== query) {
         console.log(`[chat] Query enriched: "${truncatedQuery}" → "${enrichedQuery.length > 120 ? enrichedQuery.slice(0, 120) + '…' : enrichedQuery}"`);
       }
@@ -88,18 +98,18 @@ export async function chatRoutes(app: FastifyInstance) {
 
     console.log(`[chat] LLM request | model=${config.llmModel} | history=${historyMessages.length}`);
 
-    const result = streamText({
-      model: getProvider().chatModel(config.llmModel),
-      system: SYSTEM_PROMPT,
-      messages: [
-        ...historyMessages.map((m) => ({
-          role: m.role as 'user' | 'assistant',
-          content: m.content,
-        })),
-        { role: 'user' as const, content: ragUserPrompt },
-      ],
-      maxOutputTokens: body.max_tokens ?? Math.max(config.maxContextTokens - estimatedTokens, 1024),
-    });
+    const responseFormat = body.response_format?.type ?? (request.headers['x-response-format'] as string | undefined);
+    const queryCategory = classifyQuery(query);
+    const useStructured = (queryCategory === 'enumeration' || queryCategory === 'comparison') && responseFormat === 'json_object';
+
+    const llmMessages = [
+      ...historyMessages.map((m) => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+      })),
+      { role: 'user' as const, content: ragUserPrompt },
+    ];
+    const maxTokens = body.max_tokens ?? Math.max(config.maxContextTokens - estimatedTokens, 1024);
 
     reply.raw.writeHead(200, {
       'Content-Type': 'text/plain; charset=utf-8',
@@ -110,19 +120,53 @@ export async function chatRoutes(app: FastifyInstance) {
 
     let llmError: Error | null = null;
     try {
-      for await (const textPart of result.textStream) {
-        const data = JSON.stringify({ type: 'text-delta', textDelta: textPart });
-        reply.raw.write(data + '\n');
+      if (useStructured) {
+        const schema = queryCategory === 'enumeration' ? EnumResultSchema : ComparisonResultSchema;
+        const result = streamObject({
+          model: getProvider().chatModel(config.llmModel),
+          system: SYSTEM_PROMPT,
+          messages: llmMessages,
+          maxOutputTokens: maxTokens,
+          schema,
+          experimental_telemetry: { isEnabled: config.langfuseEnabled },
+        });
+
+        for await (const chunk of result.partialObjectStream) {
+          const data = JSON.stringify({ type: 'json-delta', jsonDelta: chunk });
+          reply.raw.write(data + '\n');
+          (reply.raw as unknown as { flush?: () => void }).flush?.();
+        }
+
+        const usage = await result.usage;
+        const finishData = JSON.stringify({
+          type: 'finish',
+          usage: { promptTokens: usage?.inputTokens, completionTokens: usage?.outputTokens },
+        });
+        reply.raw.write(finishData + '\n');
+        (reply.raw as unknown as { flush?: () => void }).flush?.();
+      } else {
+        const result = streamText({
+          model: getProvider().chatModel(config.llmModel),
+          system: SYSTEM_PROMPT,
+          messages: llmMessages,
+          maxOutputTokens: maxTokens,
+          experimental_telemetry: { isEnabled: config.langfuseEnabled },
+        });
+
+        for await (const textPart of result.textStream) {
+          const data = JSON.stringify({ type: 'text-delta', textDelta: textPart });
+          reply.raw.write(data + '\n');
+          (reply.raw as unknown as { flush?: () => void }).flush?.();
+        }
+
+        const usage = await result.usage;
+        const finishData = JSON.stringify({
+          type: 'finish',
+          usage: { promptTokens: usage?.inputTokens, completionTokens: usage?.outputTokens },
+        });
+        reply.raw.write(finishData + '\n');
         (reply.raw as unknown as { flush?: () => void }).flush?.();
       }
-
-      const usage = await result.usage;
-      const finishData = JSON.stringify({
-        type: 'finish',
-        usage: { promptTokens: usage?.inputTokens, completionTokens: usage?.outputTokens },
-      });
-      reply.raw.write(finishData + '\n');
-      (reply.raw as unknown as { flush?: () => void }).flush?.();
     } catch (err) {
       llmError = err as Error;
       console.error(`[chat] LLM stream error: ${llmError.message}`);
@@ -132,10 +176,9 @@ export async function chatRoutes(app: FastifyInstance) {
       reply.raw.end();
       const elapsed = Date.now() - startTime;
       if (llmError) {
-        console.log(`[chat] FAILED | ${elapsed}ms | error=${llmError.message}`);
+        console.log(`[chat] FAILED | ${elapsed}ms | mode=${useStructured ? 'structured' : 'text'} | error=${llmError.message}`);
       } else {
-        const usage = await result.usage;
-        console.log(`[chat] COMPLETED | total=${elapsed}ms | in=${usage?.inputTokens ?? '-'} out=${usage?.outputTokens ?? '-'} tokens`);
+        console.log(`[chat] COMPLETED | total=${elapsed}ms | mode=${useStructured ? 'structured' : 'text'}`);
       }
     }
   });
