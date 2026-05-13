@@ -1,4 +1,9 @@
+import { config } from '../dist/config/index.js';
 import { buildApp } from '../dist/app.js';
+
+if (config.langfuseEnabled) {
+  await import('../dist/instrumentation.js');
+}
 
 let app: Awaited<ReturnType<typeof buildApp>> | null = null;
 let initPromise: Promise<Awaited<ReturnType<typeof buildApp>>> | null = null;
