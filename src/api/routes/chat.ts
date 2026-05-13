@@ -224,15 +224,15 @@ export async function chatRoutes(app: FastifyInstance) {
     } finally {
       genObs.end();
       chainObs.end();
+      if (config.langfuseEnabled) {
+        await flushLangfuse();
+      }
       reply.raw.end();
       const elapsed = Date.now() - startTime;
       if (llmError) {
         console.log(`[chat] FAILED | ${elapsed}ms | mode=${useStructured ? 'structured' : 'text'} | error=${llmError.message}`);
       } else {
         console.log(`[chat] COMPLETED | total=${elapsed}ms | mode=${useStructured ? 'structured' : 'text'}`);
-      }
-      if (config.langfuseEnabled) {
-        await flushLangfuse();
       }
     }
   });

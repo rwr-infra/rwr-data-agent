@@ -21,5 +21,9 @@ export default async function handler(
 ) {
   const server = await getApp();
   await server.ready();
-  server.server.emit('request', req, res);
+  await new Promise<void>((resolve) => {
+    res.once('close', resolve);
+    res.once('finish', resolve);
+    server.server.emit('request', req, res);
+  });
 }
