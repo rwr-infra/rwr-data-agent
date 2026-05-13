@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { streamText, streamObject } from 'ai';
-import { observe, propagateAttributes, setActiveTraceIO, startActiveObservation, updateActiveObservation } from '@langfuse/tracing';
+import { startObservation } from '@langfuse/tracing';
 import { config, validateConfig } from '../../config/index.js';
 import { search } from '../../retrieval/search.js';
 import { SYSTEM_PROMPT, buildUserPrompt } from '../../retrieval/prompt.js';
@@ -68,185 +68,168 @@ export async function chatRoutes(app: FastifyInstance) {
     const memorySessionId = sessionId ?? 'default';
     const queryCategory = classifyQuery(query);
 
-    const tracedHandler = observe(
-      async () => {
-        await propagateAttributes({
-          traceName: 'chat-completions',
-          sessionId,
-          tags: [queryCategory],
-        }, async () => {
-          setActiveTraceIO({ input: query });
-          updateActiveObservation({
-            input: { query, messages: nonSystemMessages },
-            metadata: { queryCategory },
-          });
+    const chainObs = startObservation('chat-completions', {
+      input: { query, messages: nonSystemMessages },
+      metadata: { queryCategory },
+    }, { asType: 'chain' });
 
-          let results;
-          try {
-            const historyForSearch = nonSystemMessages.slice(0, -1).map((m) => ({
-              role: m.role as 'user' | 'assistant',
-              content: m.content,
-            }));
+    if (sessionId) {
+      chainObs.otelSpan.setAttribute('session.id', sessionId);
+    }
+    chainObs.otelSpan.setAttribute('langfuse.trace.name', 'chat-completions');
+    chainObs.otelSpan.setAttribute('langfuse.trace.tags', [queryCategory]);
+    chainObs.otelSpan.setAttribute('langfuse.trace.input', JSON.stringify({ query, messages: nonSystemMessages }));
 
-            let summary = getSummary(memorySessionId);
-            if (shouldGenerateSummary(memorySessionId, nonSystemMessages.length)) {
-              generateSummary(memorySessionId, nonSystemMessages).catch(() => {});
-            }
+    let results;
+    try {
+      const historyForSearch = nonSystemMessages.slice(0, -1).map((m) => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+      }));
 
-            const enrichedQuery = buildSearchQuery(query, historyForSearch, summary);
-            if (enrichedQuery !== query) {
-              console.log(`[chat] Query enriched: "${truncatedQuery}" → "${enrichedQuery.length > 120 ? enrichedQuery.slice(0, 120) + '…' : enrichedQuery}"`);
-            }
-            const searchIntent = extractQueryIntent(query);
-            const topK = searchIntent.isEnumeration ? 30 : 5;
-            results = await search(query, {}, topK, body.table, enrichedQuery);
-            console.log(`[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (topK=${topK}, table=${body.table ?? config.databaseTable})`);
-          } catch (err) {
-            console.error(`[chat] Search failed: ${(err as Error).message}`);
-            reply.status(500).send({ error: { message: 'Search failed', type: 'internal_error' } });
-            return;
-          }
+      let summary = getSummary(memorySessionId);
+      if (shouldGenerateSummary(memorySessionId, nonSystemMessages.length)) {
+        generateSummary(memorySessionId, nonSystemMessages).catch(() => {});
+      }
 
-          updateActiveObservation({
-            metadata: { queryCategory, searchResults: results.length },
-          });
+      const enrichedQuery = buildSearchQuery(query, historyForSearch, summary);
+      if (enrichedQuery !== query) {
+        console.log(`[chat] Query enriched: "${truncatedQuery}" → "${enrichedQuery.length > 120 ? enrichedQuery.slice(0, 120) + '…' : enrichedQuery}"`);
+      }
+      const searchIntent = extractQueryIntent(query);
+      const topK = searchIntent.isEnumeration ? 30 : 5;
+      results = await search(query, {}, topK, body.table, enrichedQuery);
+      console.log(`[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (topK=${topK}, table=${body.table ?? config.databaseTable})`);
+    } catch (err) {
+      console.error(`[chat] Search failed: ${(err as Error).message}`);
+      chainObs.update({ level: 'ERROR', statusMessage: 'Search failed' });
+      chainObs.end();
+      reply.status(500).send({ error: { message: 'Search failed', type: 'internal_error' } });
+      return;
+    }
 
-          const ragUserPrompt = buildUserPrompt(query, results);
+    chainObs.update({ metadata: { queryCategory, searchResults: results.length } });
 
-          const historyMessages = nonSystemMessages.slice(0, -1).map((m) => ({
-            role: m.role as 'user' | 'assistant',
-            content: m.content,
-          }));
+    const ragUserPrompt = buildUserPrompt(query, results);
 
-          console.log(`[chat] LLM request | model=${config.llmModel} | history=${historyMessages.length}`);
+    const historyMessages = nonSystemMessages.slice(0, -1).map((m) => ({
+      role: m.role as 'user' | 'assistant',
+      content: m.content,
+    }));
 
-          const responseFormat = body.response_format?.type ?? (request.headers['x-response-format'] as string | undefined);
-          const useStructured = (queryCategory === 'enumeration' || queryCategory === 'comparison') && responseFormat === 'json_object';
+    console.log(`[chat] LLM request | model=${config.llmModel} | history=${historyMessages.length}`);
 
-          const llmMessages = [
-            ...historyMessages.map((m) => ({
-              role: m.role as 'user' | 'assistant',
-              content: m.content,
-            })),
-            { role: 'user' as const, content: ragUserPrompt },
-          ];
-          const maxTokens = body.max_tokens ?? Math.max(config.maxContextTokens - estimatedTokens, 1024);
+    const responseFormat = body.response_format?.type ?? (request.headers['x-response-format'] as string | undefined);
+    const useStructured = (queryCategory === 'enumeration' || queryCategory === 'comparison') && responseFormat === 'json_object';
 
-          reply.raw.writeHead(200, {
-            'Content-Type': 'text/plain; charset=utf-8',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-            'X-Accel-Buffering': 'no',
-          });
+    const llmMessages = [
+      ...historyMessages.map((m) => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+      })),
+      { role: 'user' as const, content: ragUserPrompt },
+    ];
+    const maxTokens = body.max_tokens ?? Math.max(config.maxContextTokens - estimatedTokens, 1024);
 
-          const llmResult: { error: Error | null; useStructuredMode: boolean } = { error: null, useStructuredMode: false };
-          await startActiveObservation(
-            'llm-generation',
-            async (genObservation) => {
-              genObservation.update({
-                input: { messages: llmMessages, system: SYSTEM_PROMPT },
-                model: config.llmModel,
-                modelParameters: { maxTokens },
-              });
+    const genObs = chainObs.startObservation('llm-generation', {
+      input: { messages: llmMessages, system: SYSTEM_PROMPT },
+      model: config.llmModel,
+      modelParameters: { maxTokens },
+    }, { asType: 'generation' });
 
-              try {
-                if (useStructured) {
-                  llmResult.useStructuredMode = true;
-                  const schema = queryCategory === 'enumeration' ? EnumResultSchema : ComparisonResultSchema;
-                  const result = streamObject({
-                    model: getProvider().chatModel(config.llmModel),
-                    system: SYSTEM_PROMPT,
-                    messages: llmMessages,
-                    maxOutputTokens: maxTokens,
-                    schema,
-                    onFinish: ({ object, usage }) => {
-                      const outputText = JSON.stringify(object).slice(0, 500);
-                      setActiveTraceIO({ output: outputText });
-                      updateActiveObservation({
-                        output: outputText,
-                        usageDetails: {
-                          inputTokens: usage?.inputTokens,
-                          outputTokens: usage?.outputTokens,
-                          totalTokens: (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0),
-                        },
-                      }, { asType: 'generation' });
-                    },
-                  });
+    reply.raw.writeHead(200, {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
 
-                  for await (const chunk of result.partialObjectStream) {
-                    const data = JSON.stringify({ type: 'json-delta', jsonDelta: chunk });
-                    reply.raw.write(data + '\n');
-                    (reply.raw as unknown as { flush?: () => void }).flush?.();
-                  }
-
-                  const usage = await result.usage;
-                  const finishData = JSON.stringify({
-                    type: 'finish',
-                    usage: { promptTokens: usage?.inputTokens, completionTokens: usage?.outputTokens },
-                  });
-                  reply.raw.write(finishData + '\n');
-                  (reply.raw as unknown as { flush?: () => void }).flush?.();
-                } else {
-                  const result = streamText({
-                    model: getProvider().chatModel(config.llmModel),
-                    system: SYSTEM_PROMPT,
-                    messages: llmMessages,
-                    maxOutputTokens: maxTokens,
-                    onFinish: ({ text, usage }) => {
-                      const outputText = text.slice(0, 500);
-                      setActiveTraceIO({ output: outputText });
-                      updateActiveObservation({
-                        output: outputText,
-                        usageDetails: {
-                          inputTokens: usage?.inputTokens,
-                          outputTokens: usage?.outputTokens,
-                          totalTokens: (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0),
-                        },
-                      }, { asType: 'generation' });
-                    },
-                  });
-
-                  for await (const textPart of result.textStream) {
-                    const data = JSON.stringify({ type: 'text-delta', textDelta: textPart });
-                    reply.raw.write(data + '\n');
-                    (reply.raw as unknown as { flush?: () => void }).flush?.();
-                  }
-
-                  const usage = await result.usage;
-                  const finishData = JSON.stringify({
-                    type: 'finish',
-                    usage: { promptTokens: usage?.inputTokens, completionTokens: usage?.outputTokens },
-                  });
-                  reply.raw.write(finishData + '\n');
-                  (reply.raw as unknown as { flush?: () => void }).flush?.();
-                }
-              } catch (err) {
-                llmResult.error = err as Error;
-                console.error(`[chat] LLM stream error: ${llmResult.error.message}`);
-                const errData = JSON.stringify({ type: 'error', error: llmResult.error.message });
-                reply.raw.write(errData + '\n');
-              }
-            },
-            { asType: 'generation' },
-          );
-
-          reply.raw.end();
-          const elapsed = Date.now() - startTime;
-          if (llmResult.error) {
-            console.log(`[chat] FAILED | ${elapsed}ms | mode=${llmResult.useStructuredMode ? 'structured' : 'text'} | error=${llmResult.error.message}`);
-          } else {
-            console.log(`[chat] COMPLETED | total=${elapsed}ms | mode=${llmResult.useStructuredMode ? 'structured' : 'text'}`);
-          }
+    let llmError: Error | null = null;
+    try {
+      if (useStructured) {
+        const schema = queryCategory === 'enumeration' ? EnumResultSchema : ComparisonResultSchema;
+        const result = streamObject({
+          model: getProvider().chatModel(config.llmModel),
+          system: SYSTEM_PROMPT,
+          messages: llmMessages,
+          maxOutputTokens: maxTokens,
+          schema,
+          onFinish: ({ object, usage }) => {
+            const outputText = JSON.stringify(object).slice(0, 500);
+            genObs.update({
+              output: outputText,
+              usageDetails: {
+                inputTokens: usage?.inputTokens ?? 0,
+                outputTokens: usage?.outputTokens ?? 0,
+                totalTokens: (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0),
+              },
+            });
+            chainObs.otelSpan.setAttribute('langfuse.trace.output', outputText);
+          },
         });
-      },
-      {
-        name: 'chat-completions',
-        asType: 'chain',
-        captureInput: false,
-        captureOutput: false,
-      },
-    );
 
-    await tracedHandler();
+        for await (const chunk of result.partialObjectStream) {
+          const data = JSON.stringify({ type: 'json-delta', jsonDelta: chunk });
+          reply.raw.write(data + '\n');
+          (reply.raw as unknown as { flush?: () => void }).flush?.();
+        }
+
+        const usage = await result.usage;
+        const finishData = JSON.stringify({
+          type: 'finish',
+          usage: { promptTokens: usage?.inputTokens, completionTokens: usage?.outputTokens },
+        });
+        reply.raw.write(finishData + '\n');
+        (reply.raw as unknown as { flush?: () => void }).flush?.();
+      } else {
+        const result = streamText({
+          model: getProvider().chatModel(config.llmModel),
+          system: SYSTEM_PROMPT,
+          messages: llmMessages,
+          maxOutputTokens: maxTokens,
+          onFinish: ({ text, usage }) => {
+            const outputText = text.slice(0, 500);
+            genObs.update({
+              output: outputText,
+              usageDetails: {
+                inputTokens: usage?.inputTokens ?? 0,
+                outputTokens: usage?.outputTokens ?? 0,
+                totalTokens: (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0),
+              },
+            });
+            chainObs.otelSpan.setAttribute('langfuse.trace.output', outputText);
+          },
+        });
+
+        for await (const textPart of result.textStream) {
+          const data = JSON.stringify({ type: 'text-delta', textDelta: textPart });
+          reply.raw.write(data + '\n');
+          (reply.raw as unknown as { flush?: () => void }).flush?.();
+        }
+
+        const usage = await result.usage;
+        const finishData = JSON.stringify({
+          type: 'finish',
+          usage: { promptTokens: usage?.inputTokens, completionTokens: usage?.outputTokens },
+        });
+        reply.raw.write(finishData + '\n');
+        (reply.raw as unknown as { flush?: () => void }).flush?.();
+      }
+    } catch (err) {
+      llmError = err as Error;
+      console.error(`[chat] LLM stream error: ${llmError.message}`);
+      const errData = JSON.stringify({ type: 'error', error: llmError.message });
+      reply.raw.write(errData + '\n');
+    } finally {
+      genObs.end();
+      chainObs.end();
+      reply.raw.end();
+      const elapsed = Date.now() - startTime;
+      if (llmError) {
+        console.log(`[chat] FAILED | ${elapsed}ms | mode=${useStructured ? 'structured' : 'text'} | error=${llmError.message}`);
+      } else {
+        console.log(`[chat] COMPLETED | total=${elapsed}ms | mode=${useStructured ? 'structured' : 'text'}`);
+      }
+    }
   });
 }
