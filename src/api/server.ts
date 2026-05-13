@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import '../instrumentation.js';
 import { buildApp } from '../app.js';
 import { config, validateConfig } from '../config/index.js';

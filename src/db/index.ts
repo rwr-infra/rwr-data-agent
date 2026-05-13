@@ -12,14 +12,21 @@ async function initPool(): Promise<PgPool> {
   if (config.databaseProvider === 'neon') {
     const { Pool: NeonPool } = await import('@neondatabase/serverless');
     const neonPool = new NeonPool({ connectionString: config.databaseUrl, ssl: true });
+    neonPool.on('error', (err) => {
+      console.error('[db] Neon pool idle client error:', err.message);
+    });
     return neonPool as unknown as PgPool;
   }
   const { Pool } = await import('pg');
-  return new Pool({
+  const pool = new Pool({
     connectionString: config.databaseUrl,
     max: config.databasePoolMax,
     ssl: config.databaseSsl ? { rejectUnauthorized: false } : undefined,
   });
+  pool.on('error', (err) => {
+    console.error('[db] Pool idle client error:', err.message);
+  });
+  return pool;
 }
 
 async function initDb(): Promise<DrizzleInstance> {

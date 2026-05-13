@@ -78,6 +78,17 @@ export function expandQuery(query: string): string {
   return expandWithSynonyms(query);
 }
 
+const ENTITY_KEY_PATTERN = /`([a-zA-Z0-9_]+\.(?:weapon|vehicle|projectile|call|carry_item|xml))`/g;
+
+function extractEntityKeys(text: string): string[] {
+  const keys: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = ENTITY_KEY_PATTERN.exec(text)) !== null) {
+    keys.push(match[1]);
+  }
+  return [...new Set(keys)];
+}
+
 export function buildSearchQuery(currentQuery: string, history: HistoryMessage[], summary?: SummaryContext): string {
   const parts: string[] = [];
 
@@ -117,7 +128,10 @@ export function buildSearchQuery(currentQuery: string, history: HistoryMessage[]
 
   const lastAssistant = [...history].reverse().find(m => m.role === 'assistant');
   if (lastAssistant) {
-    parts.push(lastAssistant.content.trim().slice(0, 200));
+    const entityKeys = extractEntityKeys(lastAssistant.content);
+    if (entityKeys.length > 0) {
+      parts.push(entityKeys.slice(0, 5).join(' '));
+    }
   }
 
   parts.push(currentQuery);
