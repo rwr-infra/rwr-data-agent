@@ -1,5 +1,18 @@
 export type Lang = 'zh' | 'en';
 
+function formatMs(ms: string | number): string {
+  if (typeof ms === 'string') return ms;
+  if (ms < 1000) return '<1s';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rs = s % 60;
+  if (m < 60) return `${m}m${rs}s`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return `${h}h${rm}m${rs}s`;
+}
+
 export interface Translations {
   htmlLang: string;
   welcomeTitle: string;
@@ -54,7 +67,7 @@ const i18n: Record<Lang, Translations> = {
     reqFailed: '请求失败: ',
     netError: '网络错误: ',
     metaFormat: (ttfb, total, inp, out) =>
-      `TTFB ${ttfb}ms · 总耗时 ${total}ms · 输入 ${inp} tokens · 输出 ${out} tokens`,
+      `TTFB ${formatMs(ttfb)} · 总耗时 ${formatMs(total)} · 输入 ${inp} tokens · 输出 ${out} tokens`,
     langLabel: 'EN',
     retry: '重试',
     copyText: '复制文本',
@@ -90,7 +103,7 @@ const i18n: Record<Lang, Translations> = {
     reqFailed: 'Request failed: ',
     netError: 'Network error: ',
     metaFormat: (ttfb, total, inp, out) =>
-      `TTFB ${ttfb}ms · Total ${total}ms · In ${inp} tokens · Out ${out} tokens`,
+      `TTFB ${formatMs(ttfb)} · Total ${formatMs(total)} · In ${inp} tokens · Out ${out} tokens`,
     langLabel: '中文',
     retry: 'Retry',
     copyText: 'Copy text',
