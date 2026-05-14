@@ -8,10 +8,10 @@ import { search } from '../../retrieval/search.js';
 import { SYSTEM_PROMPT, buildUserPrompt } from '../../retrieval/prompt.js';
 import { buildSearchQuery } from '../../retrieval/queryRewrite.js';
 import { extractQueryIntent } from '../../retrieval/search.js';
-import { classifyQuery } from '../../retrieval/intent.js';
+import { classifyQuery, isMetaQuery } from '../../retrieval/intent.js';
 import { EnumResultSchema, ComparisonResultSchema } from '../../types/schemas.js';
 import { getSummary, generateSummary, shouldGenerateSummary } from '../../memory/summarizer.js';
-import type { ChatCompletionRequest } from '../../types/index.js';
+import type { ChatCompletionRequest, SearchResult } from '../../types/index.js';
 
 let provider: ReturnType<typeof createOpenAICompatible> | null = null;
 
@@ -81,26 +81,38 @@ export async function chatRoutes(app: FastifyInstance) {
     chainObs.otelSpan.setAttribute('langfuse.trace.tags', [queryCategory]);
     chainObs.otelSpan.setAttribute('langfuse.trace.input', JSON.stringify({ query, messages: nonSystemMessages }));
 
-    let results;
+    let results: SearchResult[];
     try {
-      const historyForSearch = nonSystemMessages.slice(0, -1).map((m) => ({
-        role: m.role as 'user' | 'assistant',
-        content: m.content,
-      }));
+      const metaDetected = isMetaQuery(query);
+      if (metaDetected) {
+        console.log(`[chat] Meta query detected, skipping search`);
+        results = [];
+      } else {
+        const searchObs = chainObs.startObservation('search-pipeline', {
+          input: { query, topK: 60 },
+        }, { asType: 'span' });
 
-      let summary = getSummary(memorySessionId);
-      if (shouldGenerateSummary(memorySessionId, nonSystemMessages.length)) {
-        generateSummary(memorySessionId, nonSystemMessages).catch(() => {});
-      }
+        const historyForSearch = nonSystemMessages.slice(0, -1).map((m) => ({
+          role: m.role as 'user' | 'assistant',
+          content: m.content,
+        }));
 
-      const enrichedQuery = buildSearchQuery(query, historyForSearch, summary);
-      if (enrichedQuery !== query) {
-        console.log(`[chat] Query enriched: "${truncatedQuery}" → "${enrichedQuery.length > 120 ? enrichedQuery.slice(0, 120) + '…' : enrichedQuery}"`);
+        let summary = getSummary(memorySessionId);
+        if (shouldGenerateSummary(memorySessionId, nonSystemMessages.length)) {
+          generateSummary(memorySessionId, nonSystemMessages).catch(() => {});
+        }
+
+        const enrichedQuery = buildSearchQuery(query, historyForSearch, summary);
+        if (enrichedQuery !== query) {
+          console.log(`[chat] Query enriched: "${truncatedQuery}" → "${enrichedQuery.length > 120 ? enrichedQuery.slice(0, 120) + '…' : enrichedQuery}"`);
+        }
+        const topK = 60;
+        results = await search(query, {}, topK, body.table, enrichedQuery);
+        console.log(`[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (topK=${topK}, table=${body.table ?? config.databaseTable})`);
+
+        searchObs.update({ output: { resultCount: results.length } });
+        searchObs.end();
       }
-      const searchIntent = extractQueryIntent(query);
-      const topK = searchIntent.isEnumeration ? 30 : 5;
-      results = await search(query, {}, topK, body.table, enrichedQuery);
-      console.log(`[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (topK=${topK}, table=${body.table ?? config.databaseTable})`);
     } catch (err) {
       console.error(`[chat] Search failed: ${(err as Error).message}`);
       chainObs.update({ level: 'ERROR', statusMessage: 'Search failed' });
@@ -130,7 +142,10 @@ export async function chatRoutes(app: FastifyInstance) {
       })),
       { role: 'user' as const, content: ragUserPrompt },
     ];
-    const maxTokens = body.max_tokens ?? Math.max(config.maxContextTokens - estimatedTokens, 1024);
+    const maxTokens = Math.min(
+      body.max_tokens ?? Math.max(config.maxContextTokens - estimatedTokens, 1024),
+      8192,
+    );
 
     const genObs = chainObs.startObservation('llm-generation', {
       input: { messages: llmMessages, system: SYSTEM_PROMPT },

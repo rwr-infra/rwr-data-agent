@@ -30,7 +30,7 @@ export async function rerankCandidates(
   topN: number,
   searchQuery?: string
 ): Promise<SearchResult[]> {
-  if (candidates.length <= 1) return candidates;
+  if (candidates.length <= 3) return candidates.slice(0, topN);
 
   return getTracer().startActiveSpan('rerank', async (span) => {
     span.setAttribute('candidateCount', candidates.length);

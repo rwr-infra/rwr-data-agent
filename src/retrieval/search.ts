@@ -128,9 +128,10 @@ function reciprocalRankFusion(
 export async function search(
   query: string,
   filters: SearchFilters = {},
-  topK = 5,
+  topK = 60,
   tableName?: string,
   searchQuery?: string,
+  offset = 0,
 ): Promise<SearchResult[]> {
   return getTracer().startActiveSpan('search', async (searchSpan) => {
     searchSpan.setAttribute('query', query);
@@ -248,15 +249,14 @@ export async function search(
       }
     }
 
-    // For enumeration queries, ensure we return enough results
-    const effectiveTopK = intent.isEnumeration ? Math.max(topK, 30) : topK;
+    const effectiveTopK = Math.max(topK + offset, 60);
 
-    // -----------------------------------------------------------------------
-    // Hybrid search: Vector + Full-Text (tsvector) with RRF fusion
-    // -----------------------------------------------------------------------
-    const candidatePool = intent.isEnumeration ? 200 : Math.max(topK * 12, 60);
-    const vectorPool = Math.ceil(candidatePool * 0.6);
-    const ftsPool = Math.ceil(candidatePool * 0.4);
+    const candidatePool = intent.isEnumeration
+      ? Math.max(topK * 8, 300)
+      : Math.max(topK * 4, 120);
+    const vectorPool = Math.ceil(candidatePool * 0.5);
+    const ftsPool = Math.ceil(candidatePool * 0.35);
+    const ilikePool = Math.ceil(candidatePool * 0.15);
 
     const { where: whereClause, params: whereParams, idx: paramIdx } = buildWhereClause(filters, intent, 1);
 
@@ -326,7 +326,7 @@ export async function search(
         ${ilikeWhere}
         LIMIT $${ilikeIdx}
       `;
-      ilikeParams.push(candidatePool);
+      ilikeParams.push(ilikePool);
 
       const ilikeClient = await pool.connect();
       try {
@@ -465,10 +465,12 @@ export async function search(
     searchSpan.setAttribute('candidateCount', candidates.length);
     searchSpan.setAttribute('resultCount', reranked.length);
     searchSpan.setAttribute('path', 'hybrid');
+    searchSpan.setAttribute('offset', offset);
     setCachedSearch(cacheKey, query, reranked).catch(() => {});
 
     searchSpan.end();
-    return reranked;
+    const paginated = reranked.slice(offset, offset + topK);
+    return paginated;
   });
 }
 
@@ -495,10 +497,22 @@ function splitCJKBoundary(text: string): string[] {
 
 function tokenizeQuery(query: string): string[] {
   return query
-    .split(/[\s,，。！？、；：""''（）\[\]{}]+/)
+    .split(/[\s,，。！？、；：""''（）\[\]{}\/\\|@#$%^&*+=~`<>]+/)
     .flatMap((t) => splitCJKBoundary(t))
+    .flatMap((t) => generateCJKBigrams(t))
     .map((t) => t.trim().toLowerCase())
     .filter((t) => t.length > 0);
+}
+
+function generateCJKBigrams(text: string): string[] {
+  if (!CJK_REGEX.test(text)) return [text];
+  const bigrams: string[] = [text];
+  for (let i = 0; i < text.length - 1; i++) {
+    if (CJK_REGEX.test(text[i]) && CJK_REGEX.test(text[i + 1])) {
+      bigrams.push(text.slice(i, i + 2));
+    }
+  }
+  return bigrams;
 }
 
 const STOP_WORDS = new Set([
@@ -516,7 +530,10 @@ const STOP_WORDS = new Set([
 
 function extractSearchTerms(query: string): string[] {
   return tokenizeQuery(query)
-    .filter((t) => t.length >= 2 && !STOP_WORDS.has(t));
+    .filter((t) => {
+      if (t.length < 2 && !CJK_REGEX.test(t)) return false;
+      return !STOP_WORDS.has(t);
+    });
 }
 
 function extractKeyPatterns(query: string): string[] {

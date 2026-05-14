@@ -22,3 +22,11 @@ export function shouldUseStructuredOutput(query: string, responseFormat?: string
   const category = classifyQuery(query);
   return category === 'enumeration' || category === 'comparison';
 }
+
+const META_PATTERNS = /^(你是谁|你有什么能力|你好|你叫什么|介绍一下你自己|你是什么|who are you|what can you do|hello|hi\b|what are you|tell me about yourself|你的功能|你能做什么|你能干什么|你能帮什么)/i;
+
+export function isMetaQuery(query: string): boolean {
+  const trimmed = query.trim();
+  if (trimmed.length > 50) return false;
+  return META_PATTERNS.test(trimmed);
+}
