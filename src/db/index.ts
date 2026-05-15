@@ -11,7 +11,13 @@ async function initPool(): Promise<PgPool> {
   validateConfig();
   if (config.databaseProvider === 'neon') {
     const { Pool: NeonPool } = await import('@neondatabase/serverless');
-    const neonPool = new NeonPool({ connectionString: config.databaseUrl, ssl: true });
+    const neonPool = new NeonPool({
+      connectionString: config.databaseUrl,
+      ssl: true,
+      max: config.databasePoolMax,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 15000,
+    });
     neonPool.on('error', (err) => {
       console.error('[db] Neon pool idle client error:', err.message);
     });
@@ -21,6 +27,8 @@ async function initPool(): Promise<PgPool> {
   const pool = new Pool({
     connectionString: config.databaseUrl,
     max: config.databasePoolMax,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 15000,
     ssl: config.databaseSsl ? { rejectUnauthorized: false } : undefined,
   });
   pool.on('error', (err) => {
