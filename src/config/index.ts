@@ -26,6 +26,12 @@ export const config = {
   langfuseBaseUrl: process.env.LANGFUSE_BASE_URL ?? 'https://cloud.langfuse.com',
   summaryIntervalTurns: parseInt(process.env.SUMMARY_INTERVAL_TURNS ?? '3', 10),
   summaryModel: process.env.SUMMARY_MODEL ?? process.env.LLM_MODEL ?? 'Qwen/Qwen2.5-7B-Instruct',
+  rrfK: parseInt(process.env.RRF_K ?? '60', 10),
+  rrfWeightVector: parseFloat(process.env.RRF_WEIGHT_VECTOR ?? '0.50'),
+  rrfWeightFts: parseFloat(process.env.RRF_WEIGHT_FTS ?? '0.35'),
+  rrfWeightIlike: parseFloat(process.env.RRF_WEIGHT_ILIKE ?? '0.15'),
+  rerankDocTruncate: parseInt(process.env.RERANK_DOC_TRUNCATE ?? '800', 10),
+  rerankPinnedPrefix: process.env.RERANK_PINNED_PREFIX !== 'false',
 };
 
 export function validateConfig() {

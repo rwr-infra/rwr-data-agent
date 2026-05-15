@@ -14,6 +14,12 @@ When looking for an item in context, you MUST check ALL of the following before 
 - **Content match**: Search the full document content for the queried term, including attributes like \`name\`, \`class\`, or any field value.
 - If ANY of these checks finds a match, treat the document as relevant — do NOT say the item is missing.
 
+### Low Confidence Warning
+If the context section below includes a "[Low Confidence]" marker, it means the retrieved documents may not be highly relevant to the query. In this case:
+- Still check the documents carefully using the Matching Rules above.
+- If no document clearly matches, explicitly tell the user: "I could not find a confident match in the database. The closest results are shown, but they may not be what you're looking for."
+- Suggest the user try a more specific query, use the item's Key, or check spelling.
+
 ### Enumeration Queries
 Triggered by: 有哪些, 列出, 所有, 全部, list all, what are, enumerate, etc.
 
@@ -31,16 +37,28 @@ When asked to compare items (e.g., "A vs B", "which is better"):
 - List each item's relevant attributes side by side.
 - Highlight differences; avoid subjective judgments unless explicitly asked.`;
 
-export function buildUserPrompt(query: string, results: SearchResult[]): string {
-  const contextParts = results.map((r, i) => {
-    return `[Document ${i + 1}] Type: ${r.type}, Key: ${r.key}\n${r.content}`;
+export function buildUserPrompt(
+  query: string,
+  results: SearchResult[],
+  options?: { lowConfidence?: boolean },
+): string {
+  const contextParts: string[] = [];
+
+  if (options?.lowConfidence && results.length > 0) {
+    contextParts.push('[Low Confidence] The following documents were retrieved but may not closely match the query.');
+  }
+
+  results.forEach((r, i) => {
+    contextParts.push(`[Document ${i + 1}] Type: ${r.type}, Key: ${r.key}\n${r.content}`);
   });
 
   const context = contextParts.join('\n\n---\n\n');
 
   const instruction = results.length === 0
     ? 'No context documents were found. Inform the user and suggest alternative terms they could search for (e.g., a Key, English name, or broader category).'
-    : `Answer the question using the context documents above. Before concluding no match exists, check Key fields (partial/abbreviated names), Localized Names, and document content for the queried term.`;
+    : options?.lowConfidence
+      ? 'The retrieved context has low confidence. Check Key fields, Localized Names, and document content carefully. If no clear match exists, tell the user you could not find a confident match and suggest alternatives.'
+      : `Answer the question using the context documents above. Before concluding no match exists, check Key fields (partial/abbreviated names), Localized Names, and document content for the queried term.`;
 
   return `### Context
 ${context}

@@ -3,6 +3,7 @@ import { createEmbedding } from '../ingestion/embeddings.js';
 import { rerankCandidates } from './rerank.js';
 import { config } from '../config/index.js';
 import { expandQuery } from './queryRewrite.js';
+import { normalizeQuery, matchAlias, extractEntityMentions } from './normalize.js';
 import { FTS_CONFIG } from '../db/schema.js';
 import { getCachedSearch, setCachedSearch, generateCacheKey } from '../cache/index.js';
 import { getTracer } from '../observability/langfuse.js';
@@ -15,13 +16,26 @@ interface QueryIntent {
   exactKey?: string;
   isEnumeration: boolean;
   isExactKeyQuery: boolean;
+  isComparison: boolean;
+  aliasMatches: { canonical: string; confidence: number }[];
+  entityMentions: string[];
 }
 
 export function extractQueryIntent(query: string): QueryIntent {
-  const intent: QueryIntent = { isEnumeration: false, isExactKeyQuery: false };
+  const intent: QueryIntent = {
+    isEnumeration: false,
+    isExactKeyQuery: false,
+    isComparison: false,
+    aliasMatches: [],
+    entityMentions: [],
+  };
 
-  if (/有哪些|列出|所有|全部|是什么|what are|list all/i.test(query)) {
+  if (/有哪些|列出|所有|全部|是什么|what are|list all|enumerate|show all/i.test(query)) {
     intent.isEnumeration = true;
+  }
+
+  if (/对比|比较|vs|versus|哪个|哪把|和.*比|compared|better|difference|which is|区别/i.test(query)) {
+    intent.isComparison = true;
   }
 
   const exactKeyMatch = query.match(/key\s*[=:]\s*["']?([^"'\s]+)["']?/i) ||
@@ -31,9 +45,13 @@ export function extractQueryIntent(query: string): QueryIntent {
     intent.isExactKeyQuery = true;
   }
 
-  if (/武器|weapon|枪械|枪/i.test(query)) {
+  const normalized = normalizeQuery(query);
+  intent.aliasMatches = matchAlias(normalized);
+  intent.entityMentions = extractEntityMentions(query);
+
+  if (/武器|weapon|枪械|枪/i.test(query) && !intent.isEnumeration) {
     intent.inferredType = 'weapon';
-  } else if (/士兵|soldier|兵种|人/i.test(query)) {
+  } else if (/士兵|soldier|兵种/i.test(query)) {
     intent.inferredType = 'soldier';
   } else if (/载具|vehicle|车|坦克|飞机/i.test(query)) {
     intent.inferredType = 'vehicle';
@@ -69,7 +87,7 @@ function buildWhereClause(
   if (filters.type) {
     conditions.push(`type = $${idx++}`);
     params.push(filters.type);
-  } else if (intent.inferredType) {
+  } else if (intent.inferredType && !intent.isEnumeration) {
     conditions.push(`type = $${idx++}`);
     params.push(intent.inferredType);
   }
@@ -96,33 +114,45 @@ function buildWhereClause(
   return { where, params, idx };
 }
 
-/**
- * Reciprocal Rank Fusion: merge multiple ranked lists by score = Σ 1/(k + rank).
- * k=60 is the standard RRF constant from the original paper.
- */
-function reciprocalRankFusion(
-  rankLists: SearchResult[][],
-  k = 60,
-): SearchResult[] {
-  const scoreMap = new Map<string, { score: number; doc: SearchResult }>();
+interface WeightedRRFOptions {
+  k: number;
+  weights: number[];
+}
 
-  for (const list of rankLists) {
+function weightedReciprocalRankFusion(
+  rankLists: SearchResult[][],
+  options: WeightedRRFOptions,
+): SearchResult[] {
+  const { k, weights } = options;
+  const scoreMap = new Map<string, { score: number; doc: SearchResult; sources: string[] }>();
+
+  const sourceNames = ['vector', 'fts', 'ilike', 'keyPattern', 'alias', 'enumeration'];
+
+  for (let listIdx = 0; listIdx < rankLists.length; listIdx++) {
+    const list = rankLists[listIdx];
+    const weight = weights[listIdx] ?? 1.0;
+    const sourceName = sourceNames[listIdx] ?? `route_${listIdx}`;
+
     for (let rank = 0; rank < list.length; rank++) {
       const doc = list[rank];
       const id = doc.doc_id;
-      const rrfScore = 1 / (k + rank + 1);
+      const rrfScore = weight / (k + rank + 1);
       const existing = scoreMap.get(id);
       if (existing) {
         existing.score += rrfScore;
+        existing.sources.push(sourceName);
       } else {
-        scoreMap.set(id, { score: rrfScore, doc });
+        scoreMap.set(id, { score: rrfScore, doc, sources: [sourceName] });
       }
     }
   }
 
   return [...scoreMap.values()]
     .sort((a, b) => b.score - a.score)
-    .map((entry) => ({ ...entry.doc, distance: -entry.score }));
+    .map((entry) => ({
+      ...entry.doc,
+      distance: -entry.score,
+    }));
 }
 
 export async function search(
@@ -138,7 +168,7 @@ export async function search(
     searchSpan.setAttribute('topK', topK);
 
     const table = tableName && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName) ? tableName : config.databaseTable;
-    const cacheKey = generateCacheKey(query, table, JSON.stringify(filters), String(topK));
+    const cacheKey = generateCacheKey(query, table, JSON.stringify(filters), String(topK), searchQuery ?? '', String(offset));
     const cached = await getCachedSearch(cacheKey);
     if (cached) {
       searchSpan.setAttribute('cacheHit', true);
@@ -157,96 +187,47 @@ export async function search(
 
     searchSpan.setAttribute('intent.isEnumeration', intent.isEnumeration);
     searchSpan.setAttribute('intent.isExactKey', intent.isExactKeyQuery);
+    searchSpan.setAttribute('intent.isComparison', intent.isComparison);
     if (intent.inferredType) searchSpan.setAttribute('intent.inferredType', intent.inferredType);
+    if (intent.aliasMatches.length > 0) searchSpan.setAttribute('intent.aliasMatches', intent.aliasMatches.map((a) => a.canonical).join(','));
+    if (intent.entityMentions.length > 0) searchSpan.setAttribute('intent.entityMentions', intent.entityMentions.join(','));
 
     // -----------------------------------------------------------------------
-    // Fast path: exact key lookup — bypass embedding entirely
+    // Fast path 1: exact key lookup (key=... or key为...)
     // -----------------------------------------------------------------------
     if (intent.isExactKeyQuery && intent.exactKey) {
-      const client = await pool.connect();
-      try {
-        const conditions: string[] = [`key = $1`];
-        const params: (string | number)[] = [intent.exactKey];
-        let paramIdx = 2;
-
-        if (filters.type) {
-          conditions.push(`type = $${paramIdx++}`);
-          params.push(filters.type);
-        } else if (intent.inferredType) {
-          conditions.push(`type = $${paramIdx++}`);
-          params.push(intent.inferredType);
-        }
-        if (filters.mod_name) {
-          conditions.push(`metadata->>'mod_name' = $${paramIdx++}`);
-          params.push(filters.mod_name);
-        }
-
-        const whereClause = `WHERE ${conditions.join(' AND ')}`;
-        const exactSql = `
-          SELECT doc_id, type, key, content, metadata, 0.0 AS distance
-          FROM ${table}
-          ${whereClause}
-          LIMIT $${paramIdx}
-        `;
-        params.push(topK);
-
-        const res = await client.query(exactSql, params);
-        if (res.rows.length > 0) {
-          const results = res.rows.map((row) => ({
-            doc_id: row.doc_id,
-            type: row.type,
-            key: row.key,
-            content: row.content,
-            metadata: row.metadata,
-            distance: parseFloat(row.distance),
-          }));
-          searchSpan.setAttribute('path', 'exact-key');
-          searchSpan.setAttribute('resultCount', results.length);
-          searchSpan.end();
-          return results;
-        }
-
-        const likeConditions: string[] = [`key ILIKE $1`];
-        const likeParams: (string | number)[] = [`%${intent.exactKey}%`];
-        let likeParamIdx = 2;
-
-        if (filters.type) {
-          likeConditions.push(`type = $${likeParamIdx++}`);
-          likeParams.push(filters.type);
-        } else if (intent.inferredType) {
-          likeConditions.push(`type = $${likeParamIdx++}`);
-          likeParams.push(intent.inferredType);
-        }
-        if (filters.mod_name) {
-          likeConditions.push(`metadata->>'mod_name' = $${likeParamIdx++}`);
-          likeParams.push(filters.mod_name);
-        }
-
-        const likeWhere = `WHERE ${likeConditions.join(' AND ')}`;
-        const likeSql = `
-          SELECT doc_id, type, key, content, metadata, 0.0 AS distance
-          FROM ${table}
-          ${likeWhere}
-          LIMIT $${likeParamIdx}
-        `;
-        likeParams.push(topK);
-
-        const likeRes = await client.query(likeSql, likeParams);
-        const results = likeRes.rows.map((row) => ({
-          doc_id: row.doc_id,
-          type: row.type,
-          key: row.key,
-          content: row.content,
-          metadata: row.metadata,
-          distance: parseFloat(row.distance),
-        }));
-        searchSpan.setAttribute('path', 'exact-key-like');
+      const results = await exactKeySearch(pool, table, intent.exactKey, intent, filters, topK);
+      if (results.length > 0) {
+        searchSpan.setAttribute('path', 'exact-key');
         searchSpan.setAttribute('resultCount', results.length);
         searchSpan.end();
         return results;
-      } finally {
-        client.release();
       }
+    }
+
+    // -----------------------------------------------------------------------
+    // Fast path 2: alias exact match (high-confidence natural entity mention)
+    // -----------------------------------------------------------------------
+    if (intent.aliasMatches.length > 0 && intent.aliasMatches[0].confidence >= 0.8) {
+      const topAlias = intent.aliasMatches[0];
+      const aliasResults = await aliasExactSearch(pool, table, topAlias.canonical, intent, filters, topK);
+      if (aliasResults.length > 0) {
+        searchSpan.setAttribute('path', 'alias-exact');
+        searchSpan.setAttribute('aliasCanonical', topAlias.canonical);
+        searchSpan.setAttribute('aliasConfidence', topAlias.confidence);
+        searchSpan.setAttribute('resultCount', aliasResults.length);
+        searchSpan.end();
+        return aliasResults;
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Fast path 3: entity mention → ILIKE key match (normalized key lookup)
+    // -----------------------------------------------------------------------
+    const pinnedResults: SearchResult[] = [];
+    if (intent.entityMentions.length > 0) {
+      const mentionResults = await entityMentionSearch(pool, table, intent.entityMentions, intent, filters, topK);
+      pinnedResults.push(...mentionResults);
     }
 
     const effectiveTopK = Math.max(topK + offset, 60);
@@ -287,116 +268,25 @@ export async function search(
     `;
     const ftsParams = [...whereParams.slice(0, paramIdx - 1), expandedQuery, ftsPool];
 
-    // --- Stage C: ILIKE fallback ---
+    // --- Stage C: Scored ILIKE ---
     const terms = extractSearchTerms(expandedQuery);
     let ilikeResults: SearchResult[] = [];
     if (terms.length > 0) {
-      const ilikeConditions: string[] = [];
-      const ilikeParams: (string | number)[] = [];
-      let ilikeIdx = 1;
-
-      if (filters.type) {
-        ilikeConditions.push(`type = $${ilikeIdx++}`);
-        ilikeParams.push(filters.type);
-      } else if (intent.inferredType) {
-        ilikeConditions.push(`type = $${ilikeIdx++}`);
-        ilikeParams.push(intent.inferredType);
-      }
-      if (filters.mod_name) {
-        ilikeConditions.push(`metadata->>'mod_name' = $${ilikeIdx++}`);
-        ilikeParams.push(filters.mod_name);
-      }
-
-      const termOrParts: string[] = [];
-      for (const t of terms) {
-        ilikeParams.push(`%${t}%`);
-        const p1 = ilikeIdx++;
-        ilikeParams.push(`%${t}%`);
-        const p2 = ilikeIdx++;
-        termOrParts.push(`(key ILIKE $${p1} OR content ILIKE $${p2})`);
-      }
-      if (termOrParts.length > 0) {
-        ilikeConditions.push(`(${termOrParts.join(' OR ')})`);
-      }
-
-      const ilikeWhere = ilikeConditions.length > 0 ? `WHERE ${ilikeConditions.join(' AND ')}` : '';
-      const ilikeSql = `
-        SELECT doc_id, type, key, content, metadata, 0.0 AS distance
-        FROM ${table}
-        ${ilikeWhere}
-        LIMIT $${ilikeIdx}
-      `;
-      ilikeParams.push(ilikePool);
-
-      const ilikeClient = await pool.connect();
-      try {
-        const ilikeRes = await ilikeClient.query(ilikeSql, ilikeParams);
-        ilikeResults = ilikeRes.rows.map((row) => ({
-          doc_id: row.doc_id,
-          type: row.type,
-          key: row.key,
-          content: row.content,
-          metadata: row.metadata,
-          distance: parseFloat(row.distance),
-        }));
-      } finally {
-        ilikeClient.release();
-      }
+      ilikeResults = await scoredIlikeSearch(pool, table, terms, intent, filters, ilikePool);
     }
 
-    // --- Stage D: Key-pattern enumeration ---
+    // --- Stage D: Enumeration SQL route ---
+    let enumerationResults: SearchResult[] = [];
+    if (intent.isEnumeration) {
+      enumerationResults = await enumerationSqlSearch(pool, table, intent, filters, candidatePool);
+    }
+
+    // --- Stage E: Key-pattern enumeration ---
     let keyPatternResults: SearchResult[] = [];
     if (intent.isEnumeration) {
       const keyPatterns = extractKeyPatterns(query);
       if (keyPatterns.length > 0) {
-        const kpConditions: string[] = [];
-        const kpParams: (string | number)[] = [];
-        let kpIdx = 1;
-
-        if (filters.type) {
-          kpConditions.push(`type = $${kpIdx++}`);
-          kpParams.push(filters.type);
-        } else if (intent.inferredType) {
-          kpConditions.push(`type = $${kpIdx++}`);
-          kpParams.push(intent.inferredType);
-        }
-        if (filters.mod_name) {
-          kpConditions.push(`metadata->>'mod_name' = $${kpIdx++}`);
-          kpParams.push(filters.mod_name);
-        }
-
-        const kpOrParts = keyPatterns.map((p) => {
-          kpParams.push(`%${p}%`);
-          return `key ILIKE $${kpIdx++}`;
-        });
-        if (kpOrParts.length === 1) {
-          kpConditions.push(kpOrParts[0]);
-        } else {
-          kpConditions.push(`(${kpOrParts.join(' OR ')})`);
-        }
-
-        const kpWhere = kpConditions.length > 0 ? `WHERE ${kpConditions.join(' AND ')}` : '';
-        const kpSql = `
-          SELECT doc_id, type, key, content, metadata, 0.0 AS distance
-          FROM ${table}
-          ${kpWhere}
-          LIMIT 200
-        `;
-
-        const kpClient = await pool.connect();
-        try {
-          const kpRes = await kpClient.query(kpSql, kpParams);
-          keyPatternResults = kpRes.rows.map((row) => ({
-            doc_id: row.doc_id,
-            type: row.type,
-            key: row.key,
-            content: row.content,
-            metadata: row.metadata,
-            distance: parseFloat(row.distance),
-          }));
-        } finally {
-          kpClient.release();
-        }
+        keyPatternResults = await keyPatternSearch(pool, table, keyPatterns, intent, filters, 200);
       }
     }
 
@@ -439,15 +329,32 @@ export async function search(
     searchSpan.setAttribute('ftsResults', ftsResults.length);
     searchSpan.setAttribute('ilikeResults', ilikeResults.length);
     searchSpan.setAttribute('keyPatternResults', keyPatternResults.length);
+    searchSpan.setAttribute('enumerationResults', enumerationResults.length);
+    searchSpan.setAttribute('pinnedResults', pinnedResults.length);
 
-    // RRF fusion
-    const rankedLists = [vectorResults, ftsResults, ilikeResults, keyPatternResults].filter((l) => l.length > 0);
+    // --- Weighted RRF fusion ---
+    const allLists = [vectorResults, ftsResults, ilikeResults, keyPatternResults];
+    const allWeights = [config.rrfWeightVector, config.rrfWeightFts, config.rrfWeightIlike, 0.10];
+
+    if (intent.isEnumeration && enumerationResults.length > 0) {
+      allLists.push(enumerationResults);
+      allWeights.push(0.25);
+    }
+
+    const activeLists = allLists.filter((l) => l.length > 0);
+    const activeWeights = allLists
+      .map((l, i) => (l.length > 0 ? allWeights[i] : -1))
+      .filter((w) => w >= 0);
+
     let candidates: SearchResult[];
 
-    if (rankedLists.length <= 1) {
-      candidates = rankedLists[0] ?? vectorResults;
+    if (activeLists.length <= 1) {
+      candidates = activeLists[0] ?? vectorResults;
     } else {
-      candidates = reciprocalRankFusion(rankedLists);
+      candidates = weightedReciprocalRankFusion(activeLists, {
+        k: config.rrfK,
+        weights: activeWeights,
+      });
     }
 
     // Deduplicate
@@ -458,22 +365,441 @@ export async function search(
       return true;
     });
 
+    // --- Protect pinned (exact/alias) results: prepend before rerank ---
+    const pinnedIds = new Set(pinnedResults.map((p) => p.doc_id));
+    const unpinnedCandidates = candidates.filter((c) => !pinnedIds.has(c.doc_id));
+    const pinnedFirst = [...pinnedResults, ...unpinnedCandidates];
+
     // Stage 2: rerank
-    const rerankInput = candidates.slice(0, Math.min(candidates.length, candidatePool));
+    const rerankInput = pinnedFirst.slice(0, Math.min(pinnedFirst.length, candidatePool));
     const reranked = await rerankCandidates(query, rerankInput, effectiveTopK, searchQuery);
 
+    // Re-ensure pinned results stay in top positions if they were reranked out
+    let finalResults = reranked;
+    if (pinnedResults.length > 0 && config.rerankPinnedPrefix) {
+      const rerankedIds = new Set(reranked.slice(0, topK).map((r) => r.doc_id));
+      const missingPinned = pinnedResults.filter((p) => !rerankedIds.has(p.doc_id));
+      if (missingPinned.length > 0) {
+        finalResults = [...missingPinned, ...reranked.filter((r) => !pinnedIds.has(r.doc_id))];
+      }
+    }
+
     searchSpan.setAttribute('candidateCount', candidates.length);
-    searchSpan.setAttribute('resultCount', reranked.length);
+    searchSpan.setAttribute('resultCount', finalResults.length);
     searchSpan.setAttribute('path', 'hybrid');
     searchSpan.setAttribute('offset', offset);
-    setCachedSearch(cacheKey, query, reranked).catch(() => {});
+    setCachedSearch(cacheKey, query, finalResults).catch(() => {});
 
     searchSpan.end();
-    const paginated = reranked.slice(offset, offset + topK);
+    const paginated = finalResults.slice(offset, offset + topK);
     return paginated;
   });
 }
 
+// ---------------------------------------------------------------------------
+// Exact key search (fast path for key=... queries)
+// ---------------------------------------------------------------------------
+async function exactKeySearch(
+  pool: Awaited<ReturnType<typeof getPool>>,
+  table: string,
+  exactKey: string,
+  intent: QueryIntent,
+  filters: SearchFilters,
+  topK: number,
+): Promise<SearchResult[]> {
+  const client = await pool.connect();
+  try {
+    const conditions: string[] = [`key = $1`];
+    const params: (string | number)[] = [exactKey];
+    let paramIdx = 2;
+
+    if (filters.type) {
+      conditions.push(`type = $${paramIdx++}`);
+      params.push(filters.type);
+    } else if (intent.inferredType) {
+      conditions.push(`type = $${paramIdx++}`);
+      params.push(intent.inferredType);
+    }
+    if (filters.mod_name) {
+      conditions.push(`metadata->>'mod_name' = $${paramIdx++}`);
+      params.push(filters.mod_name);
+    }
+
+    const exactSql = `
+      SELECT doc_id, type, key, content, metadata, 0.0 AS distance
+      FROM ${table}
+      WHERE ${conditions.join(' AND ')}
+      LIMIT $${paramIdx}
+    `;
+    params.push(topK);
+
+    const res = await client.query(exactSql, params);
+    if (res.rows.length > 0) {
+      return res.rows.map((row) => ({
+        doc_id: row.doc_id,
+        type: row.type,
+        key: row.key,
+        content: row.content,
+        metadata: row.metadata,
+        distance: parseFloat(row.distance),
+      }));
+    }
+
+    // Fallback to ILIKE on key
+    const likeConditions: string[] = [`key ILIKE $1`];
+    const likeParams: (string | number)[] = [`%${exactKey}%`];
+    let likeParamIdx = 2;
+
+    if (filters.type) {
+      likeConditions.push(`type = $${likeParamIdx++}`);
+      likeParams.push(filters.type);
+    } else if (intent.inferredType) {
+      likeConditions.push(`type = $${likeParamIdx++}`);
+      likeParams.push(intent.inferredType);
+    }
+    if (filters.mod_name) {
+      likeConditions.push(`metadata->>'mod_name' = $${likeParamIdx++}`);
+      likeParams.push(filters.mod_name);
+    }
+
+    const likeSql = `
+      SELECT doc_id, type, key, content, metadata, 0.0 AS distance
+      FROM ${table}
+      WHERE ${likeConditions.join(' AND ')}
+      LIMIT $${likeParamIdx}
+    `;
+    likeParams.push(topK);
+
+    const likeRes = await client.query(likeSql, likeParams);
+    return likeRes.rows.map((row) => ({
+      doc_id: row.doc_id,
+      type: row.type,
+      key: row.key,
+      content: row.content,
+      metadata: row.metadata,
+      distance: parseFloat(row.distance),
+    }));
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Alias exact search (natural entity name → direct key lookup)
+// ---------------------------------------------------------------------------
+async function aliasExactSearch(
+  pool: Awaited<ReturnType<typeof getPool>>,
+  table: string,
+  canonical: string,
+  intent: QueryIntent,
+  filters: SearchFilters,
+  topK: number,
+): Promise<SearchResult[]> {
+  const client = await pool.connect();
+  try {
+    const conditions: string[] = [];
+    const params: (string | number)[] = [];
+    let paramIdx = 1;
+
+    // Try exact key match first
+    conditions.push(`(key = $${paramIdx} OR key ILIKE $${paramIdx + 1})`);
+    params.push(canonical, `%${canonical}%`);
+    paramIdx += 2;
+
+    // Also try content ILIKE for normalized aliases
+    conditions.push(`content ILIKE $${paramIdx}`);
+    params.push(`%${canonical.replace(/^gkw_/, '').replace(/[._]/g, '%')}%`);
+    paramIdx++;
+
+    if (filters.type) {
+      conditions.push(`type = $${paramIdx++}`);
+      params.push(filters.type);
+    } else if (intent.inferredType) {
+      conditions.push(`type = $${paramIdx++}`);
+      params.push(intent.inferredType);
+    }
+    if (filters.mod_name) {
+      conditions.push(`metadata->>'mod_name' = $${paramIdx++}`);
+      params.push(filters.mod_name);
+    }
+
+    const sql = `
+      SELECT doc_id, type, key, content, metadata, 0.0 AS distance
+      FROM ${table}
+      WHERE (${conditions.slice(0, 2).join(' OR ')})${conditions.length > 2 ? ' AND ' + conditions.slice(2).join(' AND ') : ''}
+      LIMIT $${paramIdx}
+    `;
+    params.push(topK);
+
+    const res = await client.query(sql, params);
+    return res.rows.map((row) => ({
+      doc_id: row.doc_id,
+      type: row.type,
+      key: row.key,
+      content: row.content,
+      metadata: row.metadata,
+      distance: parseFloat(row.distance),
+    }));
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Entity mention search (extracted entity names → key ILIKE lookup)
+// ---------------------------------------------------------------------------
+async function entityMentionSearch(
+  pool: Awaited<ReturnType<typeof getPool>>,
+  table: string,
+  mentions: string[],
+  intent: QueryIntent,
+  filters: SearchFilters,
+  topK: number,
+): Promise<SearchResult[]> {
+  if (mentions.length === 0) return [];
+
+  const client = await pool.connect();
+  try {
+    const conditions: string[] = [];
+    const params: (string | number)[] = [];
+    let paramIdx = 1;
+
+    const orParts: string[] = [];
+    for (const mention of mentions) {
+      orParts.push(`key ILIKE $${paramIdx}`);
+      params.push(`%${mention}%`);
+      paramIdx++;
+    }
+    conditions.push(`(${orParts.join(' OR ')})`);
+
+    if (filters.type) {
+      conditions.push(`type = $${paramIdx++}`);
+      params.push(filters.type);
+    } else if (intent.inferredType) {
+      conditions.push(`type = $${paramIdx++}`);
+      params.push(intent.inferredType);
+    }
+    if (filters.mod_name) {
+      conditions.push(`metadata->>'mod_name' = $${paramIdx++}`);
+      params.push(filters.mod_name);
+    }
+
+    const sql = `
+      SELECT doc_id, type, key, content, metadata, 0.0 AS distance
+      FROM ${table}
+      WHERE ${conditions.join(' AND ')}
+      LIMIT $${paramIdx}
+    `;
+    params.push(topK);
+
+    const res = await client.query(sql, params);
+    return res.rows.map((row) => ({
+      doc_id: row.doc_id,
+      type: row.type,
+      key: row.key,
+      content: row.content,
+      metadata: row.metadata,
+      distance: parseFloat(row.distance),
+    }));
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Scored ILIKE: key hit > content hit, with ranking
+// ---------------------------------------------------------------------------
+async function scoredIlikeSearch(
+  pool: Awaited<ReturnType<typeof getPool>>,
+  table: string,
+  terms: string[],
+  intent: QueryIntent,
+  filters: SearchFilters,
+  limit: number,
+): Promise<SearchResult[]> {
+  const client = await pool.connect();
+  try {
+    const conditions: string[] = [];
+    const params: (string | number)[] = [];
+    let paramIdx = 1;
+
+    if (filters.type) {
+      conditions.push(`type = $${paramIdx++}`);
+      params.push(filters.type);
+    } else if (intent.inferredType) {
+      conditions.push(`type = $${paramIdx++}`);
+      params.push(intent.inferredType);
+    }
+    if (filters.mod_name) {
+      conditions.push(`metadata->>'mod_name' = $${paramIdx++}`);
+      params.push(filters.mod_name);
+    }
+
+    const termOrParts: string[] = [];
+    const keyHitCases: string[] = [];
+    for (const t of terms) {
+      const p1 = paramIdx++;
+      const p2 = paramIdx++;
+      params.push(`%${t}%`, `%${t}%`);
+      termOrParts.push(`(key ILIKE $${p1} OR content ILIKE $${p2})`);
+      keyHitCases.push(`CASE WHEN key ILIKE $${p1} THEN 1 ELSE 0 END`);
+    }
+    if (termOrParts.length > 0) {
+      conditions.push(`(${termOrParts.join(' OR ')})`);
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const keyScoreExpr = keyHitCases.length > 0
+      ? `(${keyHitCases.join(' + ')})`
+      : '0';
+
+    const sql = `
+      SELECT doc_id, type, key, content, metadata, 0.0 AS distance,
+             ${keyScoreExpr} AS key_hit_score
+      FROM ${table}
+      ${where}
+      ORDER BY key_hit_score DESC, length(key) ASC
+      LIMIT $${paramIdx}
+    `;
+    params.push(limit);
+
+    const res = await client.query(sql, params);
+    return res.rows.map((row) => ({
+      doc_id: row.doc_id,
+      type: row.type,
+      key: row.key,
+      content: row.content,
+      metadata: row.metadata,
+      distance: parseFloat(row.distance),
+    }));
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Enumeration SQL route: direct type-based SQL for enumeration queries
+// ---------------------------------------------------------------------------
+async function enumerationSqlSearch(
+  pool: Awaited<ReturnType<typeof getPool>>,
+  table: string,
+  intent: QueryIntent,
+  filters: SearchFilters,
+  limit: number,
+): Promise<SearchResult[]> {
+  const client = await pool.connect();
+  try {
+    const conditions: string[] = [];
+    const params: (string | number)[] = [];
+    let paramIdx = 1;
+
+    if (filters.type) {
+      conditions.push(`type = $${paramIdx++}`);
+      params.push(filters.type);
+    } else if (intent.inferredType) {
+      conditions.push(`type = $${paramIdx++}`);
+      params.push(intent.inferredType);
+    }
+    if (filters.mod_name) {
+      conditions.push(`metadata->>'mod_name' = $${paramIdx++}`);
+      params.push(filters.mod_name);
+    }
+    if (filters.faction) {
+      conditions.push(`metadata->>'faction' = $${paramIdx++}`);
+      params.push(filters.faction);
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const sql = `
+      SELECT doc_id, type, key, content, metadata, 0.0 AS distance
+      FROM ${table}
+      ${where}
+      ORDER BY key ASC
+      LIMIT $${paramIdx}
+    `;
+    params.push(limit);
+
+    const res = await client.query(sql, params);
+    return res.rows.map((row) => ({
+      doc_id: row.doc_id,
+      type: row.type,
+      key: row.key,
+      content: row.content,
+      metadata: row.metadata,
+      distance: parseFloat(row.distance),
+    }));
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Key pattern search for enumeration
+// ---------------------------------------------------------------------------
+async function keyPatternSearch(
+  pool: Awaited<ReturnType<typeof getPool>>,
+  table: string,
+  keyPatterns: string[],
+  intent: QueryIntent,
+  filters: SearchFilters,
+  limit: number,
+): Promise<SearchResult[]> {
+  const client = await pool.connect();
+  try {
+    const conditions: string[] = [];
+    const params: (string | number)[] = [];
+    let paramIdx = 1;
+
+    if (filters.type) {
+      conditions.push(`type = $${paramIdx++}`);
+      params.push(filters.type);
+    } else if (intent.inferredType) {
+      conditions.push(`type = $${paramIdx++}`);
+      params.push(intent.inferredType);
+    }
+    if (filters.mod_name) {
+      conditions.push(`metadata->>'mod_name' = $${paramIdx++}`);
+      params.push(filters.mod_name);
+    }
+
+    const kpOrParts = keyPatterns.map((p) => {
+      params.push(`%${p}%`);
+      return `key ILIKE $${paramIdx++}`;
+    });
+    if (kpOrParts.length === 1) {
+      conditions.push(kpOrParts[0]);
+    } else {
+      conditions.push(`(${kpOrParts.join(' OR ')})`);
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const sql = `
+      SELECT doc_id, type, key, content, metadata, 0.0 AS distance
+      FROM ${table}
+      ${where}
+      LIMIT $${paramIdx}
+    `;
+    params.push(limit);
+
+    const res = await client.query(sql, params);
+    return res.rows.map((row) => ({
+      doc_id: row.doc_id,
+      type: row.type,
+      key: row.key,
+      content: row.content,
+      metadata: row.metadata,
+      distance: parseFloat(row.distance),
+    }));
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Text processing utilities
+// ---------------------------------------------------------------------------
 const CJK_REGEX = /[\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/;
 
 function splitCJKBoundary(text: string): string[] {

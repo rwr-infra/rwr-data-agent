@@ -82,6 +82,8 @@ export async function chatRoutes(app: FastifyInstance) {
     chainObs.otelSpan.setAttribute('langfuse.trace.input', JSON.stringify({ query, messages: nonSystemMessages }));
 
     let results: SearchResult[];
+    let searchPath = 'none';
+    let isLowConfidence = false;
     try {
       const metaDetected = isMetaQuery(query);
       if (metaDetected) {
@@ -110,7 +112,17 @@ export async function chatRoutes(app: FastifyInstance) {
         results = await search(query, {}, topK, body.table, enrichedQuery);
         console.log(`[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (topK=${topK}, table=${body.table ?? config.databaseTable})`);
 
-        searchObs.update({ output: { resultCount: results.length } });
+        searchPath = 'hybrid';
+        isLowConfidence = results.length > 0 && results.length < 3;
+
+        searchObs.update({
+          output: {
+            resultCount: results.length,
+            searchPath,
+            isLowConfidence,
+            topKeys: results.slice(0, 5).map((r) => r.key),
+          },
+        });
         searchObs.end();
       }
     } catch (err) {
@@ -121,9 +133,9 @@ export async function chatRoutes(app: FastifyInstance) {
       return;
     }
 
-    chainObs.update({ metadata: { queryCategory, searchResults: results.length } });
+    chainObs.update({ metadata: { queryCategory, searchResults: results.length, searchPath, isLowConfidence } });
 
-    const ragUserPrompt = buildUserPrompt(query, results);
+    const ragUserPrompt = buildUserPrompt(query, results, { lowConfidence: isLowConfidence });
 
     const historyMessages = nonSystemMessages.slice(0, -1).map((m) => ({
       role: m.role as 'user' | 'assistant',

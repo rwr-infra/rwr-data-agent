@@ -218,9 +218,19 @@ function flattenAttributes(obj: unknown, prefix = ''): Record<string, unknown> {
   if (obj === null || obj === undefined) return result;
 
   if (Array.isArray(obj)) {
+    const allValues: Record<string, unknown[]> = {};
     for (let i = 0; i < obj.length; i++) {
-      const nested = flattenAttributes(obj[i], `${prefix}`);
-      Object.assign(result, nested);
+      const nested = flattenAttributes(obj[i], prefix);
+      for (const [k, v] of Object.entries(nested)) {
+        if (!allValues[k]) allValues[k] = [];
+        allValues[k].push(v);
+        result[k] = v;
+      }
+    }
+    for (const [k, vals] of Object.entries(allValues)) {
+      if (vals.length > 1) {
+        result[`${k}[]`] = vals;
+      }
     }
     return result;
   }
@@ -234,6 +244,9 @@ function flattenAttributes(obj: unknown, prefix = ''): Record<string, unknown> {
         if (String(v).trim()) result[prefix || 'text'] = v;
       } else if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
         result[fullKey] = v;
+      } else if (Array.isArray(v)) {
+        const nested = flattenAttributes(v, fullKey);
+        Object.assign(result, nested);
       } else if (typeof v === 'object') {
         const nested = flattenAttributes(v, fullKey);
         Object.assign(result, nested);
@@ -653,7 +666,11 @@ function formatFlatAttributes(attrs: Record<string, unknown>): string {
   const lines: string[] = [];
   for (const [k, v] of entries) {
     if (v !== undefined && v !== null && v !== '') {
-      lines.push(`${k}: ${v}`);
+      if (Array.isArray(v)) {
+        lines.push(`${k}: ${v.join(', ')}`);
+      } else {
+        lines.push(`${k}: ${v}`);
+      }
     }
   }
   return lines.join('\n');
@@ -662,14 +679,8 @@ function formatFlatAttributes(attrs: Record<string, unknown>): string {
 export function structuredDocToRWRDocument(doc: StructuredDocument): RWRDocument {
   const sections: string[] = [];
 
-  if (doc.description.trim()) {
-    sections.push(`Description: ${doc.description.trim()}`);
-  }
-
-  const attrsText = formatFlatAttributes(doc.flat_attributes);
-  if (attrsText) {
-    sections.push(`Attributes:\n${attrsText}`);
-  }
+  const tags = buildMetadataTags(doc.type, doc.key, doc.metadata);
+  sections.push(`${tags}\n${doc.label}: ${doc.key}`);
 
   if (doc.i18n && Object.keys(doc.i18n).length > 0) {
     const lines: string[] = [];
@@ -682,9 +693,23 @@ export function structuredDocToRWRDocument(doc: StructuredDocument): RWRDocument
     sections.push(`Localized Names: ${lines.join(' | ')}`);
   }
 
-  const content = sections.join('\n\n');
-  const tags = buildMetadataTags(doc.type, doc.key, doc.metadata);
-  const fullContent = `${tags}\n${doc.label}: ${doc.key}\n${content}`;
+  if (doc.description.trim()) {
+    sections.push(`Description: ${doc.description.trim()}`);
+  }
+
+  const attrsText = formatFlatAttributes(doc.flat_attributes);
+  if (attrsText) {
+    sections.push(`Attributes:\n${attrsText}`);
+  }
+
+  if (doc.type === 'script_chunk' || doc.type === 'resource') {
+    const rawSnippet = doc.raw_text.slice(0, 500);
+    if (rawSnippet.trim()) {
+      sections.push(`Content Snippet:\n${rawSnippet}`);
+    }
+  }
+
+  const fullContent = sections.join('\n\n');
 
   return {
     doc_id: '',
