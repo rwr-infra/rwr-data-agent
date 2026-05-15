@@ -168,7 +168,18 @@ export async function search(
     searchSpan.setAttribute('topK', topK);
 
     const table = tableName && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName) ? tableName : config.databaseTable;
-    const cacheKey = generateCacheKey(query, table, JSON.stringify(filters), String(topK), searchQuery ?? '', String(offset));
+    const intent = extractQueryIntent(query);
+
+    // Entity-aware cache key: use extracted entities so semantically equivalent
+    // queries (e.g. "对比 M4A1 和 G36" vs "对比 M4A1 和 G36 的武器数据") share cache
+    const entityKeys = [
+      ...intent.aliasMatches.map((a) => a.canonical),
+      ...intent.entityMentions,
+    ].sort();
+    const cacheKeyBase = entityKeys.length > 0
+      ? `ents:${entityKeys.join(',')}|type:${intent.inferredType ?? ''}`
+      : query;
+    const cacheKey = generateCacheKey(cacheKeyBase, table, JSON.stringify(filters), String(topK), String(offset));
     const cached = await getCachedSearch(cacheKey);
     if (cached) {
       searchSpan.setAttribute('cacheHit', true);
@@ -180,7 +191,6 @@ export async function search(
     searchSpan.setAttribute('cacheHit', false);
 
     const pool = await getPool();
-    const intent = extractQueryIntent(query);
     const baseQuery = searchQuery ?? query;
     const expandedQuery = expandQuery(query);
     const embeddingQuery = expandedQuery !== query ? `${baseQuery} ${expandedQuery.replace(query, '').trim()}` : baseQuery;
@@ -218,62 +228,54 @@ export async function search(
     if (intent.entityMentions.length > 0) searchSpan.setAttribute('intent.entityMentions', intent.entityMentions.join(','));
 
     // -----------------------------------------------------------------------
-    // Fast path 1: exact key lookup (key=... or key为...)
+    // Fast path 1 & 2: Pin exact-key and alias results, then continue to
+    // hybrid search. For comparison/enumeration queries this ensures missing
+    // entities get a second chance via vector/FTS/ILIKE. For single-entity
+    // queries the pinned results are promoted to the top after rerank.
     // -----------------------------------------------------------------------
-    if (intent.isExactKeyQuery && intent.exactKey) {
-      const results = await exactKeySearch(pool, table, intent.exactKey, intent, filters, topK);
-      if (results.length > 0) {
-        searchSpan.setAttribute('path', 'exact-key');
-        searchSpan.setAttribute('resultCount', results.length);
-        searchSpan.end();
-        return results;
+    const pinnedResults: SearchResult[] = [];
+    const pinnedIds = new Set<string>();
+    let pinnedBy: string | undefined;
+
+    function pinResults(results: SearchResult[]) {
+      for (const r of results) {
+        if (!pinnedIds.has(r.doc_id)) {
+          pinnedIds.add(r.doc_id);
+          pinnedResults.push(r);
+        }
       }
     }
 
-    // -----------------------------------------------------------------------
-    // Fast path 2: alias exact match (high-confidence natural entity mention)
-    // For comparison queries, collect results for all high-confidence aliases
-    // -----------------------------------------------------------------------
+    // Fast path 1: exact key lookup
+    if (intent.isExactKeyQuery && intent.exactKey) {
+      const results = await exactKeySearch(pool, table, intent.exactKey, intent, filters, topK);
+      if (results.length > 0) {
+        pinResults(results);
+        pinnedBy = 'exact-key';
+      }
+    }
+
+    // Fast path 2: alias exact match
     if (intent.aliasMatches.length > 0 && intent.aliasMatches[0].confidence >= 0.8) {
       if (intent.isComparison || intent.isEnumeration) {
-        const allAliasResults: SearchResult[] = [];
-        const seenIds = new Set<string>();
         for (const aliasMatch of intent.aliasMatches.filter((a) => a.confidence >= 0.8)) {
           const aliasResults = await aliasExactSearch(pool, table, aliasMatch.canonical, intent, filters, topK);
-          for (const r of aliasResults) {
-            if (!seenIds.has(r.doc_id)) {
-              seenIds.add(r.doc_id);
-              allAliasResults.push(r);
-            }
-          }
-        }
-        if (allAliasResults.length > 0) {
-          searchSpan.setAttribute('path', 'alias-exact-multi');
-          searchSpan.setAttribute('resultCount', allAliasResults.length);
-          searchSpan.end();
-          return allAliasResults.slice(0, topK);
+          pinResults(aliasResults);
         }
       } else {
         const topAlias = intent.aliasMatches[0];
         const aliasResults = await aliasExactSearch(pool, table, topAlias.canonical, intent, filters, topK);
-        if (aliasResults.length > 0) {
-          searchSpan.setAttribute('path', 'alias-exact');
-          searchSpan.setAttribute('aliasCanonical', topAlias.canonical);
-          searchSpan.setAttribute('aliasConfidence', topAlias.confidence);
-          searchSpan.setAttribute('resultCount', aliasResults.length);
-          searchSpan.end();
-          return aliasResults;
-        }
+        pinResults(aliasResults);
+      }
+      if (pinnedResults.length > 0 && !pinnedBy) {
+        pinnedBy = 'alias';
       }
     }
 
-    // -----------------------------------------------------------------------
-    // Fast path 3: entity mention → ILIKE key match (normalized key lookup)
-    // -----------------------------------------------------------------------
-    const pinnedResults: SearchResult[] = [];
+    // Fast path 3: entity mention → ILIKE key match
     if (intent.entityMentions.length > 0) {
       const mentionResults = await entityMentionSearch(pool, table, intent.entityMentions, intent, filters, topK);
-      pinnedResults.push(...mentionResults);
+      pinResults(mentionResults);
     }
 
     const effectiveTopK = Math.max(topK + offset, 60);
@@ -411,8 +413,34 @@ export async function search(
       return true;
     });
 
+    // --- Missing entity second search (comparison queries) ---
+    if (intent.isComparison && intent.aliasMatches.length > 0) {
+      const foundCanonicals = new Set<string>();
+      for (const p of pinnedResults) {
+        const k = p.key.toLowerCase().replace(/^gkw_/, '').replace(/\.(weapon|vehicle|projectile|call|carry_item|xml|character)$/, '');
+        foundCanonicals.add(k);
+      }
+      for (const c of candidates) {
+        const k = c.key.toLowerCase().replace(/^gkw_/, '').replace(/\.(weapon|vehicle|projectile|call|carry_item|xml|character)$/, '');
+        foundCanonicals.add(k);
+      }
+
+      const missingAliases = intent.aliasMatches.filter(
+        (a) => a.confidence >= 0.8 && !foundCanonicals.has(a.canonical),
+      );
+
+      if (missingAliases.length > 0) {
+        const missingQuery = missingAliases.map((a) => a.canonical).join(' ');
+        const missingResults = await search(missingQuery, filters, Math.min(topK, 10), tableName);
+        pinResults(missingResults);
+        for (const r of missingResults) {
+          candidates = candidates.filter((c) => c.doc_id !== r.doc_id);
+        }
+        searchSpan.setAttribute('missingEntities', missingAliases.map((a) => a.canonical).join(','));
+      }
+    }
+
     // --- Protect pinned (exact/alias) results: prepend before rerank ---
-    const pinnedIds = new Set(pinnedResults.map((p) => p.doc_id));
     const unpinnedCandidates = candidates.filter((c) => !pinnedIds.has(c.doc_id));
     const pinnedFirst = [...pinnedResults, ...unpinnedCandidates];
 
@@ -432,7 +460,8 @@ export async function search(
 
     searchSpan.setAttribute('candidateCount', candidates.length);
     searchSpan.setAttribute('resultCount', finalResults.length);
-    searchSpan.setAttribute('path', 'hybrid');
+    searchSpan.setAttribute('path', pinnedResults.length > 0 ? 'pinned+hybrid' : 'hybrid');
+    if (pinnedBy) searchSpan.setAttribute('pinnedBy', pinnedBy);
     searchSpan.setAttribute('offset', offset);
     setCachedSearch(cacheKey, query, finalResults).catch(() => {});
 
