@@ -185,6 +185,31 @@ export async function search(
     const expandedQuery = expandQuery(query);
     const embeddingQuery = expandedQuery !== query ? `${baseQuery} ${expandedQuery.replace(query, '').trim()}` : baseQuery;
 
+    if (searchQuery && searchQuery !== query) {
+      const enrichedMentions = extractEntityMentions(searchQuery);
+      for (const m of enrichedMentions) {
+        if (!intent.entityMentions.includes(m)) {
+          intent.entityMentions.push(m);
+        }
+      }
+      const enrichedAliases = matchAlias(normalizeQuery(searchQuery));
+      for (const a of enrichedAliases) {
+        if (!intent.aliasMatches.some((existing) => existing.canonical === a.canonical)) {
+          intent.aliasMatches.push(a);
+        }
+      }
+      intent.aliasMatches.sort((a, b) => b.confidence - a.confidence);
+    }
+
+    const entityKeyPattern = /\b([a-zA-Z0-9_]+\.(?:weapon|vehicle|projectile|call|carry_item|xml|character))\b/g;
+    let keyMatch: RegExpExecArray | null;
+    while ((keyMatch = entityKeyPattern.exec(baseQuery)) !== null) {
+      const key = keyMatch[1];
+      if (!intent.entityMentions.includes(key)) {
+        intent.entityMentions.push(key);
+      }
+    }
+
     searchSpan.setAttribute('intent.isEnumeration', intent.isEnumeration);
     searchSpan.setAttribute('intent.isExactKey', intent.isExactKeyQuery);
     searchSpan.setAttribute('intent.isComparison', intent.isComparison);
@@ -207,17 +232,38 @@ export async function search(
 
     // -----------------------------------------------------------------------
     // Fast path 2: alias exact match (high-confidence natural entity mention)
+    // For comparison queries, collect results for all high-confidence aliases
     // -----------------------------------------------------------------------
     if (intent.aliasMatches.length > 0 && intent.aliasMatches[0].confidence >= 0.8) {
-      const topAlias = intent.aliasMatches[0];
-      const aliasResults = await aliasExactSearch(pool, table, topAlias.canonical, intent, filters, topK);
-      if (aliasResults.length > 0) {
-        searchSpan.setAttribute('path', 'alias-exact');
-        searchSpan.setAttribute('aliasCanonical', topAlias.canonical);
-        searchSpan.setAttribute('aliasConfidence', topAlias.confidence);
-        searchSpan.setAttribute('resultCount', aliasResults.length);
-        searchSpan.end();
-        return aliasResults;
+      if (intent.isComparison || intent.isEnumeration) {
+        const allAliasResults: SearchResult[] = [];
+        const seenIds = new Set<string>();
+        for (const aliasMatch of intent.aliasMatches.filter((a) => a.confidence >= 0.8)) {
+          const aliasResults = await aliasExactSearch(pool, table, aliasMatch.canonical, intent, filters, topK);
+          for (const r of aliasResults) {
+            if (!seenIds.has(r.doc_id)) {
+              seenIds.add(r.doc_id);
+              allAliasResults.push(r);
+            }
+          }
+        }
+        if (allAliasResults.length > 0) {
+          searchSpan.setAttribute('path', 'alias-exact-multi');
+          searchSpan.setAttribute('resultCount', allAliasResults.length);
+          searchSpan.end();
+          return allAliasResults.slice(0, topK);
+        }
+      } else {
+        const topAlias = intent.aliasMatches[0];
+        const aliasResults = await aliasExactSearch(pool, table, topAlias.canonical, intent, filters, topK);
+        if (aliasResults.length > 0) {
+          searchSpan.setAttribute('path', 'alias-exact');
+          searchSpan.setAttribute('aliasCanonical', topAlias.canonical);
+          searchSpan.setAttribute('aliasConfidence', topAlias.confidence);
+          searchSpan.setAttribute('resultCount', aliasResults.length);
+          searchSpan.end();
+          return aliasResults;
+        }
       }
     }
 
@@ -501,15 +547,9 @@ async function aliasExactSearch(
     const params: (string | number)[] = [];
     let paramIdx = 1;
 
-    // Try exact key match first
-    conditions.push(`(key = $${paramIdx} OR key ILIKE $${paramIdx + 1})`);
-    params.push(canonical, `%${canonical}%`);
-    paramIdx += 2;
-
-    // Also try content ILIKE for normalized aliases
-    conditions.push(`content ILIKE $${paramIdx}`);
-    params.push(`%${canonical.replace(/^gkw_/, '').replace(/[._]/g, '%')}%`);
-    paramIdx++;
+    conditions.push(`(key = $${paramIdx} OR key ILIKE $${paramIdx + 1} OR content ILIKE $${paramIdx + 2})`);
+    params.push(canonical, `%${canonical}%`, `%${canonical.replace(/^gkw_/, '').replace(/[._]/g, '%')}%`);
+    paramIdx += 3;
 
     if (filters.type) {
       conditions.push(`type = $${paramIdx++}`);
@@ -523,10 +563,13 @@ async function aliasExactSearch(
       params.push(filters.mod_name);
     }
 
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const sql = `
-      SELECT doc_id, type, key, content, metadata, 0.0 AS distance
+      SELECT doc_id, type, key, content, metadata, 0.0 AS distance,
+             CASE WHEN key = $1 THEN 0 ELSE 1 END AS key_exact_rank
       FROM ${table}
-      WHERE (${conditions.slice(0, 2).join(' OR ')})${conditions.length > 2 ? ' AND ' + conditions.slice(2).join(' AND ') : ''}
+      ${where}
+      ORDER BY key_exact_rank ASC, length(key) ASC
       LIMIT $${paramIdx}
     `;
     params.push(topK);
@@ -565,9 +608,11 @@ async function entityMentionSearch(
     let paramIdx = 1;
 
     const orParts: string[] = [];
-    for (const mention of mentions) {
+    const exactCases: string[] = [];
+    for (let i = 0; i < mentions.length; i++) {
       orParts.push(`key ILIKE $${paramIdx}`);
-      params.push(`%${mention}%`);
+      params.push(`%${mentions[i]}%`);
+      exactCases.push(`CASE WHEN key ILIKE $${paramIdx} THEN 1 ELSE 0 END`);
       paramIdx++;
     }
     conditions.push(`(${orParts.join(' OR ')})`);
@@ -584,10 +629,13 @@ async function entityMentionSearch(
       params.push(filters.mod_name);
     }
 
+    const matchScore = exactCases.length > 0 ? `(${exactCases.join(' + ')})` : '0';
     const sql = `
-      SELECT doc_id, type, key, content, metadata, 0.0 AS distance
+      SELECT doc_id, type, key, content, metadata, 0.0 AS distance,
+             ${matchScore} AS mention_match_score
       FROM ${table}
       WHERE ${conditions.join(' AND ')}
+      ORDER BY mention_match_score DESC, length(key) ASC
       LIMIT $${paramIdx}
     `;
     params.push(topK);

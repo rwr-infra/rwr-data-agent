@@ -78,15 +78,47 @@ export function expandQuery(query: string): string {
   return expandWithSynonyms(query);
 }
 
-const ENTITY_KEY_PATTERN = /`([a-zA-Z0-9_]+\.(?:weapon|vehicle|projectile|call|carry_item|xml))`/g;
+const ENTITY_KEY_PATTERN = /`([a-zA-Z0-9_]+\.(?:weapon|vehicle|projectile|call|carry_item|xml|character))`/g;
+const ENTITY_KEY_BOLD_PATTERN = /\*\*([a-zA-Z0-9_]+\.(?:weapon|vehicle|projectile|call|carry_item|xml|character))\*\*/g;
+const ENTITY_KEY_PLAIN_PATTERN = /\b([a-zA-Z0-9_]+\.(?:weapon|vehicle|projectile|call|carry_item|xml|character))\b/g;
 
 function extractEntityKeys(text: string): string[] {
   const keys: string[] = [];
   let match: RegExpExecArray | null;
-  while ((match = ENTITY_KEY_PATTERN.exec(text)) !== null) {
+
+  const backtick = /`([a-zA-Z0-9_]+\.(?:weapon|vehicle|projectile|call|carry_item|xml|character))`/g;
+  while ((match = backtick.exec(text)) !== null) {
     keys.push(match[1]);
   }
+
+  const bold = /\*\*([a-zA-Z0-9_]+\.(?:weapon|vehicle|projectile|call|carry_item|xml|character))\*\*/g;
+  while ((match = bold.exec(text)) !== null) {
+    keys.push(match[1]);
+  }
+
+  if (keys.length === 0) {
+    const plain = /\b([a-zA-Z0-9_]+\.(?:weapon|vehicle|projectile|call|carry_item|xml|character))\b/g;
+    while ((match = plain.exec(text)) !== null) {
+      keys.push(match[1]);
+    }
+  }
+
   return [...new Set(keys)];
+}
+
+function extractMentionedItemNames(text: string): string[] {
+  const names: string[] = [];
+
+  const boldNames = /\*\*([^*]+)\*\*/g;
+  let match: RegExpExecArray | null;
+  while ((match = boldNames.exec(text)) !== null) {
+    const name = match[1].trim();
+    if (name.length >= 2 && name.length <= 50 && /[a-zA-Z0-9]/.test(name)) {
+      names.push(name);
+    }
+  }
+
+  return [...new Set(names)].slice(0, 10);
 }
 
 export function buildSearchQuery(currentQuery: string, history: HistoryMessage[], summary?: SummaryContext): string {
@@ -126,11 +158,27 @@ export function buildSearchQuery(currentQuery: string, history: HistoryMessage[]
     }
   }
 
-  const lastAssistant = [...history].reverse().find(m => m.role === 'assistant');
-  if (lastAssistant) {
-    const entityKeys = extractEntityKeys(lastAssistant.content);
-    if (entityKeys.length > 0) {
-      parts.push(entityKeys.slice(0, 5).join(' '));
+  const allEntityKeys: string[] = [];
+  const allItemNames: string[] = [];
+
+  const assistantMessages = history.filter(m => m.role === 'assistant');
+  for (const msg of assistantMessages) {
+    const keys = extractEntityKeys(msg.content);
+    allEntityKeys.push(...keys);
+
+    if (keys.length === 0) {
+      const names = extractMentionedItemNames(msg.content);
+      allItemNames.push(...names);
+    }
+  }
+
+  const uniqueKeys = [...new Set(allEntityKeys)].slice(0, 10);
+  if (uniqueKeys.length > 0) {
+    parts.push(uniqueKeys.join(' '));
+  } else {
+    const uniqueNames = [...new Set(allItemNames)].slice(0, 5);
+    if (uniqueNames.length > 0) {
+      parts.push(uniqueNames.join(' '));
     }
   }
 
