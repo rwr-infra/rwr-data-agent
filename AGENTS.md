@@ -13,13 +13,15 @@ RAG AI Agent for *Running With Rifles* game data. Node.js 20+ / TypeScript / Fas
 
 ```bash
 npm install
-npm run dev              # tsx --watch src/api/server.ts
-npm run build            # tsc → dist/
+npm run dev              # backend hot-reload (tsx --watch src/api/server.ts)
+npm run web:dev          # frontend dev server (vite :5173, proxies /v1 + /health)
+npm run build            # tsc → dist/  AND  vite build web/ → public/
 npm start                # node dist/api/server.js
 npm run db:migrate       # raw SQL init (pgvector + table + indexes)
 npm run extract           # CLI extraction to JSON (see below)
 npm run embed             # CLI embed JSON to database (see below)
 npm run ingest            # CLI extraction + embed in one step (legacy)
+npm run eval              # retrieval eval harness (src/eval/run.ts)
 npm run lint              # ESLint (no config file, uses defaults)
 npm run format            # Prettier (no config file, uses defaults)
 ```
@@ -98,16 +100,24 @@ npm run ingest -- --source ./data --mod GFL_Castling --resume  # skip existing
 
 ### Frontend
 
-`public/index.html` is a self-contained chat UI (no build step). It calls `/v1/chat/completions` with `stream: true` and renders SSE chunks in real time. Served by `@fastify/static` in local dev; on Vercel, the `includeFiles` config in `vercel.json` makes it available.
+The chat UI is a **Svelte 5 + Vite + Tailwind 4 + daisyUI** app in `web/`. `vite build` outputs to `../public`, so `public/` is **build output, not hand-written** — do not edit `public/index.html` directly. Served by `@fastify/static` in local dev (with SPA fallback to `index.html`); on Vercel, `src/app.ts` reads `public/index.html` manually and `vercel.json` includes it.
+
+- Frontend dev server: `npm run web:dev` (vite on :5173, proxies `/v1` and `/health`).
+- ⚠️ `web/vite.config.ts` proxies to `http://localhost:3344`, but the backend defaults to port `3000` (`config.port`). When developing the UI against the backend, run the backend with `PORT=3344` or update the proxy target.
+- The UI consumes the backend's custom NDJSON stream (see Gotchas), not OpenAI SSE. It calls `/v1/chat/completions` and sends an `x-session-id` header for session memory.
 
 ### Gotchas
 
 - **Drizzle ORM is only used for schema definition and basic queries**. Vector search and migration use **raw SQL** through the `pg` Pool because Drizzle does not support pgvector operators (`<=>`).
 - **Migration is custom SQL**, not `drizzle-kit push`. `src/db/migrate.ts` runs `CREATE EXTENSION vector`, `CREATE TABLE ...`, and HNSW/GIN indexes.
 - **Search has an exact-key fast path**: if the query contains `key=...` or `key: ...`, embeddings are bypassed entirely for a direct SQL lookup.
-- **Query intent is hardcoded in `src/retrieval/search.ts`**: Chinese/English regex patterns infer document type (`weapon`, `soldier`, `vehicle`, etc.), detect enumeration requests, and extract `class="N"` filters.
+- **Hybrid search with weighted RRF**: `src/retrieval/search.ts` fuses vector (pgvector `<=>`), Postgres FTS, and `ILIKE` candidate lists via Reciprocal Rank Fusion (`RRF_K`, `RRF_WEIGHT_VECTOR/FTS/ILIKE`). Exact/normalized entity matches are pinned ahead of the fused list (`RERANK_PINNED_PREFIX`), then results go through the reranker.
+- **Query intent is hardcoded in `src/retrieval/intent.ts`**: Chinese/English regex patterns infer document type (`weapon`, `soldier`, `vehicle`, etc.), detect enumeration/comparison requests, and extract `class="N"` filters — not LLM-driven.
 - **External system prompts are dropped**: `chat.ts` filters out all `role: 'system'` messages from the request and enforces `SYSTEM_PROMPT` server-side.
-- **Single-turn only**: no session history is maintained. Only the last user message is used for RAG.
+- **Multi-turn with session memory**: full conversation history is passed to the LLM, and an `x-session-id` header keys a rolling summary (`src/memory/summarizer.ts`, regenerated every `SUMMARY_INTERVAL_TURNS`). Retrieval is history-aware — `src/retrieval/queryRewrite.ts` enriches the latest user query with history + summary before searching.
+- **Custom NDJSON streaming (not SSE)**: the streamed response is newline-delimited JSON for the Vercel AI SDK, not OpenAI `data:` SSE. Each line is one object with a `type`: `text-delta` (`{textDelta}`), `json-delta` (`{jsonDelta}`, partial structured object), `finish` (`{usage}`), or `error`. Consumed by `web/src/lib/api.ts`.
+- **Structured output for enumeration/comparison**: when `classifyQuery` returns `enumeration`/`comparison` AND the request sets `response_format: json_object` (or the `x-response-format` header), `chat.ts` uses `streamObject` with `EnumResultSchema`/`ComparisonResultSchema` (`src/types/schemas.ts`); otherwise plain `streamText`.
+- **Meta queries skip search**: `isMetaQuery` (`src/retrieval/intent.ts`) short-circuits retrieval for questions about the bot itself.
 - **Embedding content uses compact format**: `structuredDocToRWRDocument` produces content from `description` + `flat_attributes` + `i18n`, omitting the verbose `raw_text` to save ~60% storage. The full XML structure is preserved in the extracted JSON `data` field for review.
 
 ## Environment & Config
@@ -163,7 +173,7 @@ Production targets use compiled `dist/` (not `tsx`). Data directory is mounted r
 
 ## Testing
 
-- **No formal test framework** (no Jest/Vitest/Mocha). `test.sh` is a single `curl` smoke test against `/v1/chat/completions`.
+- **No unit-test runner** (no Jest/Vitest/Mocha). Retrieval quality is checked by the **eval harness**: `npm run eval` runs `src/eval/run.ts` over cases in `tests/eval/`, scoring with `src/eval/metrics.ts`. `test.sh` (if present) is a single `curl` smoke test against `/v1/chat/completions`.
 
 ## Style
 
