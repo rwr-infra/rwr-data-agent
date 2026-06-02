@@ -40,40 +40,45 @@ export async function rerankCandidates(
     const documents = candidates.map((c) => truncateForRerank(c.content, RERANK_DOC_TRUNCATE));
 
     try {
-      const allScores: { index: number; score: number }[] = [];
-
+      // Batches run in parallel; bge-reranker emits absolute query-doc relevance scores,
+      // so they remain comparable across batches once merged. A8.
+      const batches: { offset: number; docs: string[] }[] = [];
       for (let i = 0; i < documents.length; i += RERANK_BATCH_SIZE) {
-        const batchDocs = documents.slice(i, i + RERANK_BATCH_SIZE);
-        const batchOffset = i;
-
-        const res = await fetch(`${config.siliconFlowBaseUrl}/rerank`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${config.siliconFlowApiKey}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model: config.rerankModel,
-            query: searchQuery ?? query,
-            documents: batchDocs,
-            top_n: batchDocs.length,
-            return_documents: false,
-          }),
-        });
-
-        if (!res.ok) {
-          const errText = await res.text().catch(() => '');
-          throw new Error(`Rerank API error ${res.status}: ${errText}`);
-        }
-
-        const data = (await res.json()) as RerankResponse;
-        for (const r of data.results) {
-          allScores.push({ index: batchOffset + r.index, score: r.relevance_score });
-        }
+        batches.push({ offset: i, docs: documents.slice(i, i + RERANK_BATCH_SIZE) });
       }
 
+      const batchResults = await Promise.all(
+        batches.map(async ({ offset, docs }) => {
+          const res = await fetch(`${config.siliconFlowBaseUrl}/rerank`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${config.siliconFlowApiKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              model: config.rerankModel,
+              query: searchQuery ?? query,
+              documents: docs,
+              top_n: docs.length,
+              return_documents: false,
+            }),
+          });
+
+          if (!res.ok) {
+            const errText = await res.text().catch(() => '');
+            throw new Error(`Rerank API error ${res.status}: ${errText}`);
+          }
+
+          const data = (await res.json()) as RerankResponse;
+          return data.results.map((r) => ({ index: offset + r.index, score: r.relevance_score }));
+        }),
+      );
+
+      const allScores = batchResults.flat();
       allScores.sort((a, b) => b.score - a.score);
-      const results = allScores.slice(0, topN).map((s) => candidates[s.index]);
+      // Write the relevance score back onto the result so downstream low-confidence
+      // gating can threshold on it instead of just result count. A5/A12.
+      const results = allScores.slice(0, topN).map((s) => ({ ...candidates[s.index], score: s.score }));
       span.setAttribute('resultCount', results.length);
       span.end();
       return results;

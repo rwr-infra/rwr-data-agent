@@ -58,7 +58,7 @@
     {#if item.type === 'message' && item.role === 'ai' && nextIsMeta(i)}
       {@const metaItem = items[i + 1]}
       <div class="group flex flex-col items-start animate-fade-in" class:opacity-50={isDimmed(i) || isDimmed(i + 1)} class:transition-opacity={isDimmed(i) || isDimmed(i + 1)}>
-        <Message content={item.content} type="ai" id={item.id} streaming={streaming && i === lastAiIdx} />
+        <Message content={item.content} type="ai" id={item.id} streaming={streaming && i === lastAiIdx} reasoning={item.reasoning} reasoningLabel={tr.reasoning} />
         <div class="text-xs text-base-content/50 mt-0.5 animate-fade-in">{metaItem.text}</div>
         <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 sm:group-hover:opacity-100 transition-opacity mt-1 mb-2">
           <button class="btn btn-ghost btn-xs" onclick={() => oncopy(item.id, 'text')} title={tr.copyText}>
@@ -74,7 +74,7 @@
     {:else if item.type === 'message'}
       {#if item.role === 'ai' && !nextIsMeta(i) && !(streaming && i === lastAiIdx)}
         <div class="group flex flex-col items-start animate-fade-in" class:opacity-50={isDimmed(i)} class:transition-opacity={isDimmed(i)}>
-          <Message content={item.content} type="ai" id={item.id} />
+          <Message content={item.content} type="ai" id={item.id} reasoning={item.reasoning} reasoningLabel={tr.reasoning} />
           <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 sm:group-hover:opacity-100 transition-opacity mt-1 mb-2">
             <button class="btn btn-ghost btn-xs" onclick={() => oncopy(item.id, 'text')} title={tr.copyText}>
               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
@@ -92,7 +92,7 @@
           class:opacity-50={isDimmed(i)}
           class:transition-opacity={isDimmed(i)}
         >
-          <Message content={item.content} type={item.role} id={item.id} streaming={streaming && i === lastAiIdx} />
+          <Message content={item.content} type={item.role} id={item.id} streaming={streaming && i === lastAiIdx} reasoning={item.reasoning} reasoningLabel={tr.reasoning} />
           {#if item.role === 'user'}
             <div class="group">
               <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 sm:group-hover:opacity-100 transition-opacity mt-1 mb-2 justify-end">

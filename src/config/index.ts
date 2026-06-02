@@ -32,6 +32,22 @@ export const config = {
   rrfWeightIlike: parseFloat(process.env.RRF_WEIGHT_ILIKE ?? '0.15'),
   rerankDocTruncate: parseInt(process.env.RERANK_DOC_TRUNCATE ?? '800', 10),
   rerankPinnedPrefix: process.env.RERANK_PINNED_PREFIX !== 'false',
+  // HNSW tuning: ef_search controls ANN recall breadth. 0 = derive dynamically (~2x query limit, capped).
+  hnswEfSearch: parseInt(process.env.HNSW_EF_SEARCH ?? '0', 10),
+  // Low-confidence threshold on the top-1 rerank relevance score (0-1). Below this, warn the LLM.
+  lowConfidenceThreshold: parseFloat(process.env.LOW_CONFIDENCE_THRESHOLD ?? '0.3'),
+  // FTS weight multiplier applied when the query is (near-)pure CJK, where FTS('simple') is unreliable.
+  rrfFtsCjkScale: parseFloat(process.env.RRF_FTS_CJK_SCALE ?? '0.3'),
+  // Main-LLM reasoning controls — transparently passed through to the OpenAI-compatible backend.
+  // reasoning_effort: '' (omit) | minimal | low | medium | high
+  llmReasoningEffort: process.env.LLM_REASONING_EFFORT ?? '',
+  // thinking: unset/'' = omit the field; 'true' -> { type: 'enabled' }; 'false' -> { type: 'disabled' }
+  llmThinkingEnabled:
+    process.env.LLM_THINKING_ENABLED === undefined || process.env.LLM_THINKING_ENABLED === ''
+      ? undefined
+      : process.env.LLM_THINKING_ENABLED === 'true',
+  // temperature: unset = omit (let the model use its default)
+  llmTemperature: process.env.LLM_TEMPERATURE ? parseFloat(process.env.LLM_TEMPERATURE) : undefined,
 };
 
 export function validateConfig() {

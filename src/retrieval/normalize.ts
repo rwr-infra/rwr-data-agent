@@ -40,6 +40,21 @@ const ALL_ALIASES: Record<string, string[]> = {
   ...CALL_ALIASES,
 };
 
+// Dynamic alias index built lazily from the DB (keys + localized names), merged under the
+// curated aliases above so the hand-tuned entries still win. Populated by search.ts; until
+// then matching falls back to the curated set only. A10 — replaces hand-maintained coverage.
+let dynamicAliases: Record<string, string[]> = {};
+let dynamicAliasesLoaded = false;
+
+export function setDynamicAliases(map: Record<string, string[]>): void {
+  dynamicAliases = map;
+  dynamicAliasesLoaded = true;
+}
+
+function getAliasIndex(): Record<string, string[]> {
+  return dynamicAliasesLoaded ? { ...dynamicAliases, ...ALL_ALIASES } : ALL_ALIASES;
+}
+
 export function normalizeKey(key: string): string {
   return key
     .toLowerCase()
@@ -63,7 +78,7 @@ export function extractEntityMentions(query: string): string[] {
   const mentions: string[] = [];
   const normalized = query.toLowerCase();
 
-  for (const [canonical, aliases] of Object.entries(ALL_ALIASES)) {
+  for (const [canonical, aliases] of Object.entries(getAliasIndex())) {
     for (const alias of aliases) {
       const normalizedAlias = alias.toLowerCase().replace(/[_-]/g, '');
       const normalizedQuery = normalized.replace(/[_-]/g, '');
@@ -89,7 +104,7 @@ export function extractEntityMentions(query: string): string[] {
   while ((modelMatch = modelPattern.exec(query)) !== null) {
     const model = modelMatch[1].toLowerCase().replace(/[_-]/g, '');
     if (model.length >= 3 && !mentions.includes(model)) {
-      for (const [canonical, aliases] of Object.entries(ALL_ALIASES)) {
+      for (const [canonical, aliases] of Object.entries(getAliasIndex())) {
         const normalizedAliases = aliases.map((a) => a.toLowerCase().replace(/[_-]/g, ''));
         if (normalizedAliases.some((a) => a.includes(model) || model.includes(a))) {
           if (!mentions.includes(canonical)) {
@@ -108,7 +123,7 @@ export function matchAlias(normalizedQuery: string): { canonical: string; confid
   const matches: { canonical: string; confidence: number }[] = [];
   const queryNorm = normalizedQuery.replace(/[_\-\s]/g, '');
 
-  for (const [canonical, aliases] of Object.entries(ALL_ALIASES)) {
+  for (const [canonical, aliases] of Object.entries(getAliasIndex())) {
     for (const alias of aliases) {
       const aliasNorm = alias.toLowerCase().replace(/[_\-\s]/g, '');
       if (queryNorm === aliasNorm) {

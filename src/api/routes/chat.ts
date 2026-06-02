@@ -7,7 +7,7 @@ import { flushLangfuse } from '../../observability/langfuse.js';
 import { search } from '../../retrieval/search.js';
 import { SYSTEM_PROMPT, buildUserPrompt } from '../../retrieval/prompt.js';
 import { buildSearchQuery } from '../../retrieval/queryRewrite.js';
-import { extractQueryIntent } from '../../retrieval/search.js';
+import { buildLlmProviderOptions } from '../../llm/providerOptions.js';
 import { classifyQuery, isMetaQuery } from '../../retrieval/intent.js';
 import { EnumResultSchema, ComparisonResultSchema } from '../../types/schemas.js';
 import { getSummary, generateSummary, shouldGenerateSummary } from '../../memory/summarizer.js';
@@ -108,12 +108,19 @@ export async function chatRoutes(app: FastifyInstance) {
         if (enrichedQuery !== query) {
           console.log(`[chat] Query enriched: "${truncatedQuery}" → "${enrichedQuery.length > 120 ? enrichedQuery.slice(0, 120) + '…' : enrichedQuery}"`);
         }
-        const topK = 60;
+        // Enumeration needs broad coverage (its dedicated path skips rerank); detail/comparison
+        // queries stay focused. A4.
+        const topK = queryCategory === 'enumeration' ? 150 : 60;
         results = await search(query, {}, topK, body.table, enrichedQuery);
         console.log(`[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (topK=${topK}, table=${body.table ?? config.databaseTable})`);
 
         searchPath = 'hybrid';
-        isLowConfidence = results.length > 0 && results.length < 3;
+        // Low confidence when the top result's rerank score is weak; fall back to the
+        // count heuristic when rerank didn't run (score absent, e.g. enumeration path). A5.
+        const topScore = results[0]?.score;
+        isLowConfidence =
+          results.length > 0 &&
+          (topScore !== undefined ? topScore < config.lowConfidenceThreshold : results.length < 3);
 
         searchObs.update({
           output: {
@@ -181,6 +188,7 @@ export async function chatRoutes(app: FastifyInstance) {
           system: SYSTEM_PROMPT,
           messages: llmMessages,
           maxOutputTokens: maxTokens,
+          providerOptions: buildLlmProviderOptions(),
           schema,
           onFinish: ({ object, usage }) => {
             const outputText = JSON.stringify(object).slice(0, 500);
@@ -215,6 +223,7 @@ export async function chatRoutes(app: FastifyInstance) {
           system: SYSTEM_PROMPT,
           messages: llmMessages,
           maxOutputTokens: maxTokens,
+          providerOptions: buildLlmProviderOptions(),
           onFinish: ({ text, usage }) => {
             const outputText = text.slice(0, 500);
             genObs.update({
@@ -229,10 +238,24 @@ export async function chatRoutes(app: FastifyInstance) {
           },
         });
 
-        for await (const textPart of result.textStream) {
-          const data = JSON.stringify({ type: 'text-delta', textDelta: textPart });
-          reply.raw.write(data + '\n');
-          (reply.raw as unknown as { flush?: () => void }).flush?.();
+        // Iterate fullStream (not textStream) so reasoning parts are surfaced separately. B4.
+        for await (const part of result.fullStream) {
+          const p = part as { type: string; text?: string; textDelta?: string; delta?: string; error?: unknown };
+          if (p.type === 'reasoning-delta' || p.type === 'reasoning') {
+            const delta = p.text ?? p.textDelta ?? p.delta ?? '';
+            if (delta) {
+              reply.raw.write(JSON.stringify({ type: 'reasoning-delta', textDelta: delta }) + '\n');
+              (reply.raw as unknown as { flush?: () => void }).flush?.();
+            }
+          } else if (p.type === 'text-delta' || p.type === 'text') {
+            const delta = p.text ?? p.textDelta ?? p.delta ?? '';
+            if (delta) {
+              reply.raw.write(JSON.stringify({ type: 'text-delta', textDelta: delta }) + '\n');
+              (reply.raw as unknown as { flush?: () => void }).flush?.();
+            }
+          } else if (p.type === 'error') {
+            throw p.error;
+          }
         }
 
         const usage = await result.usage;

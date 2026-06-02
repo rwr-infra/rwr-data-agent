@@ -3,11 +3,17 @@ import { createEmbedding } from '../ingestion/embeddings.js';
 import { rerankCandidates } from './rerank.js';
 import { config } from '../config/index.js';
 import { expandQuery } from './queryRewrite.js';
-import { normalizeQuery, matchAlias, extractEntityMentions } from './normalize.js';
+import {
+  normalizeQuery,
+  matchAlias,
+  extractEntityMentions,
+  normalizeKey,
+  generateNormalizedVariants,
+  setDynamicAliases,
+} from './normalize.js';
 import { FTS_CONFIG } from '../db/schema.js';
 import { getCachedSearch, setCachedSearch, generateCacheKey } from '../cache/index.js';
 import { getTracer } from '../observability/langfuse.js';
-import { SpanStatusCode } from '@opentelemetry/api';
 import type { DocumentType, SearchFilters, SearchResult } from '../types/index.js';
 
 interface QueryIntent {
@@ -152,7 +158,61 @@ function weightedReciprocalRankFusion(
     .map((entry) => ({
       ...entry.doc,
       distance: -entry.score,
+      source: [...new Set(entry.sources)].join('+'),
     }));
+}
+
+// pgvector >= 0.8 capability probe for hnsw.iterative_scan (cached after first call).
+let hnswIterativeSupported: boolean | null = null;
+async function supportsHnswIterativeScan(pool: Awaited<ReturnType<typeof getPool>>): Promise<boolean> {
+  if (hnswIterativeSupported !== null) return hnswIterativeSupported;
+  const client = await pool.connect();
+  try {
+    const { rows } = await client.query(`SELECT extversion FROM pg_extension WHERE extname = 'vector'`);
+    const v = (rows[0] as { extversion?: string } | undefined)?.extversion;
+    const [maj, min] = (v ?? '0.0').split('.').map((n) => parseInt(n, 10));
+    hnswIterativeSupported = !!v && (maj > 0 || (maj === 0 && min >= 8));
+  } catch {
+    hnswIterativeSupported = false;
+  } finally {
+    client.release();
+  }
+  return hnswIterativeSupported;
+}
+
+// Lazily build the dynamic alias index from the DB (keys + localized names) on first search,
+// so alias matching covers all entities instead of only the ~13 curated weapons. Cached
+// process-wide; keyed by the first table seen (dynamic aliases are an enhancement). A10.
+let aliasLoadPromise: Promise<void> | null = null;
+function ensureDynamicAliases(pool: Awaited<ReturnType<typeof getPool>>, table: string): Promise<void> {
+  if (aliasLoadPromise) return aliasLoadPromise;
+  aliasLoadPromise = (async () => {
+    const client = await pool.connect();
+    try {
+      const { rows } = await client.query(`SELECT key, metadata FROM ${table} LIMIT 10000`);
+      const map: Record<string, string[]> = {};
+      for (const row of rows as { key: string; metadata: Record<string, unknown> | null }[]) {
+        const canonical = normalizeKey(row.key);
+        if (canonical.length < 2) continue;
+        const aliases = new Set<string>(generateNormalizedVariants(row.key));
+        const md = row.metadata ?? {};
+        for (const field of ['name', 'name_cn', 'label', 'localized_name']) {
+          const v = md[field];
+          if (typeof v === 'string' && v.trim().length >= 2 && v.length <= 40) {
+            aliases.add(v.toLowerCase());
+          }
+        }
+        map[canonical] = [...aliases];
+      }
+      setDynamicAliases(map);
+      console.log(`[search] Loaded ${Object.keys(map).length} dynamic aliases from ${table}.`);
+    } catch (e) {
+      console.warn('[search] Dynamic alias load failed (using curated aliases only):', (e as Error).message);
+    } finally {
+      client.release();
+    }
+  })();
+  return aliasLoadPromise;
 }
 
 export async function search(
@@ -168,6 +228,10 @@ export async function search(
     searchSpan.setAttribute('topK', topK);
 
     const table = tableName && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName) ? tableName : config.databaseTable;
+    const pool = await getPool();
+    // Load dynamic aliases before intent extraction so the cache key (built from matched
+    // entities) is stable across the first and subsequent queries. A10.
+    await ensureDynamicAliases(pool, table);
     const intent = extractQueryIntent(query);
 
     // Entity-aware cache key: use extracted entities so semantically equivalent
@@ -176,9 +240,12 @@ export async function search(
       ...intent.aliasMatches.map((a) => a.canonical),
       ...intent.entityMentions,
     ].sort();
+    // Include intent dimensions so semantically different queries over the same
+    // entities (e.g. class=2 vs class=3, enumerate vs detail) don't collide on cache.
+    const intentSig = `e${intent.isEnumeration ? 1 : 0}c${intent.isComparison ? 1 : 0}|ek:${intent.exactKey ?? ''}|cp:${intent.contentPattern ?? ''}`;
     const cacheKeyBase = entityKeys.length > 0
-      ? `ents:${entityKeys.join(',')}|type:${intent.inferredType ?? ''}`
-      : query;
+      ? `ents:${entityKeys.join(',')}|type:${intent.inferredType ?? ''}|${intentSig}`
+      : `${query}|${intentSig}`;
     const cacheKey = generateCacheKey(cacheKeyBase, table, JSON.stringify(filters), String(topK), String(offset));
     const cached = await getCachedSearch(cacheKey);
     if (cached) {
@@ -190,7 +257,6 @@ export async function search(
 
     searchSpan.setAttribute('cacheHit', false);
 
-    const pool = await getPool();
     const baseQuery = searchQuery ?? query;
     const expandedQuery = expandQuery(query);
     const embeddingQuery = expandedQuery !== query ? `${baseQuery} ${expandedQuery.replace(query, '').trim()}` : baseQuery;
@@ -237,52 +303,72 @@ export async function search(
     const pinnedIds = new Set<string>();
     let pinnedBy: string | undefined;
 
-    function pinResults(results: SearchResult[]) {
+    function pinResults(results: SearchResult[], source?: string) {
       for (const r of results) {
         if (!pinnedIds.has(r.doc_id)) {
           pinnedIds.add(r.doc_id);
-          pinnedResults.push(r);
+          pinnedResults.push(source ? { ...r, source: r.source ?? source } : r);
         }
       }
     }
 
-    // Fast path 1: exact key lookup
-    if (intent.isExactKeyQuery && intent.exactKey) {
-      const results = await exactKeySearch(pool, table, intent.exactKey, intent, filters, topK);
-      if (results.length > 0) {
-        pinResults(results);
-        pinnedBy = 'exact-key';
-      }
-    }
+    // Fast paths run concurrently (no inter-dependency); results are pinned afterwards in
+    // priority order (exact-key > alias > mention) to keep ordering deterministic (A8).
+    const aliasCanonicals =
+      intent.aliasMatches.length > 0 && intent.aliasMatches[0].confidence >= 0.8
+        ? (intent.isComparison || intent.isEnumeration
+            ? intent.aliasMatches.filter((a) => a.confidence >= 0.8)
+            : [intent.aliasMatches[0]]
+          ).map((a) => a.canonical)
+        : [];
 
-    // Fast path 2: alias exact match
-    if (intent.aliasMatches.length > 0 && intent.aliasMatches[0].confidence >= 0.8) {
-      if (intent.isComparison || intent.isEnumeration) {
-        for (const aliasMatch of intent.aliasMatches.filter((a) => a.confidence >= 0.8)) {
-          const aliasResults = await aliasExactSearch(pool, table, aliasMatch.canonical, intent, filters, topK);
-          pinResults(aliasResults);
-        }
-      } else {
-        const topAlias = intent.aliasMatches[0];
-        const aliasResults = await aliasExactSearch(pool, table, topAlias.canonical, intent, filters, topK);
-        pinResults(aliasResults);
-      }
-      if (pinnedResults.length > 0 && !pinnedBy) {
-        pinnedBy = 'alias';
-      }
-    }
+    const [exactKeyResults, aliasResultsList, mentionResults] = await Promise.all([
+      intent.isExactKeyQuery && intent.exactKey
+        ? exactKeySearch(pool, table, intent.exactKey, intent, filters, topK)
+        : Promise.resolve([] as SearchResult[]),
+      Promise.all(
+        aliasCanonicals.map((c) => aliasExactSearch(pool, table, c, intent, filters, topK)),
+      ).then((lists) => lists.flat()),
+      intent.entityMentions.length > 0
+        ? entityMentionSearch(pool, table, intent.entityMentions, intent, filters, topK)
+        : Promise.resolve([] as SearchResult[]),
+    ]);
 
-    // Fast path 3: entity mention → ILIKE key match
-    if (intent.entityMentions.length > 0) {
-      const mentionResults = await entityMentionSearch(pool, table, intent.entityMentions, intent, filters, topK);
-      pinResults(mentionResults);
+    if (exactKeyResults.length > 0) {
+      pinResults(exactKeyResults, 'exact-key');
+      pinnedBy = 'exact-key';
+    }
+    if (aliasResultsList.length > 0) {
+      pinResults(aliasResultsList, 'alias');
+      if (!pinnedBy) pinnedBy = 'alias';
+    }
+    if (mentionResults.length > 0) {
+      pinResults(mentionResults, 'mention');
     }
 
     const effectiveTopK = Math.max(topK + offset, 60);
 
-    const candidatePool = intent.isEnumeration
-      ? Math.max(topK * 8, 300)
-      : Math.max(topK * 4, 120);
+    // Enumeration uses a dedicated path: return the full type-filtered set in key order,
+    // WITHOUT reranking (rerank would reorder/truncate and break list completeness). A4.
+    if (intent.isEnumeration) {
+      const enumLimit = Math.max(topK + offset, 300);
+      const enumResults = await enumerationSqlSearch(pool, table, intent, filters, enumLimit);
+      const merged: SearchResult[] = [];
+      const seenEnum = new Set<string>();
+      for (const r of [...pinnedResults, ...enumResults]) {
+        if (seenEnum.has(r.doc_id)) continue;
+        seenEnum.add(r.doc_id);
+        merged.push({ ...r, source: r.source ?? 'enumeration' });
+      }
+      searchSpan.setAttribute('path', 'enumeration');
+      searchSpan.setAttribute('resultCount', merged.length);
+      searchSpan.setAttribute('pinnedResults', pinnedResults.length);
+      setCachedSearch(cacheKey, query, merged).catch(() => {});
+      searchSpan.end();
+      return merged.slice(offset, offset + topK);
+    }
+
+    const candidatePool = Math.max(topK * 4, 120);
     const vectorPool = Math.ceil(candidatePool * 0.5);
     const ftsPool = Math.ceil(candidatePool * 0.35);
     const ilikePool = Math.ceil(candidatePool * 0.15);
@@ -323,20 +409,8 @@ export async function search(
       ilikeResults = await scoredIlikeSearch(pool, table, terms, intent, filters, ilikePool);
     }
 
-    // --- Stage D: Enumeration SQL route ---
-    let enumerationResults: SearchResult[] = [];
-    if (intent.isEnumeration) {
-      enumerationResults = await enumerationSqlSearch(pool, table, intent, filters, candidatePool);
-    }
-
-    // --- Stage E: Key-pattern enumeration ---
-    let keyPatternResults: SearchResult[] = [];
-    if (intent.isEnumeration) {
-      const keyPatterns = extractKeyPatterns(query);
-      if (keyPatterns.length > 0) {
-        keyPatternResults = await keyPatternSearch(pool, table, keyPatterns, intent, filters, 200);
-      }
-    }
+    // (Enumeration is handled earlier via a dedicated path; non-enumeration falls through
+    //  to the hybrid vector + FTS + ILIKE fusion below.)
 
     // Execute vector and FTS queries in parallel
     const vectorClient = await pool.connect();
@@ -345,9 +419,36 @@ export async function search(
     let vectorResults: SearchResult[] = [];
     let ftsResults: SearchResult[] = [];
 
+    // ef_search controls HNSW recall breadth; the default (40) is far below our LIMIT,
+    // so without raising it the tail of the candidate list degrades. iterative_scan keeps
+    // recall high when results are post-filtered by type (pgvector >= 0.8).
+    const efSearch = config.hnswEfSearch > 0
+      ? config.hnswEfSearch
+      : Math.min(Math.max(vectorPool * 2, 100), 500);
+    const useIterativeScan =
+      (intent.inferredType !== undefined || filters.type !== undefined) &&
+      (await supportsHnswIterativeScan(pool));
+
     try {
+      const runVector = async () => {
+        // SET LOCAL only applies inside a transaction.
+        await vectorClient.query('BEGIN');
+        try {
+          await vectorClient.query(`SET LOCAL hnsw.ef_search = ${efSearch}`);
+          if (useIterativeScan) {
+            await vectorClient.query(`SET LOCAL hnsw.iterative_scan = 'relaxed_order'`);
+          }
+          const r = await vectorClient.query(vectorSql, vectorParams);
+          await vectorClient.query('COMMIT');
+          return r;
+        } catch (e) {
+          await vectorClient.query('ROLLBACK').catch(() => {});
+          throw e;
+        }
+      };
+
       const [vRes, fRes] = await Promise.all([
-        vectorClient.query(vectorSql, vectorParams),
+        runVector(),
         ftsClient.query(ftsSql, ftsParams).catch(() => ({ rows: [] })),
       ]);
 
@@ -358,6 +459,7 @@ export async function search(
         content: row.content,
         metadata: row.metadata,
         distance: parseFloat(row.distance),
+        source: 'vector',
       }));
 
       ftsResults = (fRes as { rows: { doc_id: string; type: string; key: string; content: string; metadata: Record<string, unknown>; fts_rank: number }[] }).rows.map((row) => ({
@@ -367,6 +469,7 @@ export async function search(
         content: row.content,
         metadata: row.metadata as SearchResult['metadata'],
         distance: -row.fts_rank,
+        source: 'fts',
       }));
     } finally {
       vectorClient.release();
@@ -376,18 +479,17 @@ export async function search(
     searchSpan.setAttribute('vectorResults', vectorResults.length);
     searchSpan.setAttribute('ftsResults', ftsResults.length);
     searchSpan.setAttribute('ilikeResults', ilikeResults.length);
-    searchSpan.setAttribute('keyPatternResults', keyPatternResults.length);
-    searchSpan.setAttribute('enumerationResults', enumerationResults.length);
     searchSpan.setAttribute('pinnedResults', pinnedResults.length);
 
     // --- Weighted RRF fusion ---
-    const allLists = [vectorResults, ftsResults, ilikeResults, keyPatternResults];
-    const allWeights = [config.rrfWeightVector, config.rrfWeightFts, config.rrfWeightIlike, 0.10];
+    // FTS uses to_tsvector('simple'), which does not segment CJK; for (near-)pure-CJK
+    // queries its results are unreliable, so down-weight that route (A6②).
+    const cjkCount = (query.match(/[㐀-鿿豈-﫿]/g) || []).length;
+    const isCjkHeavy = cjkCount / Math.max(query.replace(/\s/g, '').length, 1) > 0.5;
+    const ftsWeight = isCjkHeavy ? config.rrfWeightFts * config.rrfFtsCjkScale : config.rrfWeightFts;
 
-    if (intent.isEnumeration && enumerationResults.length > 0) {
-      allLists.push(enumerationResults);
-      allWeights.push(0.25);
-    }
+    const allLists = [vectorResults, ftsResults, ilikeResults];
+    const allWeights = [config.rrfWeightVector, ftsWeight, config.rrfWeightIlike];
 
     const activeLists = allLists.filter((l) => l.length > 0);
     const activeWeights = allLists
@@ -430,9 +532,15 @@ export async function search(
       );
 
       if (missingAliases.length > 0) {
-        const missingQuery = missingAliases.map((a) => a.canonical).join(' ');
-        const missingResults = await search(missingQuery, filters, Math.min(topK, 10), tableName);
-        pinResults(missingResults);
+        // Direct alias lookup instead of a recursive full search() (which would re-run
+        // embedding + rerank + caching for each comparison). A9.
+        const missingLists = await Promise.all(
+          missingAliases.map((a) =>
+            aliasExactSearch(pool, table, a.canonical, intent, filters, Math.min(topK, 5)),
+          ),
+        );
+        const missingResults = missingLists.flat();
+        pinResults(missingResults, 'alias');
         for (const r of missingResults) {
           candidates = candidates.filter((c) => c.doc_id !== r.doc_id);
         }
@@ -639,10 +747,14 @@ async function entityMentionSearch(
     const orParts: string[] = [];
     const exactCases: string[] = [];
     for (let i = 0; i < mentions.length; i++) {
-      orParts.push(`key ILIKE $${paramIdx}`);
-      params.push(`%${mentions[i]}%`);
+      // Match both the raw mention and a separator-stripped form: mentions arrive in
+      // mixed normalization (e.g. 'desert_eagle' vs 'deserteagle') while stored keys
+      // keep separators ('gkw_desert_eagle.weapon'). The first ILIKE uses the trgm index.
+      const stripped = mentions[i].toLowerCase().replace(/[_-]/g, '');
+      orParts.push(`(key ILIKE $${paramIdx} OR replace(replace(lower(key), '_', ''), '-', '') ILIKE $${paramIdx + 1})`);
+      params.push(`%${mentions[i]}%`, `%${stripped}%`);
       exactCases.push(`CASE WHEN key ILIKE $${paramIdx} THEN 1 ELSE 0 END`);
-      paramIdx++;
+      paramIdx += 2;
     }
     conditions.push(`(${orParts.join(' OR ')})`);
 
@@ -813,68 +925,6 @@ async function enumerationSqlSearch(
 }
 
 // ---------------------------------------------------------------------------
-// Key pattern search for enumeration
-// ---------------------------------------------------------------------------
-async function keyPatternSearch(
-  pool: Awaited<ReturnType<typeof getPool>>,
-  table: string,
-  keyPatterns: string[],
-  intent: QueryIntent,
-  filters: SearchFilters,
-  limit: number,
-): Promise<SearchResult[]> {
-  const client = await pool.connect();
-  try {
-    const conditions: string[] = [];
-    const params: (string | number)[] = [];
-    let paramIdx = 1;
-
-    if (filters.type) {
-      conditions.push(`type = $${paramIdx++}`);
-      params.push(filters.type);
-    } else if (intent.inferredType) {
-      conditions.push(`type = $${paramIdx++}`);
-      params.push(intent.inferredType);
-    }
-    if (filters.mod_name) {
-      conditions.push(`metadata->>'mod_name' = $${paramIdx++}`);
-      params.push(filters.mod_name);
-    }
-
-    const kpOrParts = keyPatterns.map((p) => {
-      params.push(`%${p}%`);
-      return `key ILIKE $${paramIdx++}`;
-    });
-    if (kpOrParts.length === 1) {
-      conditions.push(kpOrParts[0]);
-    } else {
-      conditions.push(`(${kpOrParts.join(' OR ')})`);
-    }
-
-    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const sql = `
-      SELECT doc_id, type, key, content, metadata, 0.0 AS distance
-      FROM ${table}
-      ${where}
-      LIMIT $${paramIdx}
-    `;
-    params.push(limit);
-
-    const res = await client.query(sql, params);
-    return res.rows.map((row) => ({
-      doc_id: row.doc_id,
-      type: row.type,
-      key: row.key,
-      content: row.content,
-      metadata: row.metadata,
-      distance: parseFloat(row.distance),
-    }));
-  } finally {
-    client.release();
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Text processing utilities
 // ---------------------------------------------------------------------------
 const CJK_REGEX = /[\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/;
@@ -937,14 +987,4 @@ function extractSearchTerms(query: string): string[] {
       if (t.length < 2 && !CJK_REGEX.test(t)) return false;
       return !STOP_WORDS.has(t);
     });
-}
-
-function extractKeyPatterns(query: string): string[] {
-  const patterns: string[] = [];
-  for (const token of tokenizeQuery(query)) {
-    if (/[a-z]+\d+/.test(token) || /\d+[a-z]+/.test(token)) {
-      patterns.push(token);
-    }
-  }
-  return patterns;
 }

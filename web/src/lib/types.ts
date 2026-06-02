@@ -4,7 +4,7 @@ export interface Message {
 }
 
 export type DisplayItem =
-  | { type: 'message'; role: 'user' | 'ai' | 'error'; content: string; id: string }
+  | { type: 'message'; role: 'user' | 'ai' | 'error'; content: string; id: string; reasoning?: string }
   | { type: 'meta'; text: string; id: string };
 
 export interface MetaInfo {

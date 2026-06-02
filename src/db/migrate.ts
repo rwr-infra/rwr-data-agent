@@ -5,6 +5,7 @@ const tableName = config.databaseTable;
 
 const initSql = `
 CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 -- NOTE: If you change EMBEDDING_DIMENSION after data exists,
 -- you must drop the table first (data will be lost):
@@ -49,6 +50,14 @@ CREATE INDEX IF NOT EXISTS idx_${tableName}_metadata
 
 CREATE INDEX IF NOT EXISTS idx_${tableName}_fts
   ON ${tableName} USING gin (fts);
+
+-- Trigram indexes so the retrieval fast-paths' "key/content ILIKE '%x%'" lookups
+-- use an index instead of a sequential scan (pg_trgm is supported on Neon too).
+CREATE INDEX IF NOT EXISTS idx_${tableName}_key_trgm
+  ON ${tableName} USING gin (key gin_trgm_ops);
+
+CREATE INDEX IF NOT EXISTS idx_${tableName}_content_trgm
+  ON ${tableName} USING gin (content gin_trgm_ops);
 `;
 
 export async function runMigrate(): Promise<void> {
@@ -58,6 +67,27 @@ export async function runMigrate(): Promise<void> {
     console.log('Running database initialization...');
     await client.query(initSql);
     console.log('Database initialized successfully.');
+
+    // pgvector >= 0.8 supports hnsw.iterative_scan, which preserves recall when ANN
+    // results are post-filtered by WHERE (type=...). Log the version so operators know
+    // whether the iterative scan engages or whether search falls back to a larger ef_search.
+    try {
+      const { rows } = await client.query(
+        `SELECT extversion FROM pg_extension WHERE extname = 'vector'`,
+      );
+      const v = rows[0]?.extversion as string | undefined;
+      if (v) {
+        const [maj, min] = v.split('.').map((n: string) => parseInt(n, 10));
+        const supportsIterative = maj > 0 || (maj === 0 && min >= 8);
+        console.log(
+          supportsIterative
+            ? `pgvector ${v}: hnsw.iterative_scan supported (filtered vector recall enabled).`
+            : `pgvector ${v}: hnsw.iterative_scan NOT supported — upgrade to >=0.8 for better filtered recall; search falls back to a larger ef_search.`,
+        );
+      }
+    } catch {
+      /* version probe is best-effort */
+    }
   } catch (err) {
     console.error('Migration failed:', err);
     throw err;

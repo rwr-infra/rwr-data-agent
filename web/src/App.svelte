@@ -268,6 +268,7 @@
     const t0 = performance.now();
     let firstChunkTime = 0;
     let fullContent = '';
+    let fullReasoning = '';
     let aiItemIdx = -1;
 
     try {
@@ -305,7 +306,24 @@
           if (!line.trim()) continue;
           try {
             const event = JSON.parse(line);
-            if (event.type === 'text-delta') {
+            if (event.type === 'reasoning-delta') {
+              const r = event.textDelta ?? '';
+              if (r) {
+                if (firstChunkTime === 0) {
+                  firstChunkTime = performance.now();
+                  thinking = false;
+                  streaming = true;
+                  displayItems.push({ type: 'message', role: 'ai', content: '', id: uid() });
+                  aiItemIdx = displayItems.length - 1;
+                  displayItems = displayItems;
+                }
+                fullReasoning += r;
+                if (aiItemIdx >= 0) {
+                  displayItems[aiItemIdx] = { ...displayItems[aiItemIdx], type: 'message', role: 'ai', content: fullContent, reasoning: fullReasoning };
+                  displayItems = displayItems;
+                }
+              }
+            } else if (event.type === 'text-delta') {
               const content = event.textDelta ?? '';
               if (content) {
                 if (firstChunkTime === 0) {
@@ -318,7 +336,7 @@
                 }
                 fullContent += content;
                 if (aiItemIdx >= 0) {
-                  displayItems[aiItemIdx] = { ...displayItems[aiItemIdx], type: 'message', role: 'ai', content: fullContent };
+                  displayItems[aiItemIdx] = { ...displayItems[aiItemIdx], type: 'message', role: 'ai', content: fullContent, reasoning: fullReasoning || undefined };
                   displayItems = displayItems;
                 }
               }

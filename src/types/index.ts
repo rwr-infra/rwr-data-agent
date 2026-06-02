@@ -47,7 +47,16 @@ export interface SearchResult {
   key: string;
   content: string;
   metadata: RWRDocument['metadata'];
+  /**
+   * Legacy ordering field with overloaded meaning per route (vector cosine
+   * distance, -fts_rank, -rrf_score, or 0.0 for exact lookups). Lower = better.
+   * Prefer `score` for relevance once rerank has run.
+   */
   distance: number;
+  /** Reranker relevance score in [0,1], set after rerank; undefined beforehand. Higher = better. */
+  score?: number;
+  /** Retrieval route(s) that surfaced this result (e.g. 'vector', 'fts', 'ilike', 'alias'). */
+  source?: string;
 }
 
 export interface ChatMessage {

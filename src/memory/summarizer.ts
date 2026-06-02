@@ -2,6 +2,7 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { generateText } from 'ai';
 import { config } from '../config/index.js';
 import { SUMMARY_SYSTEM_PROMPT, buildSummaryPrompt } from './prompt.js';
+import { disabledThinkingOptions } from '../llm/providerOptions.js';
 import type { ConversationSummary } from './types.js';
 
 const summaries = new Map<string, ConversationSummary>();
@@ -58,6 +59,9 @@ export async function generateSummary(
       system: SUMMARY_SYSTEM_PROMPT,
       prompt: buildSummaryPrompt(history),
       maxOutputTokens: 512,
+      // Summary is an auxiliary task — keep thinking off to save latency/tokens. Only sent
+      // when the main model has thinking enabled (a DeepSeek hybrid model). B3.
+      providerOptions: config.llmThinkingEnabled ? disabledThinkingOptions() : undefined,
     });
 
     const summary = parseSummaryJson(result.text);
