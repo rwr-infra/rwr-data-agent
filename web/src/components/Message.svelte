@@ -33,7 +33,7 @@
 
 {#if type === 'ai'}
   <div class="chat chat-start">
-    <div class="chat-bubble chat-bubble-base-200 relative max-w-[80vw] sm:max-w-none">
+    <div class="chat-bubble chat-bubble-base-200 relative max-w-[88vw] sm:max-w-none">
       {#if reasoning}
         <details class="reasoning mb-2 rounded-lg bg-base-100/50 text-xs" transition:slide={{ duration: 200 }}>
           <summary class="flex items-center gap-1.5 px-3 py-1.5 cursor-pointer select-none font-medium text-base-content/60">

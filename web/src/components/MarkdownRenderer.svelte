@@ -1,5 +1,6 @@
 <script lang="ts">
   import SvelteMarkdown from '@humanspeak/svelte-markdown';
+  import MarkdownTable from './markdown/MarkdownTable.svelte';
 
   interface Props {
     source: string;
@@ -23,5 +24,6 @@
     {source}
     options={{ gfm: true, breaks: true }}
     streaming={true}
+    renderers={{ table: MarkdownTable }}
   />
 </div>

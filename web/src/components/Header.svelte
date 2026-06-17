@@ -37,17 +37,17 @@
   });
 </script>
 
-<div class="navbar bg-base-200 border-b border-base-300 px-3 sm:px-4">
-  <div class="navbar-start gap-2">
-    <button class="btn btn-ghost btn-sm btn-circle" onclick={ontogglemenu} aria-label={tr.sessions}>
+<div class="navbar bg-base-200 border-b border-base-300 px-3 sm:px-4 flex-wrap gap-y-2">
+  <div class="flex items-center gap-2 flex-1 min-w-0 order-1">
+    <button class="btn btn-ghost btn-sm btn-circle shrink-0" onclick={ontogglemenu} aria-label={tr.sessions}>
       <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
     </button>
-    <h1 class="text-base sm:text-lg font-semibold">RWR Data Agent</h1>
-    <span class="badge badge-sm badge-ghost">v1</span>
+    <h1 class="text-base sm:text-lg font-semibold truncate">RWR Data Agent</h1>
+    <span class="badge badge-sm badge-ghost hidden sm:inline-flex shrink-0">v1</span>
   </div>
-  <div class="navbar-end gap-2">
+  <div class="order-3 w-full sm:order-2 sm:w-auto">
     <select
-      class="select select-sm select-bordered w-auto text-xs sm:text-sm"
+      class="select select-sm select-bordered w-full sm:w-auto text-xs sm:text-sm"
       value={selectedTable}
       onchange={(e) => ontablechange((e.target as HTMLSelectElement).value)}
     >
@@ -55,6 +55,8 @@
         <option value={opt.value}>{opt.label}</option>
       {/each}
     </select>
+  </div>
+  <div class="flex items-center gap-1 sm:gap-2 flex-none order-2 sm:order-3">
     <a
       class="btn btn-ghost btn-sm btn-circle"
       href="https://github.com/rwr-infra/rwr-data-agent"
