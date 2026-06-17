@@ -348,8 +348,10 @@
               }
               const totalTime = Math.round(performance.now() - t0);
               const ttfb = firstChunkTime > 0 ? Math.round(firstChunkTime - t0) : '-';
-              const inTokens = usage?.promptTokens ?? '-';
-              const outTokens = usage?.completionTokens ?? '-';
+              // Backend falls back to a char-based estimate when the provider omits usage; mark estimates with "~".
+              const est = usage?.estimated === true;
+              const inTokens = usage?.promptTokens != null ? (est ? `~${usage.promptTokens}` : usage.promptTokens) : '-';
+              const outTokens = usage?.completionTokens != null ? (est ? `~${usage.completionTokens}` : usage.completionTokens) : '-';
               displayItems.push({ type: 'meta', text: tr.metaFormat(ttfb, totalTime, inTokens, outTokens), id: uid() });
               displayItems = displayItems;
             }

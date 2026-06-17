@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fade, slide } from 'svelte/transition';
   import MarkdownRenderer from './MarkdownRenderer.svelte';
 
   interface Props {
@@ -8,15 +9,42 @@
     streaming?: boolean;
     reasoning?: string;
     reasoningLabel?: string;
+    thinkingLabel?: string;
+    elapsed?: number;
   }
-  let { content, type, id, streaming = false, reasoning, reasoningLabel = 'Reasoning' }: Props = $props();
+  let {
+    content,
+    type,
+    id,
+    streaming = false,
+    reasoning,
+    reasoningLabel = 'Reasoning',
+    thinkingLabel = 'Thinking',
+    elapsed = 0,
+  }: Props = $props();
+
+  // "Thinking" phase: actively streaming, reasoning has begun, but the answer text
+  // hasn't started yet. Surfaces a live indicator instead of an empty bubble.
+  let reasoningActive = $derived(streaming && !!reasoning && !content);
+  let elapsedDisplay = $derived(
+    elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}`,
+  );
 </script>
 
 {#if type === 'ai'}
   <div class="chat chat-start">
     <div class="chat-bubble chat-bubble-base-200 relative max-w-[80vw] sm:max-w-none">
-      {#if reasoning}
-        <details class="reasoning mb-2 rounded-lg bg-base-100/50 text-xs">
+      {#if reasoningActive}
+        <div class="flex items-center gap-2 text-sm text-base-content/70" role="status" aria-live="polite" transition:fade={{ duration: 150 }}>
+          <span class="text-base animate-pulse">🧠</span>
+          <span class="font-medium">{thinkingLabel}</span>
+          <span class="loading loading-dots loading-sm"></span>
+          {#if elapsed > 0}
+            <span class="badge badge-ghost badge-xs">{elapsedDisplay}</span>
+          {/if}
+        </div>
+      {:else if reasoning}
+        <details class="reasoning mb-2 rounded-lg bg-base-100/50 text-xs" transition:slide={{ duration: 200 }}>
           <summary class="flex items-center gap-1.5 px-3 py-1.5 cursor-pointer select-none font-medium text-base-content/60">
             <span class="reasoning-arrow inline-block text-[0.65rem] leading-none">▶</span>
             <span>💭 {reasoningLabel}</span>
@@ -27,7 +55,7 @@
         </details>
       {/if}
       <MarkdownRenderer source={content} />
-      {#if streaming}
+      {#if streaming && !reasoningActive}
         <span class="inline-block w-0.5 h-4 bg-primary ml-0.5 align-text-bottom rounded-sm animate-pulse" aria-hidden="true"></span>
       {/if}
     </div>

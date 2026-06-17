@@ -27,6 +27,31 @@ function getProvider() {
   return provider;
 }
 
+/** Char-based token estimate, matching the request-size guard divisor (chat.ts ~line 59).
+ *  Used as a fallback when the upstream provider omits usage in streaming mode. */
+function estimateTokensFromChars(text: string): number {
+  return Math.ceil(text.length / 1.5);
+}
+
+/** Resolve token usage for the finish event. Many OpenAI-compatible backends omit (or return
+ *  NaN/0) usage on streamed responses; in that case fall back to a char-based estimate from the
+ *  real prompt (system + messages) and generated output, and flag the result as estimated so the
+ *  UI can mark it (e.g. with a "~" prefix). */
+function resolveUsage(
+  usage: { inputTokens?: number; outputTokens?: number } | undefined,
+  promptText: string,
+  outputText: string,
+): { promptTokens: number; completionTokens: number; estimated: boolean } {
+  const valid = (n: number | undefined): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0;
+  const inReal = valid(usage?.inputTokens) ? usage!.inputTokens! : undefined;
+  const outReal = valid(usage?.outputTokens) ? usage!.outputTokens! : undefined;
+  return {
+    promptTokens: inReal ?? estimateTokensFromChars(promptText),
+    completionTokens: outReal ?? estimateTokensFromChars(outputText),
+    estimated: inReal === undefined || outReal === undefined,
+  };
+}
+
 export async function chatRoutes(app: FastifyInstance) {
   app.post('/chat/completions', async (request, reply) => {
     const startTime = Date.now();
@@ -166,6 +191,11 @@ export async function chatRoutes(app: FastifyInstance) {
       8192,
     );
 
+    // Real prompt sent to the model (system + messages), used to estimate input tokens when the
+    // provider omits usage. Includes the RAG context the frontend can't see, so it is far more
+    // accurate than a client-side estimate.
+    const promptText = SYSTEM_PROMPT + '\n' + llmMessages.map((m) => m.content).join('\n');
+
     const genObs = chainObs.startObservation('llm-generation', {
       input: { messages: llmMessages, system: SYSTEM_PROMPT },
       model: config.llmModel,
@@ -204,16 +234,23 @@ export async function chatRoutes(app: FastifyInstance) {
           },
         });
 
+        let lastObject: unknown = null;
         for await (const chunk of result.partialObjectStream) {
+          lastObject = chunk;
           const data = JSON.stringify({ type: 'json-delta', jsonDelta: chunk });
           reply.raw.write(data + '\n');
           (reply.raw as unknown as { flush?: () => void }).flush?.();
         }
 
         const usage = await result.usage;
+        const resolved = resolveUsage(usage, promptText, JSON.stringify(lastObject ?? {}));
         const finishData = JSON.stringify({
           type: 'finish',
-          usage: { promptTokens: usage?.inputTokens, completionTokens: usage?.outputTokens },
+          usage: {
+            promptTokens: resolved.promptTokens,
+            completionTokens: resolved.completionTokens,
+            estimated: resolved.estimated,
+          },
         });
         reply.raw.write(finishData + '\n');
         (reply.raw as unknown as { flush?: () => void }).flush?.();
@@ -239,17 +276,21 @@ export async function chatRoutes(app: FastifyInstance) {
         });
 
         // Iterate fullStream (not textStream) so reasoning parts are surfaced separately. B4.
+        // Accumulate generated chars (reasoning + text) to estimate output tokens if usage is absent.
+        let generatedText = '';
         for await (const part of result.fullStream) {
           const p = part as { type: string; text?: string; textDelta?: string; delta?: string; error?: unknown };
           if (p.type === 'reasoning-delta' || p.type === 'reasoning') {
             const delta = p.text ?? p.textDelta ?? p.delta ?? '';
             if (delta) {
+              generatedText += delta;
               reply.raw.write(JSON.stringify({ type: 'reasoning-delta', textDelta: delta }) + '\n');
               (reply.raw as unknown as { flush?: () => void }).flush?.();
             }
           } else if (p.type === 'text-delta' || p.type === 'text') {
             const delta = p.text ?? p.textDelta ?? p.delta ?? '';
             if (delta) {
+              generatedText += delta;
               reply.raw.write(JSON.stringify({ type: 'text-delta', textDelta: delta }) + '\n');
               (reply.raw as unknown as { flush?: () => void }).flush?.();
             }
@@ -259,9 +300,14 @@ export async function chatRoutes(app: FastifyInstance) {
         }
 
         const usage = await result.usage;
+        const resolved = resolveUsage(usage, promptText, generatedText);
         const finishData = JSON.stringify({
           type: 'finish',
-          usage: { promptTokens: usage?.inputTokens, completionTokens: usage?.outputTokens },
+          usage: {
+            promptTokens: resolved.promptTokens,
+            completionTokens: resolved.completionTokens,
+            estimated: resolved.estimated,
+          },
         });
         reply.raw.write(finishData + '\n');
         (reply.raw as unknown as { flush?: () => void }).flush?.();

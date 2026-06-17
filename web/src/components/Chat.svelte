@@ -92,7 +92,7 @@
           class:opacity-50={isDimmed(i)}
           class:transition-opacity={isDimmed(i)}
         >
-          <Message content={item.content} type={item.role} id={item.id} streaming={streaming && i === lastAiIdx} reasoning={item.reasoning} reasoningLabel={tr.reasoning} />
+          <Message content={item.content} type={item.role} id={item.id} streaming={streaming && i === lastAiIdx} reasoning={item.reasoning} reasoningLabel={tr.reasoning} thinkingLabel={tr.thinking} {elapsed} />
           {#if item.role === 'user'}
             <div class="group">
               <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 sm:group-hover:opacity-100 transition-opacity mt-1 mb-2 justify-end">
