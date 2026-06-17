@@ -17,7 +17,10 @@ export const config = {
   ingestBatchSize: parseInt(process.env.INGEST_BATCH_SIZE ?? '8', 10),
   ingestConcurrency: parseInt(process.env.INGEST_CONCURRENCY ?? '2', 10),
   port: parseInt(process.env.PORT ?? '3000', 10),
-  maxContextTokens: parseInt(process.env.MAX_CONTEXT_TOKENS ?? '200000', 10),
+  maxContextTokens: parseInt(process.env.MAX_CONTEXT_TOKENS ?? '500000', 10),
+  // Cap on generated output tokens (reasoning + answer share this budget). Bounds long
+  // enumerations/comparisons; raise if answers get truncated. DeepSeek-V4 allows up to 384K.
+  llmMaxOutputTokens: parseInt(process.env.LLM_MAX_OUTPUT_TOKENS ?? '32768', 10),
   cacheEnabled: process.env.CACHE_ENABLED !== 'false',
   cacheTtlSeconds: parseInt(process.env.CACHE_TTL_SECONDS ?? '600', 10),
   langfuseEnabled: process.env.LANGFUSE_ENABLED === 'true',

@@ -3,6 +3,14 @@ export interface Message {
   content: string;
 }
 
+export interface TokenBreakdown {
+  systemPrompt: number;
+  context: number;
+  messages: number;
+  reasoning: number;
+  answer: number;
+}
+
 export type DisplayItem =
   | { type: 'message'; role: 'user' | 'ai' | 'error'; content: string; id: string; reasoning?: string }
   | { type: 'meta'; text: string; id: string };

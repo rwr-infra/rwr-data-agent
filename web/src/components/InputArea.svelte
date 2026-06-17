@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Translations } from '../lib/i18n.js';
+  import type { TokenBreakdown } from '../lib/types.js';
   import ContextBar from './ContextBar.svelte';
 
   interface Props {
@@ -7,12 +8,13 @@
     loading: boolean;
     contextUsed: number;
     maxContext: number;
+    breakdown?: TokenBreakdown;
     onsend: (text: string) => void;
     oninputchange: (text: string) => void;
     prefillText?: string;
     onprefillconsumed?: () => void;
   }
-  let { tr, loading, contextUsed, maxContext, onsend, oninputchange, prefillText = '', onprefillconsumed }: Props = $props();
+  let { tr, loading, contextUsed, maxContext, breakdown, onsend, oninputchange, prefillText = '', onprefillconsumed }: Props = $props();
 
   let inputText = $state('');
   let textarea: HTMLTextAreaElement | undefined = $state();
@@ -65,5 +67,5 @@
     ></textarea>
     <button class="btn btn-primary shrink-0" disabled={loading} onclick={submit}>{tr.send}</button>
   </div>
-  <ContextBar used={contextUsed} max={maxContext} />
+  <ContextBar used={contextUsed} max={maxContext} {breakdown} {tr} />
 </div>

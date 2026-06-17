@@ -26,6 +26,14 @@ export interface Translations {
   searching: string;
   generating: string;
   reasoning: string;
+  tokenBreakdown: string;
+  bdInput: string;
+  bdOutput: string;
+  bdSystem: string;
+  bdContext: string;
+  bdMessages: string;
+  bdReasoning: string;
+  bdAnswer: string;
   defaultTag: string;
   ctxOver: string;
   reqFailed: string;
@@ -64,6 +72,14 @@ const i18n: Record<Lang, Translations> = {
     searching: '搜索中',
     generating: '生成中',
     reasoning: '思考过程',
+    tokenBreakdown: 'Token 去向',
+    bdInput: '输入',
+    bdOutput: '输出',
+    bdSystem: '系统提示',
+    bdContext: '检索上下文',
+    bdMessages: '对话消息',
+    bdReasoning: '思考',
+    bdAnswer: '回答',
     defaultTag: '(默认)',
     ctxOver: '上下文已达上限，请刷新页面开始新对话',
     reqFailed: '请求失败: ',
@@ -101,6 +117,14 @@ const i18n: Record<Lang, Translations> = {
     searching: 'Searching',
     generating: 'Generating',
     reasoning: 'Reasoning',
+    tokenBreakdown: 'Token usage',
+    bdInput: 'Input',
+    bdOutput: 'Output',
+    bdSystem: 'System prompt',
+    bdContext: 'Context',
+    bdMessages: 'Messages',
+    bdReasoning: 'Reasoning',
+    bdAnswer: 'Answer',
     defaultTag: '(Default)',
     ctxOver: 'Context limit reached, please refresh to start a new conversation',
     reqFailed: 'Request failed: ',

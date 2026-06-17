@@ -21,3 +21,5 @@ docs/
 
 .codegraph/
 .cursor/
+.claude/
+.local/

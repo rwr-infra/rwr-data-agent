@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { fade, slide } from 'svelte/transition';
+  import { slide } from 'svelte/transition';
   import MarkdownRenderer from './MarkdownRenderer.svelte';
 
   interface Props {
@@ -34,20 +34,20 @@
 {#if type === 'ai'}
   <div class="chat chat-start">
     <div class="chat-bubble chat-bubble-base-200 relative max-w-[80vw] sm:max-w-none">
-      {#if reasoningActive}
-        <div class="flex items-center gap-2 text-sm text-base-content/70" role="status" aria-live="polite" transition:fade={{ duration: 150 }}>
-          <span class="text-base animate-pulse">🧠</span>
-          <span class="font-medium">{thinkingLabel}</span>
-          <span class="loading loading-dots loading-sm"></span>
-          {#if elapsed > 0}
-            <span class="badge badge-ghost badge-xs">{elapsedDisplay}</span>
-          {/if}
-        </div>
-      {:else if reasoning}
+      {#if reasoning}
         <details class="reasoning mb-2 rounded-lg bg-base-100/50 text-xs" transition:slide={{ duration: 200 }}>
           <summary class="flex items-center gap-1.5 px-3 py-1.5 cursor-pointer select-none font-medium text-base-content/60">
             <span class="reasoning-arrow inline-block text-[0.65rem] leading-none">▶</span>
-            <span>💭 {reasoningLabel}</span>
+            {#if reasoningActive}
+              <span class="animate-pulse">🧠</span>
+              <span aria-live="polite">{thinkingLabel}</span>
+              <span class="loading loading-dots loading-xs"></span>
+              {#if elapsed > 0}
+                <span class="badge badge-ghost badge-xs ml-auto">{elapsedDisplay}</span>
+              {/if}
+            {:else}
+              <span>💭 {reasoningLabel}</span>
+            {/if}
           </summary>
           <div class="px-3 pb-2 pt-0.5">
             <div class="whitespace-pre-wrap break-words border-l-2 border-base-300 pl-3 text-base-content/60">{reasoning}</div>

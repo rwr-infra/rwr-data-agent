@@ -4,7 +4,7 @@
   import { getInitialLang, t, toggleLang } from './lib/i18n.js';
   import type { Theme } from './lib/theme.js';
   import { getInitialTheme, toggleTheme } from './lib/theme.js';
-  import type { Message, DisplayItem, Session } from './lib/types.js';
+  import type { Message, DisplayItem, Session, TokenBreakdown } from './lib/types.js';
   import { stripMarkdown } from './lib/utils.js';
   import * as sessionStore from './lib/sessionStore.js';
   import Header from './components/Header.svelte';
@@ -35,7 +35,8 @@
   let showWelcome = $state(true);
   let selectedTable = $state(readCache().selectedTable ?? '');
   let contextUsed = $state(0);
-  const MAX_CONTEXT = 200000;
+  let lastBreakdown = $state<TokenBreakdown | undefined>(undefined);
+  const MAX_CONTEXT = 500000;
   let pendingRecallId: string | null = $state(null);
   let prefillText = $state('');
   let toast = $state<{ message: string; visible: boolean }>({ message: '', visible: false });
@@ -90,6 +91,7 @@
     history = [];
     displayItems = [];
     contextUsed = 0;
+    lastBreakdown = undefined;
     showWelcome = true;
     drawerOpen = false;
     const emptySession: Session = {
@@ -114,6 +116,7 @@
     nextId = 0;
     displayItems = buildDisplayItems(history);
     contextUsed = 0;
+    lastBreakdown = undefined;
     showWelcome = history.length === 0;
     if (session.selectedTable !== undefined) {
       selectedTable = session.selectedTable;
@@ -216,6 +219,7 @@
     writeCache({ selectedTable: table });
     history = [];
     contextUsed = 0;
+    lastBreakdown = undefined;
     displayItems = [];
     showWelcome = true;
     activeSessionId = sessionStore.generateId();
@@ -352,6 +356,7 @@
               const est = usage?.estimated === true;
               const inTokens = usage?.promptTokens != null ? (est ? `~${usage.promptTokens}` : usage.promptTokens) : '-';
               const outTokens = usage?.completionTokens != null ? (est ? `~${usage.completionTokens}` : usage.completionTokens) : '-';
+              if (usage?.breakdown) lastBreakdown = usage.breakdown;
               displayItems.push({ type: 'meta', text: tr.metaFormat(ttfb, totalTime, inTokens, outTokens), id: uid() });
               displayItems = displayItems;
             }
@@ -420,6 +425,7 @@
     history = history;
 
     contextUsed = 0;
+    lastBreakdown = undefined;
     await sendMessageInternal(userContent, true);
   }
 
@@ -448,6 +454,7 @@
       }));
 
     contextUsed = 0;
+    lastBreakdown = undefined;
     prefillText = recalledContent;
 
     if (displayItems.length === 0) {
@@ -521,6 +528,7 @@
     {loading}
     contextUsed={effectiveContextUsed}
     maxContext={MAX_CONTEXT}
+    breakdown={lastBreakdown}
     onsend={sendMessage}
     oninputchange={handleInputChange}
     {prefillText}

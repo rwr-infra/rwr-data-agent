@@ -52,6 +52,43 @@ function resolveUsage(
   };
 }
 
+export interface TokenBreakdown {
+  systemPrompt: number;
+  context: number;
+  messages: number;
+  reasoning: number;
+  answer: number;
+}
+
+/** Break the input/output token totals down by component (system prompt, retrieved context,
+ *  conversation messages; reasoning vs answer) using char-based estimates, then scale each group
+ *  proportionally so the parts sum to the displayed In/Out totals. Lets the UI show "where the
+ *  tokens went" even when the provider only reports aggregate usage. */
+function buildBreakdown(
+  chars: { system: number; context: number; messages: number; reasoning: number; answer: number },
+  inputTotal: number,
+  outputTotal: number,
+): TokenBreakdown {
+  const tok = (c: number) => Math.ceil(c / 1.5);
+  const sys = tok(chars.system);
+  const ctx = tok(chars.context);
+  const msg = tok(chars.messages);
+  const rea = tok(chars.reasoning);
+  const ans = tok(chars.answer);
+  const inSum = sys + ctx + msg;
+  const outSum = rea + ans;
+  const inScale = inSum > 0 ? inputTotal / inSum : 0;
+  const outScale = outSum > 0 ? outputTotal / outSum : 0;
+  const scale = (n: number, s: number) => Math.round(n * s);
+  return {
+    systemPrompt: scale(sys, inScale),
+    context: scale(ctx, inScale),
+    messages: scale(msg, inScale),
+    reasoning: scale(rea, outScale),
+    answer: scale(ans, outScale),
+  };
+}
+
 export async function chatRoutes(app: FastifyInstance) {
   app.post('/chat/completions', async (request, reply) => {
     const startTime = Date.now();
@@ -188,13 +225,23 @@ export async function chatRoutes(app: FastifyInstance) {
     ];
     const maxTokens = Math.min(
       body.max_tokens ?? Math.max(config.maxContextTokens - estimatedTokens, 1024),
-      8192,
+      config.llmMaxOutputTokens,
     );
 
     // Real prompt sent to the model (system + messages), used to estimate input tokens when the
     // provider omits usage. Includes the RAG context the frontend can't see, so it is far more
     // accurate than a client-side estimate.
     const promptText = SYSTEM_PROMPT + '\n' + llmMessages.map((m) => m.content).join('\n');
+
+    // Char counts per input component for the token breakdown. The RAG user prompt wraps the
+    // retrieved docs + instructions around the question, so "context" is that prompt minus the
+    // raw question, and "messages" is the conversation history plus the question itself.
+    const historyChars = historyMessages.reduce((sum, m) => sum + m.content.length, 0);
+    const inputChars = {
+      system: SYSTEM_PROMPT.length,
+      context: Math.max(ragUserPrompt.length - query.length, 0),
+      messages: historyChars + query.length,
+    };
 
     const genObs = chainObs.startObservation('llm-generation', {
       input: { messages: llmMessages, system: SYSTEM_PROMPT },
@@ -243,13 +290,20 @@ export async function chatRoutes(app: FastifyInstance) {
         }
 
         const usage = await result.usage;
-        const resolved = resolveUsage(usage, promptText, JSON.stringify(lastObject ?? {}));
+        const answerText = JSON.stringify(lastObject ?? {});
+        const resolved = resolveUsage(usage, promptText, answerText);
+        const breakdown = buildBreakdown(
+          { ...inputChars, reasoning: 0, answer: answerText.length },
+          resolved.promptTokens,
+          resolved.completionTokens,
+        );
         const finishData = JSON.stringify({
           type: 'finish',
           usage: {
             promptTokens: resolved.promptTokens,
             completionTokens: resolved.completionTokens,
             estimated: resolved.estimated,
+            breakdown,
           },
         });
         reply.raw.write(finishData + '\n');
@@ -276,21 +330,23 @@ export async function chatRoutes(app: FastifyInstance) {
         });
 
         // Iterate fullStream (not textStream) so reasoning parts are surfaced separately. B4.
-        // Accumulate generated chars (reasoning + text) to estimate output tokens if usage is absent.
-        let generatedText = '';
+        // Accumulate reasoning vs answer chars separately to estimate output tokens (and the
+        // breakdown) when the provider omits usage.
+        let reasoningText = '';
+        let answerText = '';
         for await (const part of result.fullStream) {
           const p = part as { type: string; text?: string; textDelta?: string; delta?: string; error?: unknown };
           if (p.type === 'reasoning-delta' || p.type === 'reasoning') {
             const delta = p.text ?? p.textDelta ?? p.delta ?? '';
             if (delta) {
-              generatedText += delta;
+              reasoningText += delta;
               reply.raw.write(JSON.stringify({ type: 'reasoning-delta', textDelta: delta }) + '\n');
               (reply.raw as unknown as { flush?: () => void }).flush?.();
             }
           } else if (p.type === 'text-delta' || p.type === 'text') {
             const delta = p.text ?? p.textDelta ?? p.delta ?? '';
             if (delta) {
-              generatedText += delta;
+              answerText += delta;
               reply.raw.write(JSON.stringify({ type: 'text-delta', textDelta: delta }) + '\n');
               (reply.raw as unknown as { flush?: () => void }).flush?.();
             }
@@ -300,13 +356,19 @@ export async function chatRoutes(app: FastifyInstance) {
         }
 
         const usage = await result.usage;
-        const resolved = resolveUsage(usage, promptText, generatedText);
+        const resolved = resolveUsage(usage, promptText, reasoningText + answerText);
+        const breakdown = buildBreakdown(
+          { ...inputChars, reasoning: reasoningText.length, answer: answerText.length },
+          resolved.promptTokens,
+          resolved.completionTokens,
+        );
         const finishData = JSON.stringify({
           type: 'finish',
           usage: {
             promptTokens: resolved.promptTokens,
             completionTokens: resolved.completionTokens,
             estimated: resolved.estimated,
+            breakdown,
           },
         });
         reply.raw.write(finishData + '\n');
