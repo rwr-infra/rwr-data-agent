@@ -367,7 +367,7 @@ export async function chatRoutes(app: FastifyInstance) {
           system: SYSTEM_PROMPT,
           messages: llmMessages,
           maxOutputTokens: maxTokens,
-          ...(tools ? { tools, stopWhen: stepCountIs(5) } : {}),
+          ...(tools ? { tools, stopWhen: stepCountIs(100) } : {}),
           providerOptions: buildLlmProviderOptions(),
           onFinish: ({ text, usage }) => {
             const outputText = text.slice(0, 500);
@@ -433,7 +433,18 @@ export async function chatRoutes(app: FastifyInstance) {
         }
 
         if (toolCallCount > 0) {
-          console.log(`[chat] Agent used ${toolCallCount} tool call(s)`);
+          const finishReason = await result.finishReason;
+          console.log(`[chat] Agent used ${toolCallCount} tool call(s) | finishReason=${finishReason} | answerLen=${answerText.length}`);
+
+          // Step-limit guard: if the loop stopped because of step count but the model was still
+          // requesting tool calls (no final text answer), surface an explicit error instead of
+          // silently truncating.
+          if (finishReason === 'tool-calls' && answerText.trim().length === 0) {
+            const stepLimitMsg = `工具调用已达步数上限（100步），模型未能产出最终答案。请尝试缩小问题范围或换用更具体的关键词重试。`;
+            reply.raw.write(JSON.stringify({ type: 'error', error: stepLimitMsg }) + '\n');
+            (reply.raw as unknown as { flush?: () => void }).flush?.();
+            chainObs.update({ level: 'ERROR', statusMessage: 'Agent step limit reached' });
+          }
         }
 
         const usage = await result.usage;
