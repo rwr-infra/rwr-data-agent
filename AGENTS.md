@@ -24,6 +24,8 @@ npm run ingest            # CLI extraction + embed in one step (legacy)
 npm run eval              # retrieval eval harness (src/eval/run.ts)
 npm run lint              # ESLint (no config file, uses defaults)
 npm run format            # Prettier (no config file, uses defaults)
+npm run build:graph       # build graph index from data/ (nodes + edges + AS symbols)
+npm run validate:graph    # validate agent tool functions against real data
 ```
 
 ## Running Locally (Required Order)
@@ -32,8 +34,45 @@ npm run format            # Prettier (no config file, uses defaults)
 2. `cp .env.example .env` — fill in `DATABASE_URL`, `SILICONFLOW_API_KEY`, `LLM_API_KEY`
 3. `npm run db:migrate` — creates table, extension, HNSW/GIN indexes
 4. `npm run extract -- --source ./data --mod GFL_Castling` — extract data to JSON for review
-5. `npm run embed -- --input ./extracted-documents.json` — embed JSON into database
-6. `npm run dev`
+5. `npm run embed -- --input ./output/extracted-documents.json` — embed JSON into database
+6. `npm run build:graph` — build graph index from `data/` (nodes + edges + AS symbols)
+7. `npm run dev`
+
+## Graph Index & Agent Tools (src/agent/)
+
+The graph index is a **file-system + relationship overlay** that solves three gaps that embedding-RAG alone cannot address: locating original source files, tracing inheritance chains, and querying AngelScript symbols.
+
+```bash
+npm run build:graph                                      # default: --source ./data --mod GFL_Castling
+npm run build:graph -- --source ./other-data --mod MyMod # custom source
+npm run validate:graph                                   # smoke-test all 7 tools against real data
+```
+
+Output files (generated in `output/`, not tracked by git):
+- `output/graph.json` — nodes (entities keyed by `key`/`name`/filename) + edges (relationships)
+- `output/script-symbols.json` — AngelScript function/class/include signatures with line numbers
+
+**Edge types extracted:**
+
+| Relationship | Meaning | Example |
+|---|---|---|
+| `extends` | XML `file="parent"` inheritance | `<weapon file="base_primary.weapon">` |
+| `fires` | Weapon→projectile reference | `<projectile file="556.projectile">` |
+| `transforms_to` | Carry item degradation chain | `transform_on_consume="K309_1"` |
+| `includes` | Call file aggregation | `<calls><call file="x.call"/></calls>` |
+| `next_in_chain` | Weapon mode switching | `<next_in_chain key="m4_gl"/>` |
+| `references` | Generic weapon file include | `<weapon file="..."/>` inside other elements |
+
+**Tool functions** (`src/agent/tools.ts`, in-process, no external service):
+- `getInheritanceChain(key)` — full parent chain with depth
+- `findReferences(key)` — reverse lookup: who points to this entity
+- `getTransformChain(key)` — armor/item degradation layers
+- `readSource(file, startLine?, endLine?)` — read raw source with path-traversal guard
+- `listFiles(pattern, type?)` — glob search over indexed nodes
+- `getScriptSymbols(file)` — AngelScript function/class/include signatures
+- `getNode(key)` — basic entity lookup
+
+These are plain async functions designed to be wrapped as AI SDK `tool()` definitions and are **now integrated** into `chat.ts` via `streamText({ tools, stopWhen: stepCountIs(5) })`. The LLM autonomously calls these tools during multi-step agent loops, interleaved with the existing RAG context. Tool-call and tool-result events are streamed to the frontend as `tool-step` NDJSON lines for live UI feedback.
 
 ## Extract CLI (Step 1: Parse → Structured JSON)
 
@@ -43,7 +82,7 @@ npm run extract -- --source ./data --mod GFL_Castling --output ./my-data.json
 npm run extract -- --source ./data --mod GFL_Castling --languages ./custom/path/languages
 ```
 
-Output is a JSON file (`extracted-documents.json` by default) containing **structured documents** with:
+Output is a JSON file (`output/extracted-documents.json` by default) containing **structured documents** with:
 - `type`, `key`, `label` — document identity
 - `description` — natural language description generated from attributes
 - `raw_text` — raw text representation
@@ -59,11 +98,11 @@ Review/edit this JSON before embedding. The `data` field contains the XML-as-JSO
 ## Embed CLI (Step 2: JSON → Database)
 
 ```bash
-npm run embed -- --input ./extracted-documents.json
-npm run embed -- --input ./extracted-documents.json --clear   # wipe mod first
-npm run embed -- --input ./extracted-documents.json --resume  # skip existing
-npm run embed -- --input ./extracted-documents.json --filter-type weapon  # only weapons
-npm run embed -- --input ./extracted-documents.json --limit 10  # embed first 10 docs (testing)
+npm run embed -- --input ./output/extracted-documents.json
+npm run embed -- --input ./output/extracted-documents.json --clear   # wipe mod first
+npm run embed -- --input ./output/extracted-documents.json --resume  # skip existing
+npm run embed -- --input ./output/extracted-documents.json --filter-type weapon  # only weapons
+npm run embed -- --input ./output/extracted-documents.json --limit 10  # embed first 10 docs (testing)
 ```
 
 ## Ingestion CLI (Legacy: Combined Extract + Embed)

@@ -48,7 +48,7 @@ program
   .version('1.0.0')
   .requiredOption('-s, --source <path>', 'Source directory containing data files')
   .requiredOption('-m, --mod <name>', 'Mod name to tag documents with')
-  .option('-o, --output <path>', 'Output JSON file path', './extracted-documents.json')
+  .option('-o, --output <path>', 'Output JSON file path', './output/extracted-documents.json')
   .option('-l, --languages <path>', 'Languages directory (default: <source>/languages)', '')
   .parse();
 
@@ -122,6 +122,7 @@ async function main() {
     documents: parsedDocs,
   };
 
+  await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await fs.writeFile(outputPath, JSON.stringify(output, null, 2), 'utf-8');
   console.log(`Written ${parsedDocs.length} structured documents to ${outputPath}`);
   console.log('Extraction complete.');

@@ -11,9 +11,15 @@ export interface TokenBreakdown {
   answer: number;
 }
 
+export interface ToolStep {
+  icon: string;
+  text: string;
+}
+
 export type DisplayItem =
   | { type: 'message'; role: 'user' | 'ai' | 'error'; content: string; id: string; reasoning?: string }
-  | { type: 'meta'; text: string; id: string };
+  | { type: 'meta'; text: string; id: string }
+  | { type: 'tool-trace'; steps: ToolStep[]; id: string };
 
 export interface MetaInfo {
   ttfb: string | number;

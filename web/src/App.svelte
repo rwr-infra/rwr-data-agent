@@ -330,19 +330,29 @@
             } else if (event.type === 'text-delta') {
               const content = event.textDelta ?? '';
               if (content) {
-                if (firstChunkTime === 0) {
-                  firstChunkTime = performance.now();
+                if (aiItemIdx < 0) {
+                  if (firstChunkTime === 0) firstChunkTime = performance.now();
                   thinking = false;
                   streaming = true;
                   displayItems.push({ type: 'message', role: 'ai', content: '', id: uid() });
                   aiItemIdx = displayItems.length - 1;
                   displayItems = displayItems;
-                }
-                fullContent += content;
+                }                fullContent += content;
                 if (aiItemIdx >= 0) {
                   displayItems[aiItemIdx] = { ...displayItems[aiItemIdx], type: 'message', role: 'ai', content: fullContent, reasoning: fullReasoning || undefined };
                   displayItems = displayItems;
                 }
+              }
+            } else if (event.type === 'tool-step') {
+              const icon = event.done ? '\u2713' : '\uD83D\uDD27';
+              const text = event.summary ?? event.toolName ?? 'tool';
+              const trace = displayItems.findLast((it) => it.type === 'tool-trace');
+              if (trace && trace.type === 'tool-trace') {
+                trace.steps.push({ icon, text });
+                displayItems = [...displayItems];
+              } else {
+                displayItems.push({ type: 'tool-trace', steps: [{ icon, text }], id: uid() });
+                displayItems = displayItems;
               }
             } else if (event.type === 'finish') {
               const usage = event.usage;

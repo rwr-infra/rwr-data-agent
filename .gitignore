@@ -23,3 +23,6 @@ docs/
 .cursor/
 .claude/
 .local/
+
+# Generated build artifacts (graph index, extracted docs)
+output/

@@ -21,7 +21,9 @@
     "web:build": "npm --prefix web run build",
     "lint": "eslint src --ext .ts",
     "format": "prettier --write \"src/**/*.ts\"",
-    "eval": "node --import tsx src/eval/run.ts"
+    "eval": "node --import tsx src/eval/run.ts",
+    "build:graph": "node --import tsx src/agent/buildGraph.ts",
+    "validate:graph": "node --import tsx src/agent/validate.ts"
   },
   "keywords": [
     "rwr",

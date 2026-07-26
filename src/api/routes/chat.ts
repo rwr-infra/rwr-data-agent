@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
-import { streamText, streamObject } from 'ai';
+import { streamText, streamObject, stepCountIs } from 'ai';
 import { startObservation } from '@langfuse/tracing';
 import { config, validateConfig } from '../../config/index.js';
 import { flushLangfuse } from '../../observability/langfuse.js';
@@ -11,9 +11,11 @@ import { buildLlmProviderOptions } from '../../llm/providerOptions.js';
 import { classifyQuery, isMetaQuery } from '../../retrieval/intent.js';
 import { EnumResultSchema, ComparisonResultSchema } from '../../types/schemas.js';
 import { getSummary, generateSummary, shouldGenerateSummary } from '../../memory/summarizer.js';
+import { buildAgentTools } from '../../agent/toolDefs.js';
 import type { ChatCompletionRequest, SearchResult } from '../../types/index.js';
 
 let provider: ReturnType<typeof createOpenAICompatible> | null = null;
+let agentTools: ReturnType<typeof buildAgentTools> | null | undefined;
 
 function getProvider() {
   if (!provider) {
@@ -27,10 +29,60 @@ function getProvider() {
   return provider;
 }
 
+/** Try to load graph tools; return null if graph.json is missing (graceful fallback to pure RAG). */
+function getAgentTools(): ReturnType<typeof buildAgentTools> | null {
+  if (agentTools !== undefined) return agentTools;
+  try {
+    agentTools = buildAgentTools();
+    console.log('[chat] Agent graph tools enabled');
+  } catch (err) {
+    console.warn(`[chat] Graph tools unavailable (${(err as Error).message}), falling back to pure RAG`);
+    agentTools = null;
+  }
+  return agentTools;
+}
+
 /** Char-based token estimate, matching the request-size guard divisor (chat.ts ~line 59).
  *  Used as a fallback when the upstream provider omits usage in streaming mode. */
 function estimateTokensFromChars(text: string): number {
   return Math.ceil(text.length / 1.5);
+}
+
+/** Build a short human-readable summary of a tool call's input, shown to the UI. */
+function summarizeToolInput(toolName: string | undefined, input: unknown): string {
+  if (!toolName || !input || typeof input !== 'object') return '';
+  const inp = input as Record<string, unknown>;
+  switch (toolName) {
+    case 'getInheritanceChain':
+      return `Inheritance: ${inp.key ?? '?'}`;
+    case 'findReferences':
+      return `References: ${inp.key ?? '?'}`;
+    case 'getTransformChain':
+      return `Transform chain: ${inp.key ?? '?'}`;
+    case 'readSource':
+      return `Read: ${inp.file ?? '?'}${inp.startLine ? ` (L${inp.startLine}-${inp.endLine ?? ''})` : ''}`;
+    case 'listFiles':
+      return `List: ${inp.pattern ?? '?'}${inp.type ? ` [${inp.type}]` : ''}`;
+    case 'getScriptSymbols':
+      return `Script symbols: ${inp.file ?? '?'}`;
+    case 'getNode':
+      return `Lookup: ${inp.key ?? '?'}`;
+    default:
+      return toolName;
+  }
+}
+
+/** Build a short summary of a tool result for the UI. */
+function summarizeToolResult(toolName: string | undefined, output: unknown): string {
+  if (!output || typeof output !== 'object') return '';
+  const out = output as Record<string, unknown>;
+  if (typeof out.total === 'number') return `${out.total} result(s)`;
+  if (Array.isArray(out.chain)) return `${out.chain.length} layer(s)`;
+  if (Array.isArray(out.parents)) return `${out.parents.length} parent(s)`;
+  if (Array.isArray(out.referencedBy)) return `${out.referencedBy.length} ref(s)`;
+  if (Array.isArray(out.symbols)) return `${out.symbols.length} symbol(s)`;
+  if (typeof out.totalLines === 'number') return `${out.totalLines} line(s)`;
+  return 'done';
 }
 
 /** Resolve token usage for the finish event. Many OpenAI-compatible backends omit (or return
@@ -309,11 +361,13 @@ export async function chatRoutes(app: FastifyInstance) {
         reply.raw.write(finishData + '\n');
         (reply.raw as unknown as { flush?: () => void }).flush?.();
       } else {
+        const tools = getAgentTools();
         const result = streamText({
           model: getProvider().chatModel(config.llmModel),
           system: SYSTEM_PROMPT,
           messages: llmMessages,
           maxOutputTokens: maxTokens,
+          ...(tools ? { tools, stopWhen: stepCountIs(5) } : {}),
           providerOptions: buildLlmProviderOptions(),
           onFinish: ({ text, usage }) => {
             const outputText = text.slice(0, 500);
@@ -334,8 +388,21 @@ export async function chatRoutes(app: FastifyInstance) {
         // breakdown) when the provider omits usage.
         let reasoningText = '';
         let answerText = '';
+        let toolCallCount = 0;
         for await (const part of result.fullStream) {
-          const p = part as { type: string; text?: string; textDelta?: string; delta?: string; error?: unknown };
+          const p = part as {
+            type: string;
+            text?: string;
+            textDelta?: string;
+            delta?: string;
+            error?: unknown;
+            toolName?: string;
+            input?: unknown;
+            output?: unknown;
+          };
+          if (process.env.DEBUG_AGENT === '1') {
+            console.log(`[agent-stream] type=${p.type} toolName=${p.toolName ?? ''} hasText=${!!(p.text ?? p.textDelta ?? p.delta)}`);
+          }
           if (p.type === 'reasoning-delta' || p.type === 'reasoning') {
             const delta = p.text ?? p.textDelta ?? p.delta ?? '';
             if (delta) {
@@ -350,9 +417,23 @@ export async function chatRoutes(app: FastifyInstance) {
               reply.raw.write(JSON.stringify({ type: 'text-delta', textDelta: delta }) + '\n');
               (reply.raw as unknown as { flush?: () => void }).flush?.();
             }
+          } else if (p.type === 'tool-call') {
+            toolCallCount++;
+            const summary = summarizeToolInput(p.toolName, p.input);
+            reply.raw.write(JSON.stringify({ type: 'tool-step', toolName: p.toolName, summary }) + '\n');
+            (reply.raw as unknown as { flush?: () => void }).flush?.();
+          } else if (p.type === 'tool-result') {
+            reply.raw.write(
+              JSON.stringify({ type: 'tool-step', toolName: p.toolName, done: true, summary: summarizeToolResult(p.toolName, p.output) }) + '\n',
+            );
+            (reply.raw as unknown as { flush?: () => void }).flush?.();
           } else if (p.type === 'error') {
             throw p.error;
           }
+        }
+
+        if (toolCallCount > 0) {
+          console.log(`[chat] Agent used ${toolCallCount} tool call(s)`);
         }
 
         const usage = await result.usage;
