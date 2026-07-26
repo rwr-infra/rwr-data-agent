@@ -4,7 +4,7 @@ import { streamText, streamObject, stepCountIs } from 'ai';
 import { startObservation } from '@langfuse/tracing';
 import { config, validateConfig } from '../../config/index.js';
 import { flushLangfuse } from '../../observability/langfuse.js';
-import { search } from '../../retrieval/search.js';
+import { search as localSearch, configureSearch } from '../../retrieval/localSearch.js';
 import { SYSTEM_PROMPT, buildUserPrompt } from '../../retrieval/prompt.js';
 import { buildSearchQuery } from '../../retrieval/queryRewrite.js';
 import { buildLlmProviderOptions } from '../../llm/providerOptions.js';
@@ -142,6 +142,11 @@ function buildBreakdown(
 }
 
 export async function chatRoutes(app: FastifyInstance) {
+  // Initialize local search index (Minisearch, replaces pgvector)
+  const dataDir = process.env.DATA_DIR ?? './data';
+  const searchIndexPath = process.env.SEARCH_INDEX_PATH ?? './output/search-index.json';
+  configureSearch(dataDir, searchIndexPath);
+
   app.post('/chat/completions', async (request, reply) => {
     const startTime = Date.now();
     const body = request.body as ChatCompletionRequest;
@@ -222,19 +227,14 @@ export async function chatRoutes(app: FastifyInstance) {
         if (enrichedQuery !== query) {
           console.log(`[chat] Query enriched: "${truncatedQuery}" → "${enrichedQuery.length > 120 ? enrichedQuery.slice(0, 120) + '…' : enrichedQuery}"`);
         }
-        // Enumeration needs broad coverage (its dedicated path skips rerank); detail/comparison
-        // queries stay focused. A4.
+        // Enumeration needs broad coverage; detail/comparison queries stay focused.
         const topK = queryCategory === 'enumeration' ? 150 : 60;
-        results = await search(query, {}, topK, body.table, enrichedQuery);
-        console.log(`[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (topK=${topK}, table=${body.table ?? config.databaseTable})`);
+        results = await localSearch(query, {}, topK, body.table, enrichedQuery);
+        console.log(`[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (topK=${topK})`);
 
-        searchPath = 'hybrid';
-        // Low confidence when the top result's rerank score is weak; fall back to the
-        // count heuristic when rerank didn't run (score absent, e.g. enumeration path). A5.
-        const topScore = results[0]?.score;
-        isLowConfidence =
-          results.length > 0 &&
-          (topScore !== undefined ? topScore < config.lowConfidenceThreshold : results.length < 3);
+        searchPath = 'local-index';
+        // Low confidence heuristic: fewer than 3 results indicates a weak match.
+        isLowConfidence = results.length > 0 && results.length < 3;
 
         searchObs.update({
           output: {

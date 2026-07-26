@@ -232,8 +232,8 @@ export async function extractScriptSymbols(filePath: string): Promise<ScriptSymb
   return symbols;
 }
 
-export async function buildGraph(sourceDir: string, modName: string): Promise<{ graph: RwrGraph; symbols: ScriptSymbol[] }> {
-  const files = await collectFiles(sourceDir);
+export async function buildGraph(sourceDir: string, modName: string, existingFiles?: string[]): Promise<{ graph: RwrGraph; symbols: ScriptSymbol[] }> {
+  const files = existingFiles ?? await collectFiles(sourceDir);
   const ctx: BuildCtx = { nodes: [], edges: [], sourceDir, modName };
 
   const limit = pLimit(8);

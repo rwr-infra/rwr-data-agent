@@ -49,6 +49,7 @@
     "fast-xml-parser": "^5.7.2",
     "fastify": "^5.8.5",
     "langfuse": "^3.38.20",
+    "minisearch": "^7.2.0",
     "openai": "^6.35.0",
     "p-limit": "^7.3.0",
     "pg": "^8.20.0",

@@ -2,16 +2,19 @@ import { Command } from 'commander';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { buildGraph } from './graphBuilder.js';
+import { buildSearchIndex, saveSearchIndex } from '../retrieval/localSearch.js';
+import { collectFiles } from '../ingestion/shared.js';
 
 const program = new Command();
 
 program
-  .name('rwr-build-graph')
-  .description('Build a graph index (nodes + edges) from RWR data files for the agent tool layer')
+  .name('rwr-build-index')
+  .description('Build graph index + search index + AS symbols from RWR data files')
   .version('1.0.0')
   .requiredOption('-s, --source <path>', 'Source directory containing data files', './data')
   .requiredOption('-m, --mod <name>', 'Mod name', 'GFL_Castling')
   .option('-o, --output <path>', 'Output graph.json path', './output/graph.json')
+  .option('--skip-search', 'Skip search index build', false)
   .parse();
 
 async function main() {
@@ -20,9 +23,12 @@ async function main() {
   const modName = options.mod as string;
   const outputPath = path.resolve(options.output);
 
-  console.log(`Building graph index from ${sourceDir} for mod "${modName}"...`);
+  console.log(`Building index from ${sourceDir} for mod "${modName}"...`);
 
-  const { graph, symbols } = await buildGraph(sourceDir, modName);
+  // Collect files once — shared by graph builder and search index builder to avoid double I/O
+  const files = await collectFiles(sourceDir);
+
+  const { graph, symbols } = await buildGraph(sourceDir, modName, files);
 
   const outDir = path.dirname(outputPath);
   await fs.mkdir(outDir, { recursive: true });
@@ -42,6 +48,16 @@ async function main() {
 
   console.log(`\nGraph index written to ${outputPath}`);
   console.log(`Script symbols written to ${symbolsPath}`);
+
+  // Build search index (Minisearch full-text, replaces pgvector)
+  if (!options.skipSearch) {
+    console.log(`\nBuilding search index...`);
+    const { count, entries } = await buildSearchIndex(sourceDir, modName, files);
+    const searchIndexPath = path.join(outDir, 'search-index.json');
+    await saveSearchIndex(entries, searchIndexPath);
+    console.log(`Search index written to ${searchIndexPath} (${count} documents)`);
+  }
+
   console.log(`\nStats:`);
   console.log(`  Files scanned : ${graph.stats.files}`);
   console.log(`  Nodes         : ${graph.stats.nodes}`);
@@ -58,6 +74,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error('Graph build failed:', err);
+  console.error('Index build failed:', err);
   process.exit(1);
 });

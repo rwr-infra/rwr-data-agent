@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-RAG AI Agent for *Running With Rifles* game data. Node.js 20+ / TypeScript / Fastify. OpenAI-compatible chat completions API with built-in retrieval. Includes a built-in chat UI served at `/`.
+Local AI Agent for *Running With Rifles* game data. Node.js 20+ / TypeScript / Fastify. OpenAI-compatible chat completions API with **local full-text search (Minisearch) + graph index + agent tools** — no database required. Includes a built-in chat UI served at `/`.
 
 ## Critical Conventions
 
@@ -30,13 +30,9 @@ npm run validate:graph    # validate agent tool functions against real data
 
 ## Running Locally (Required Order)
 
-1. `docker compose up -d` — Postgres with pgvector
-2. `cp .env.example .env` — fill in `DATABASE_URL`, `SILICONFLOW_API_KEY`, `LLM_API_KEY`
-3. `npm run db:migrate` — creates table, extension, HNSW/GIN indexes
-4. `npm run extract -- --source ./data --mod GFL_Castling` — extract data to JSON for review
-5. `npm run embed -- --input ./output/extracted-documents.json` — embed JSON into database
-6. `npm run build:graph` — build graph index from `data/` (nodes + edges + AS symbols)
-7. `npm run dev`
+1. `cp .env.example .env` — fill in `LLM_API_KEY` (and `LLM_BASE_URL`, `LLM_MODEL`)
+2. `npm run build:graph` — build all indexes from `data/`: graph + search index + AS symbols
+3. `npm run dev`
 
 ## Graph Index & Agent Tools (src/agent/)
 
@@ -51,6 +47,7 @@ npm run validate:graph                                   # smoke-test all 7 tool
 Output files (generated in `output/`, not tracked by git):
 - `output/graph.json` — nodes (entities keyed by `key`/`name`/filename) + edges (relationships)
 - `output/script-symbols.json` — AngelScript function/class/include signatures with line numbers
+- `output/search-index.json` — Minisearch full-text index (replaces pgvector + embedding + rerank)
 
 **Edge types extracted:**
 
@@ -72,7 +69,7 @@ Output files (generated in `output/`, not tracked by git):
 - `getScriptSymbols(file)` — AngelScript function/class/include signatures
 - `getNode(key)` — basic entity lookup
 
-These are plain async functions designed to be wrapped as AI SDK `tool()` definitions and are **now integrated** into `chat.ts` via `streamText({ tools, stopWhen: stepCountIs(5) })`. The LLM autonomously calls these tools during multi-step agent loops, interleaved with the existing RAG context. Tool-call and tool-result events are streamed to the frontend as `tool-step` NDJSON lines for live UI feedback.
+These are plain async functions designed to be wrapped as AI SDK `tool()` definitions and are **now integrated** into `chat.ts` via `streamText({ tools, stopWhen: stepCountIs(5) })`. The LLM autonomously calls these tools during multi-step agent loops, interleaved with the existing RAG context (now powered by Minisearch local full-text search). Tool-call and tool-result events are streamed to the frontend as `tool-step` NDJSON lines for live UI feedback.
 
 ## Extract CLI (Step 1: Parse → Structured JSON)
 
@@ -163,14 +160,15 @@ The chat UI is a **Svelte 5 + Vite + Tailwind 4 + daisyUI** app in `web/`. `vite
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | (required) | PostgreSQL connection string |
-| `DATABASE_PROVIDER` | `pg` | `pg` for Docker/local, `neon` for Neon serverless |
-| `DATABASE_POOL_MAX` | `20` | Connection pool max (Neon free tier: `10`) |
-| `DATABASE_SSL` | `false` | Enable SSL (Neon requires `true`) |
-| `DATABASE_TABLE` | `rwr_documents` | Table name for environment isolation |
-| `SILICONFLOW_API_KEY` | (required) | SiliconFlow API key for embeddings |
-| `LLM_API_KEY` | falls back to `SILICONFLOW_API_KEY` | LLM API key |
-| `EMBEDDING_DIMENSION` | `1024` | BAAI/bge-m3 dimension. **Changing after data exists requires dropping the table.** |
+| `LLM_API_KEY` | falls back to `SILICONFLOW_API_KEY` | LLM API key (required) |
+| `LLM_BASE_URL` | SiliconFlow URL | LLM API base URL |
+| `LLM_MODEL` | `deepseek-v4-flash` | LLM model name |
+| `DATA_DIR` | `./data` | Source data directory (for file-reading tools) |
+| `GRAPH_PATH` | `./output/graph.json` | Graph index path |
+| `SEARCH_INDEX_PATH` | `./output/search-index.json` | Minisearch index path |
+| `PORT` | `3000` | Server port |
+
+> **Note**: PostgreSQL / pgvector / embedding API / rerank API are **no longer required** for the main chat flow. The legacy `src/retrieval/search.ts` (pgvector hybrid search) and `src/db/` modules remain for backward compatibility with the extract/embed CLI, but `chat.ts` now uses `src/retrieval/localSearch.ts` (Minisearch) exclusively.
 
 ## Vercel + Neon Deployment
 
