@@ -3,6 +3,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { buildGraph } from './graphBuilder.js';
 import { buildSearchIndex, saveSearchIndex } from '../retrieval/localSearch.js';
+import { buildUpgradeIndex, saveUpgradeIndex } from './upgradeLookup.js';
 import { collectFiles } from '../ingestion/shared.js';
 
 const program = new Command();
@@ -56,6 +57,13 @@ async function main() {
     const searchIndexPath = path.join(outDir, 'search-index.json');
     await saveSearchIndex(entries, searchIndexPath);
     console.log(`Search index written to ${searchIndexPath} (${count} documents)`);
+
+    // Build upgrade index (Castling weapon upgrade chain: i18n → carry_item → weapon)
+    console.log(`\nBuilding upgrade index...`);
+    const upgradeIdx = await buildUpgradeIndex(sourceDir, modName);
+    const upgradeIndexPath = path.join(outDir, 'upgrade-index.json');
+    await saveUpgradeIndex(upgradeIdx, upgradeIndexPath);
+    console.log(`Upgrade index written to ${upgradeIndexPath} (${upgradeIdx.mappings.length} upgrade items)`);
   }
 
   console.log(`\nStats:`);

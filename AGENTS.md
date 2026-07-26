@@ -68,6 +68,7 @@ Output files (generated in `output/`, not tracked by git):
 - `listFiles(pattern, type?)` — glob search over indexed nodes
 - `getScriptSymbols(file)` — AngelScript function/class/include signatures
 - `getNode(key)` — basic entity lookup
+- `lookupUpgrade(query)` — Castling mod weapon upgrade chain: localized name → carry_item → source/upgraded weapons
 
 These are plain async functions designed to be wrapped as AI SDK `tool()` definitions and are **now integrated** into `chat.ts` via `streamText({ tools, stopWhen: stepCountIs(5) })`. The LLM autonomously calls these tools during multi-step agent loops, interleaved with the existing RAG context (now powered by Minisearch local full-text search). Tool-call and tool-result events are streamed to the frontend as `tool-step` NDJSON lines for live UI feedback.
 

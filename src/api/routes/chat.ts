@@ -67,6 +67,8 @@ function summarizeToolInput(toolName: string | undefined, input: unknown): strin
       return `Script symbols: ${inp.file ?? '?'}`;
     case 'getNode':
       return `Lookup: ${inp.key ?? '?'}`;
+    case 'lookupUpgrade':
+      return `Upgrade lookup: ${inp.query ?? '?'}`;
     default:
       return toolName;
   }

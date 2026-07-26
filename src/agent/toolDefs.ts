@@ -11,6 +11,7 @@ import {
   getScriptSymbols,
   getNode,
 } from './tools.js';
+import { configureUpgradeIndex, lookupUpgrade } from './upgradeLookup.js';
 
 let configured = false;
 
@@ -21,6 +22,7 @@ export function initGraphTools(): void {
     ? path.resolve(process.env.GRAPH_PATH)
     : path.resolve('./output/graph.json');
   configureGraph(dataDir, graphPath);
+  configureUpgradeIndex();
   configured = true;
 }
 
@@ -111,6 +113,18 @@ export function buildAgentTools() {
         key: z.string().describe('The entity key to look up'),
       }),
       execute: async ({ key }) => getNode(key),
+    }),
+
+    lookupUpgrade: tool({
+      description:
+        'Look up Castling mod weapon upgrade items by Chinese name, English name, carry_item key, or weapon key. ' +
+        'Traces the full upgrade chain: localized name → upgrade carry_item → source weapons → upgraded (MOD3) weapons. ' +
+        'Use to answer "高性能战术发饰是给哪个武器用的" or "汉阳造的升级配件是什么". ' +
+        'Returns the carry_item key, pid name, source weapon keys, and upgraded weapon keys.',
+      inputSchema: z.object({
+        query: z.string().describe('The upgrade item name, carry_item key, or weapon key to search for'),
+      }),
+      execute: async ({ query }) => lookupUpgrade(query),
     }),
   };
 }
