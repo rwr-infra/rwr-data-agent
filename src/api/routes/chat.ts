@@ -142,10 +142,8 @@ function buildBreakdown(
 }
 
 export async function chatRoutes(app: FastifyInstance) {
-  // Initialize local search index (Minisearch, replaces pgvector)
-  const dataDir = process.env.DATA_DIR ?? './data';
-  const searchIndexPath = process.env.SEARCH_INDEX_PATH ?? './output/search-index.json';
-  configureSearch(dataDir, searchIndexPath);
+  // Point the local MiniSearch index at the configured path (loaded lazily / by bootstrap).
+  configureSearch(config.searchIndexPath);
 
   app.post('/chat/completions', async (request, reply) => {
     const startTime = Date.now();
@@ -229,8 +227,11 @@ export async function chatRoutes(app: FastifyInstance) {
         }
         // Enumeration needs broad coverage; detail/comparison queries stay focused.
         const topK = queryCategory === 'enumeration' ? 150 : 60;
-        results = await localSearch(query, {}, topK, body.table, enrichedQuery);
-        console.log(`[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (topK=${topK})`);
+        const filters = body.mod ? { mod_name: body.mod } : {};
+        results = await localSearch(query, filters, topK, enrichedQuery);
+        console.log(
+          `[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (topK=${topK}${body.mod ? `, mod=${body.mod}` : ''})`,
+        );
 
         searchPath = 'local-index';
         // Low confidence heuristic: fewer than 3 results indicates a weak match.

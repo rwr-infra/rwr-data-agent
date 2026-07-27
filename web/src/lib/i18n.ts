@@ -34,7 +34,7 @@ export interface Translations {
   bdMessages: string;
   bdReasoning: string;
   bdAnswer: string;
-  defaultTag: string;
+  allPackages: string;
   ctxOver: string;
   reqFailed: string;
   netError: string;
@@ -80,7 +80,7 @@ const i18n: Record<Lang, Translations> = {
     bdMessages: '对话消息',
     bdReasoning: '思考',
     bdAnswer: '回答',
-    defaultTag: '(默认)',
+    allPackages: '全部数据包',
     ctxOver: '上下文已达上限，请刷新页面开始新对话',
     reqFailed: '请求失败: ',
     netError: '网络错误: ',
@@ -125,7 +125,7 @@ const i18n: Record<Lang, Translations> = {
     bdMessages: 'Messages',
     bdReasoning: 'Reasoning',
     bdAnswer: 'Answer',
-    defaultTag: '(Default)',
+    allPackages: 'All packages',
     ctxOver: 'Context limit reached, please refresh to start a new conversation',
     reqFailed: 'Request failed: ',
     netError: 'Network error: ',

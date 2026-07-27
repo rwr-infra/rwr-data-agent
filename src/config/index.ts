@@ -1,47 +1,45 @@
 import 'dotenv/config';
+import * as path from 'path';
+
+const dataDir = path.resolve(process.env.DATA_DIR ?? './data');
+const outputDir = path.resolve(process.env.OUTPUT_DIR ?? './output');
 
 export const config = {
-  databaseUrl: process.env.DATABASE_URL ?? '',
-  databaseProvider: (process.env.DATABASE_PROVIDER ?? 'pg') as 'pg' | 'neon',
-  databasePoolMax: parseInt(process.env.DATABASE_POOL_MAX ?? '20', 10),
-  databaseSsl: process.env.DATABASE_SSL === 'true',
-  siliconFlowApiKey: process.env.SILICONFLOW_API_KEY ?? '',
-  siliconFlowBaseUrl: process.env.SILICONFLOW_BASE_URL ?? 'https://api.siliconflow.cn/v1',
+  // ── LLM (the only required external service) ──────────────────────────────
+  // SILICONFLOW_* is still honoured as a fallback so pre-existing .env files keep working.
   llmApiKey: process.env.LLM_API_KEY ?? process.env.SILICONFLOW_API_KEY ?? '',
-  llmBaseUrl: process.env.LLM_BASE_URL ?? process.env.SILICONFLOW_BASE_URL ?? 'https://api.siliconflow.cn/v1',
+  llmBaseUrl: process.env.LLM_BASE_URL ?? 'https://api.siliconflow.cn/v1',
   llmModel: process.env.LLM_MODEL ?? 'deepseek-v4-flash',
-  embeddingModel: process.env.EMBEDDING_MODEL ?? 'BAAI/bge-m3',
-  embeddingDimension: parseInt(process.env.EMBEDDING_DIMENSION ?? '1024', 10),
-  rerankModel: process.env.RERANK_MODEL ?? 'BAAI/bge-reranker-v2-m3',
-  databaseTable: process.env.DATABASE_TABLE ?? 'rwr_documents',
-  ingestBatchSize: parseInt(process.env.INGEST_BATCH_SIZE ?? '8', 10),
-  ingestConcurrency: parseInt(process.env.INGEST_CONCURRENCY ?? '2', 10),
+
+  // ── Local data & index ────────────────────────────────────────────────────
+  /** Data root — either a single RWR package or a directory of packages. */
+  dataDir,
+  outputDir,
+  graphPath: process.env.GRAPH_PATH ? path.resolve(process.env.GRAPH_PATH) : path.join(outputDir, 'graph.json'),
+  searchIndexPath: process.env.SEARCH_INDEX_PATH
+    ? path.resolve(process.env.SEARCH_INDEX_PATH)
+    : path.join(outputDir, 'search-index.json'),
+  /** Build/refresh the index at startup when it is missing or stale. */
+  autoBuildIndex: process.env.AUTO_BUILD_INDEX !== 'false',
+
+  // ── Server ────────────────────────────────────────────────────────────────
   port: parseInt(process.env.PORT ?? '3000', 10),
   maxContextTokens: parseInt(process.env.MAX_CONTEXT_TOKENS ?? '500000', 10),
   // Cap on generated output tokens (reasoning + answer share this budget). Bounds long
   // enumerations/comparisons; raise if answers get truncated. DeepSeek-V4 allows up to 384K.
   llmMaxOutputTokens: parseInt(process.env.LLM_MAX_OUTPUT_TOKENS ?? '32768', 10),
-  cacheEnabled: process.env.CACHE_ENABLED !== 'false',
-  cacheTtlSeconds: parseInt(process.env.CACHE_TTL_SECONDS ?? '600', 10),
+
+  // ── Session memory ────────────────────────────────────────────────────────
+  summaryIntervalTurns: parseInt(process.env.SUMMARY_INTERVAL_TURNS ?? '3', 10),
+  summaryModel: process.env.SUMMARY_MODEL ?? process.env.LLM_MODEL ?? 'deepseek-v4-flash',
+
+  // ── Observability ─────────────────────────────────────────────────────────
   langfuseEnabled: process.env.LANGFUSE_ENABLED === 'true',
   langfusePublicKey: process.env.LANGFUSE_PUBLIC_KEY ?? '',
   langfuseSecretKey: process.env.LANGFUSE_SECRET_KEY ?? '',
   langfuseBaseUrl: process.env.LANGFUSE_BASE_URL ?? 'https://cloud.langfuse.com',
-  summaryIntervalTurns: parseInt(process.env.SUMMARY_INTERVAL_TURNS ?? '3', 10),
-  summaryModel: process.env.SUMMARY_MODEL ?? process.env.LLM_MODEL ?? 'deepseek-v4-flash',
-  rrfK: parseInt(process.env.RRF_K ?? '60', 10),
-  rrfWeightVector: parseFloat(process.env.RRF_WEIGHT_VECTOR ?? '0.50'),
-  rrfWeightFts: parseFloat(process.env.RRF_WEIGHT_FTS ?? '0.35'),
-  rrfWeightIlike: parseFloat(process.env.RRF_WEIGHT_ILIKE ?? '0.15'),
-  rerankDocTruncate: parseInt(process.env.RERANK_DOC_TRUNCATE ?? '800', 10),
-  rerankPinnedPrefix: process.env.RERANK_PINNED_PREFIX !== 'false',
-  // HNSW tuning: ef_search controls ANN recall breadth. 0 = derive dynamically (~2x query limit, capped).
-  hnswEfSearch: parseInt(process.env.HNSW_EF_SEARCH ?? '0', 10),
-  // Low-confidence threshold on the top-1 rerank relevance score (0-1). Below this, warn the LLM.
-  lowConfidenceThreshold: parseFloat(process.env.LOW_CONFIDENCE_THRESHOLD ?? '0.3'),
-  // FTS weight multiplier applied when the query is (near-)pure CJK, where FTS('simple') is unreliable.
-  rrfFtsCjkScale: parseFloat(process.env.RRF_FTS_CJK_SCALE ?? '0.3'),
-  // Main-LLM reasoning controls — transparently passed through to the OpenAI-compatible backend.
+
+  // ── Main-LLM reasoning controls — passed through to the OpenAI-compatible backend ──
   // reasoning_effort: '' (omit) | minimal | low | medium | high
   llmReasoningEffort: process.env.LLM_REASONING_EFFORT ?? '',
   // thinking: unset/'' = omit the field; 'true' -> { type: 'enabled' }; 'false' -> { type: 'disabled' }
@@ -55,6 +53,6 @@ export const config = {
 
 export function validateConfig() {
   if (!config.llmApiKey) {
-    throw new Error('LLM_API_KEY or SILICONFLOW_API_KEY is required');
+    throw new Error('LLM_API_KEY is required (set it in .env)');
   }
 }

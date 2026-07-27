@@ -2,6 +2,7 @@ import { XMLParser } from 'fast-xml-parser';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { collectFiles } from '../ingestion/shared.js';
+import { discoverPackages, type DataPackage } from '../ingestion/packages.js';
 import pLimit from 'p-limit';
 import type { GraphNode, GraphEdge, EdgeRel, ScriptSymbol, RwrGraph } from './types.js';
 
@@ -192,9 +193,20 @@ async function buildFileNodes(filePath: string, ctx: BuildCtx): Promise<void> {
   }
 }
 
-async function resolveFilePath(refFile: string, fromFile: string, sourceDir: string): Promise<string | undefined> {
+/**
+ * Resolve a `file="…"` reference. RWR packages overlay each other, so a reference can
+ * point inside the referring package or fall through to a sibling package. Order:
+ * the referring file's own directory, then its package root, then the data root.
+ */
+async function resolveFilePath(
+  refFile: string,
+  fromFile: string,
+  sourceDir: string,
+  packageRootOf: (file: string) => string,
+): Promise<string | undefined> {
   const candidates = [
     path.resolve(path.dirname(fromFile), refFile),
+    path.resolve(packageRootOf(fromFile), refFile),
     path.resolve(sourceDir, refFile),
   ];
   for (const c of candidates) {
@@ -232,12 +244,37 @@ export async function extractScriptSymbols(filePath: string): Promise<ScriptSymb
   return symbols;
 }
 
-export async function buildGraph(sourceDir: string, modName: string, existingFiles?: string[]): Promise<{ graph: RwrGraph; symbols: ScriptSymbol[] }> {
-  const files = existingFiles ?? await collectFiles(sourceDir);
-  const ctx: BuildCtx = { nodes: [], edges: [], sourceDir, modName };
+/**
+ * Build the entity graph over every package under `sourceDir`.
+ *
+ * Node `file` paths stay relative to `sourceDir` (not the package dir) so a single
+ * data root is enough for the agent's `readSource` tool, while `mod` carries the
+ * owning package name.
+ */
+export async function buildGraph(
+  sourceDir: string,
+  packages?: DataPackage[],
+): Promise<{ graph: RwrGraph; symbols: ScriptSymbol[] }> {
+  const root = path.resolve(sourceDir);
+  const pkgs = packages ?? (await discoverPackages(root));
 
+  const ctx: BuildCtx = { nodes: [], edges: [], sourceDir: root, modName: '' };
   const limit = pLimit(8);
-  await Promise.all(files.map((file) => limit(() => buildFileNodes(file, ctx))));
+  const files: string[] = [];
+
+  // Longest-prefix match so a file always maps back to its own package root.
+  const pkgDirs = pkgs
+    .map((p) => ({ dir: path.resolve(p.dir), name: p.name }))
+    .sort((a, b) => b.dir.length - a.dir.length);
+  const packageRootOf = (file: string): string =>
+    pkgDirs.find((p) => file === p.dir || file.startsWith(p.dir + path.sep))?.dir ?? root;
+
+  for (const pkg of pkgs) {
+    const pkgFiles = await collectFiles(pkg.dir);
+    files.push(...pkgFiles);
+    ctx.modName = pkg.name;
+    await Promise.all(pkgFiles.map((file) => limit(() => buildFileNodes(file, ctx))));
+  }
 
   // Deduplicate nodes (same key+file can appear from nested walks)
   const seenNodes = new Set<string>();
@@ -252,7 +289,7 @@ export async function buildGraph(sourceDir: string, modName: string, existingFil
   const fileToNodeKeys = new Map<string, string[]>();
   for (const n of uniqueNodes) {
     keyToNode.set(n.key, n);
-    const absFile = path.resolve(sourceDir, n.file);
+    const absFile = path.resolve(root, n.file);
     const arr = fileToNodeKeys.get(absFile) ?? [];
     arr.push(n.key);
     fileToNodeKeys.set(absFile, arr);
@@ -264,7 +301,7 @@ export async function buildGraph(sourceDir: string, modName: string, existingFil
     let resolvedTo = re.targetRef;
 
     if (re.targetFile) {
-      const resolvedPath = await resolveFilePath(re.targetFile, re.fromFile, sourceDir);
+      const resolvedPath = await resolveFilePath(re.targetFile, re.fromFile, root, packageRootOf);
       if (resolvedPath) {
         const nodeKeys = fileToNodeKeys.get(resolvedPath);
         resolvedTo = nodeKeys?.[0] ?? re.targetFile;
@@ -289,9 +326,9 @@ export async function buildGraph(sourceDir: string, modName: string, existingFil
   }
 
   const graph: RwrGraph = {
-    version: 1,
-    mod: modName,
-    source_dir: sourceDir,
+    version: 2,
+    packages: pkgs.map((p) => ({ name: p.name, displayName: p.displayName })),
+    source_dir: root,
     built_at: new Date().toISOString(),
     stats: { nodes: uniqueNodes.length, edges: edges.length, files: files.length },
     nodes: uniqueNodes,

@@ -14,7 +14,7 @@
   import SessionDrawer from './components/SessionDrawer.svelte';
 
   const LOCAL_CACHE_KEY = 'rwr-data-agent-cache';
-  type LocalCache = { selectedTable?: string };
+  type LocalCache = { selectedMod?: string };
   function readCache(): LocalCache {
     try { return JSON.parse(localStorage.getItem(LOCAL_CACHE_KEY) || '{}'); } catch { return {}; }
   }
@@ -33,7 +33,7 @@
   let thinking = $state(false);
   let streaming = $state(false);
   let showWelcome = $state(true);
-  let selectedTable = $state(readCache().selectedTable ?? '');
+  let selectedMod = $state(readCache().selectedMod ?? '');
   let contextUsed = $state(0);
   let lastBreakdown = $state<TokenBreakdown | undefined>(undefined);
   const MAX_CONTEXT = 500000;
@@ -72,7 +72,7 @@
       createdAt: sessions.find((s) => s.id === activeSessionId)?.createdAt ?? Date.now(),
       updatedAt: Date.now(),
       messages: plainMessages,
-      selectedTable: selectedTable || undefined,
+      selectedMod: selectedMod || undefined,
     };
     await sessionStore.saveSession(session);
     const idx = sessions.findIndex((s) => s.id === session.id);
@@ -100,7 +100,7 @@
       createdAt: Date.now(),
       updatedAt: Date.now(),
       messages: [],
-      selectedTable: selectedTable || undefined,
+      selectedMod: selectedMod || undefined,
     };
     await sessionStore.saveSession(emptySession);
     sessions = [emptySession, ...sessions];
@@ -118,9 +118,9 @@
     contextUsed = 0;
     lastBreakdown = undefined;
     showWelcome = history.length === 0;
-    if (session.selectedTable !== undefined) {
-      selectedTable = session.selectedTable;
-      writeCache({ selectedTable: session.selectedTable });
+    if (session.selectedMod !== undefined) {
+      selectedMod = session.selectedMod;
+      writeCache({ selectedMod: session.selectedMod });
     }
     drawerOpen = false;
   }
@@ -160,8 +160,8 @@
       nextId = 0;
       displayItems = buildDisplayItems(history);
       showWelcome = history.length === 0;
-      if (latest.selectedTable !== undefined) {
-        selectedTable = latest.selectedTable;
+      if (latest.selectedMod !== undefined) {
+        selectedMod = latest.selectedMod;
       }
     } else {
       await newSession();
@@ -213,10 +213,10 @@
     drawerOpen = !drawerOpen;
   }
 
-  async function handleTableChange(table: string) {
+  async function handleModChange(mod: string) {
     await saveCurrentSession();
-    selectedTable = table;
-    writeCache({ selectedTable: table });
+    selectedMod = mod;
+    writeCache({ selectedMod: mod });
     history = [];
     contextUsed = 0;
     lastBreakdown = undefined;
@@ -229,7 +229,7 @@
       createdAt: Date.now(),
       updatedAt: Date.now(),
       messages: [],
-      selectedTable: table || undefined,
+      selectedMod: mod || undefined,
     };
     await sessionStore.saveSession(emptySession);
     sessions = [emptySession, ...sessions];
@@ -285,7 +285,7 @@
         body: JSON.stringify({
           model: 'rwr-agent',
           messages: history.slice(),
-          ...(selectedTable ? { table: selectedTable } : {}),
+          ...(selectedMod ? { mod: selectedMod } : {}),
         }),
       });
 
@@ -511,7 +511,7 @@
 </script>
 
 <div class="flex flex-col h-screen bg-base-100 text-base-content">
-  <Header {lang} {tr} {selectedTable} {theme} ontablechange={handleTableChange} ontogglelang={handleToggleLang} ontoggletheme={handleToggleTheme} ontogglemenu={handleToggleMenu} />
+  <Header {lang} {tr} {selectedMod} {theme} onmodchange={handleModChange} ontogglelang={handleToggleLang} ontoggletheme={handleToggleTheme} ontogglemenu={handleToggleMenu} />
   {#if showWelcome}
     <Welcome {tr} onask={handleAsk} />
   {:else}

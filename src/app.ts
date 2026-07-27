@@ -6,8 +6,9 @@ import { fileURLToPath } from 'node:url';
 import { chatRoutes } from './api/routes/chat.js';
 import { modelsRoutes } from './api/routes/models.js';
 import { healthRoutes } from './api/routes/health.js';
-import { tablesRoutes } from './api/routes/tables.js';
+import { packagesRoutes } from './api/routes/packages.js';
 import { shutdownLangfuse } from './observability/langfuse.js';
+import { ensureIndexes } from './indexing/bootstrap.js';
 import { config } from './config/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -16,6 +17,10 @@ const isVercel = !!process.env.VERCEL;
 let indexHtml: string | null = null;
 
 export async function buildApp() {
+  // Build/load the local indexes before serving. Never throws — a failure leaves the
+  // server up and is reported through /health.
+  await ensureIndexes();
+
   const app = Fastify({
     logger: false,
     disableRequestLogging: true,
@@ -24,7 +29,7 @@ export async function buildApp() {
   await app.register(cors, { origin: true });
   await app.register(chatRoutes, { prefix: '/v1' });
   await app.register(modelsRoutes, { prefix: '/v1' });
-  await app.register(tablesRoutes, { prefix: '/v1' });
+  await app.register(packagesRoutes, { prefix: '/v1' });
   await app.register(healthRoutes);
 
   if (!isVercel) {

@@ -1,6 +1,6 @@
 import { tool } from 'ai';
 import { z } from 'zod';
-import * as path from 'path';
+import { config } from '../config/index.js';
 import {
   configureGraph,
   getInheritanceChain,
@@ -16,11 +16,7 @@ let configured = false;
 
 export function initGraphTools(): void {
   if (configured) return;
-  const dataDir = path.resolve(process.env.DATA_DIR ?? './data');
-  const graphPath = process.env.GRAPH_PATH
-    ? path.resolve(process.env.GRAPH_PATH)
-    : path.resolve('./output/graph.json');
-  configureGraph(dataDir, graphPath);
+  configureGraph(config.dataDir, config.graphPath);
   configured = true;
 }
 

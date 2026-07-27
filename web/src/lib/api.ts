@@ -4,7 +4,7 @@ export interface ChatRequest {
   model: string;
   messages: Message[];
   stream: boolean;
-  table?: string;
+  mod?: string;
 }
 
 export interface StreamCallbacks {

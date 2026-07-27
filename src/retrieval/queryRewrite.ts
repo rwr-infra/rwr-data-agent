@@ -74,14 +74,6 @@ function expandWithSynonyms(query: string): string {
   return `${query} ${uniqueExtras.join(' ')}`;
 }
 
-export function expandQuery(query: string): string {
-  return expandWithSynonyms(query);
-}
-
-const ENTITY_KEY_PATTERN = /`([a-zA-Z0-9_]+\.(?:weapon|vehicle|projectile|call|carry_item|xml|character))`/g;
-const ENTITY_KEY_BOLD_PATTERN = /\*\*([a-zA-Z0-9_]+\.(?:weapon|vehicle|projectile|call|carry_item|xml|character))\*\*/g;
-const ENTITY_KEY_PLAIN_PATTERN = /\b([a-zA-Z0-9_]+\.(?:weapon|vehicle|projectile|call|carry_item|xml|character))\b/g;
-
 function extractEntityKeys(text: string): string[] {
   const keys: string[] = [];
   let match: RegExpExecArray | null;
@@ -136,14 +128,14 @@ export function buildSearchQuery(currentQuery: string, history: HistoryMessage[]
   if (history.length === 0 && parts.length > 0) {
     parts.push(currentQuery);
     const seen = new Set<string>();
-    return parts.filter(p => {
+    return expandWithSynonyms(parts.filter(p => {
       if (seen.has(p)) return false;
       seen.add(p);
       return true;
-    }).join(' ');
+    }).join(' '));
   }
 
-  if (history.length === 0) return currentQuery;
+  if (history.length === 0) return expandWithSynonyms(currentQuery);
 
   const recentUserQueries = history
     .filter(m => m.role === 'user')
@@ -185,9 +177,9 @@ export function buildSearchQuery(currentQuery: string, history: HistoryMessage[]
   parts.push(currentQuery);
 
   const seen = new Set<string>();
-  return parts.filter(p => {
+  return expandWithSynonyms(parts.filter(p => {
     if (seen.has(p)) return false;
     seen.add(p);
     return true;
-  }).join(' ');
+  }).join(' '));
 }
