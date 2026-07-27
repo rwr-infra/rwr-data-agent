@@ -28,7 +28,7 @@ export interface MetaInfo {
   outTokens: string | number;
 }
 
-export interface TableOption {
+export interface PackageOption {
   value: string;
   label: string;
 }
@@ -39,5 +39,5 @@ export interface Session {
   createdAt: number;
   updatedAt: number;
   messages: Message[];
-  selectedTable?: string;
+  selectedMod?: string;
 }

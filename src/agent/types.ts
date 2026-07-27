@@ -29,9 +29,15 @@ export interface ScriptSymbol {
   line: number;
 }
 
+export interface GraphPackage {
+  name: string;
+  displayName: string;
+}
+
 export interface RwrGraph {
   version: number;
-  mod: string;
+  /** Packages discovered under `source_dir`; every node's `mod` is one of these names. */
+  packages: GraphPackage[];
   source_dir: string;
   built_at: string;
   stats: { nodes: number; edges: number; files: number };

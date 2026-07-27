@@ -71,6 +71,7 @@ export interface ChatCompletionRequest {
   temperature?: number;
   max_tokens?: number;
   top_p?: number;
-  table?: string;
+  /** Restrict retrieval to a single data package (see GET /v1/packages). */
+  mod?: string;
   response_format?: { type: 'json_object' | 'text' };
 }

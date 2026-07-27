@@ -1,7 +1,8 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { search } from '../retrieval/search.js';
+import { search, configureSearch } from '../retrieval/localSearch.js';
+import { config } from '../config/index.js';
 import { evaluateCase, summarizeResults } from './metrics.js';
 import type { EvalCase, EvalSummary } from './metrics.js';
 
@@ -36,6 +37,7 @@ async function loadDataset(): Promise<EvalCase[]> {
 }
 
 async function runEval(): Promise<void> {
+  configureSearch(config.searchIndexPath);
   const dataset = await loadDataset();
   console.log(colorize(`\nRunning ${dataset.length} evaluation cases...\n`, 'bold'));
 

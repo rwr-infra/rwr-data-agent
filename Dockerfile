@@ -7,22 +7,16 @@ FROM node:24-slim AS builder
 
 WORKDIR /app
 
-# Install build dependencies for native modules (e.g., pg)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    make \
-    g++ \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY package*.json ./
 RUN npm ci
+
+# web/ must be present before `npm run build` — the build script also runs web:build.
+COPY web ./web
+RUN npm --prefix web install
 
 COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
-
-COPY web ./web
-RUN npm --prefix web install && npm --prefix web run build
 
 # -----------------------------------------------------------------------------
 # Stage 2: Production
@@ -34,19 +28,14 @@ WORKDIR /app
 # Create non-root user for security
 RUN groupadd -r appgroup && useradd -r -g appgroup appuser
 
-# Install minimal runtime dependencies for native modules
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq5 \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/public ./public
 
-# Data directory for ingestion mounts
-RUN mkdir -p /app/data && chown -R appuser:appgroup /app
+# /app/data is the mounted RWR data root; /app/output holds the generated indexes.
+RUN mkdir -p /app/data /app/output && chown -R appuser:appgroup /app
 
 USER appuser
 

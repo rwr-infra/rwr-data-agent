@@ -2,52 +2,85 @@
 
 ## Project Overview
 
-Local AI Agent for *Running With Rifles* game data. Node.js 20+ / TypeScript / Fastify. OpenAI-compatible chat completions API with **local full-text search (Minisearch) + graph index + agent tools** — no database required. Includes a built-in chat UI served at `/`.
+An AI agent over *Running With Rifles* game data. Fastify server, **OpenAI-compatible** `/v1/chat/completions`, Svelte 5 chat UI. Retrieval is a **local in-process index** built straight from the game files: MiniSearch full-text + an entity graph the LLM can walk with tools.
+
+**There is no database.** Postgres, pgvector, embeddings, reranking and the two-stage extract/embed pipeline were all removed — the only external service is the LLM endpoint.
 
 ## Critical Conventions
 
-- **ESM only**: `"type": "module"`. All imports use `.js` extensions even for `.ts` source files. `tsconfig` uses `NodeNext` module resolution.
-- **No path alias usage in practice**: `~/*` is mapped in `tsconfig.json`, but the entire codebase uses relative imports. Follow the existing style.
+- **ESM only** (`"type": "module"`, `NodeNext`). Relative imports carry `.js` extensions even in `.ts` sources. The `~/*` tsconfig alias exists but is unused — follow the relative-import style.
+- Strict TypeScript. No unit-test runner; `npm run eval` + curl smoke tests are the correctness net.
+- ⚠️ `npm run lint` fails — ESLint 10 needs an `eslint.config.js` and there is none. Use `npx tsc --noEmit`.
 
 ## Developer Commands
 
 ```bash
-npm install
-npm run dev              # backend hot-reload (tsx --watch src/api/server.ts)
-npm run web:dev          # frontend dev server (vite :5173, proxies /v1 + /health)
-npm run build            # tsc → dist/  AND  vite build web/ → public/
-npm start                # node dist/api/server.js
-npm run db:migrate       # raw SQL init (pgvector + table + indexes)
-npm run extract           # CLI extraction to JSON (see below)
-npm run embed             # CLI embed JSON to database (see below)
-npm run ingest            # CLI extraction + embed in one step (legacy)
-npm run eval              # retrieval eval harness (src/eval/run.ts)
-npm run lint              # ESLint (no config file, uses defaults)
-npm run format            # Prettier (no config file, uses defaults)
-npm run build:graph       # build graph index from data/ (nodes + edges + AS symbols)
-npm run validate:graph    # validate agent tool functions against real data
+npm run dev             # backend hot-reload (tsx) — src/api/server.ts
+npm run web:dev         # vite :5173, proxies /v1 + /health to the backend
+npm run build           # tsc → dist/  AND  vite build web/ → public/
+npm start               # node dist/api/server.js
+
+npm run build:index     # rebuild graph + search indexes
+npm run build:index:prod
+npm run validate:index  # smoke-test the 7 graph tools against the built index
+npm run eval            # retrieval eval harness → src/eval/run.ts
+npm run format          # Prettier
 ```
 
-## Running Locally (Required Order)
+## Running Locally
 
-1. `cp .env.example .env` — fill in `LLM_API_KEY` (and `LLM_BASE_URL`, `LLM_MODEL`)
-2. `npm run build:graph` — build all indexes from `data/`: graph + search index + AS symbols
-3. `npm run dev`
+```bash
+cp .env.example .env    # fill LLM_API_KEY
+npm install
+npm run dev             # indexes build automatically on first boot
+```
+
+No ordering constraints, no migrations, no docker prerequisite.
+
+## Packages: the unit of data isolation
+
+A **package** is a directory containing `package_config.xml`. `DATA_DIR` (default `./data`) is either one package or a directory of them.
+
+`discoverPackages()` (`src/ingestion/packages.ts`) checks the root, then its immediate children, and stops. Non-recursion is load-bearing: `ww2_base/packages/{edelweiss,pacific,ww2_undead}/` are overlays owned by `ww2_base`, not separate packages. `displayName` comes from `<package name="…">`, falling back to the directory name (`ww2_invasion` ships a bare `<package />`).
+
+Each document's `mod` is the package directory name. A request narrows retrieval with `body.mod`; `GET /v1/packages` enumerates them.
+
+> This replaced the old `DATABASE_TABLE` / `body.table` / `GET /v1/tables` scheme. There is no `table` concept anywhere in the codebase now.
+
+## Index Lifecycle (src/indexing/)
+
+`buildIndexes()` (`build.ts`) — discover packages → `buildGraph()` → write `graph.json` + `script-symbols.json` → `buildSearchIndex()` → write `search-index.json`. Used by both the CLI and startup.
+
+`ensureIndexes()` (`bootstrap.ts`) runs at the top of `buildApp()` and rebuilds when:
+- the index file is missing,
+- `version` ≠ `INDEX_VERSION`,
+- `data_dir` in the header ≠ current `DATA_DIR`,
+- the data fingerprint (file count, max mtime) moved.
+
+Then it warms the index into memory. It **never throws** — failures become a console warning and are reported by `GET /health`. On Vercel it skips building entirely (the data dir is not bundled) and only loads what shipped.
+
+`AUTO_BUILD_INDEX=false` disables auto-rebuild; the CLI then becomes mandatory.
+
+Output files (in `OUTPUT_DIR`, gitignored):
+- `graph.json` — nodes + edges, `version: 2`, with a `packages[]` header
+- `script-symbols.json` — AngelScript function/class/include signatures with line numbers
+- `search-index.json` — `version: 2`, header carries `data_dir`, `packages[]`, `fingerprint`, then `entries[]`
+
+## Search Index (src/retrieval/localSearch.ts)
+
+MiniSearch over `key`, `name`, `i18nNames`, `content`, `type`. Boosts: key 3, name 2.5, i18nNames 2.5, content 1.
+
+**i18n is part of the index.** The builder runs `resolveI18n()` per package against that package's own `languages/` dir — this is what fixed the old `findLanguagesDir` bug where a multi-package root resolved to the first `languages/` it found and silently dropped the rest. Only `cn`/`en` are indexed: the other eight ship as ISO-8859-1 (mojibake when read as UTF-8) and indexing all ten dilutes term frequencies.
+
+**CJK tokenization.** `tokenize(text, fieldName?)` splits CJK runs into unigrams + bigrams so Chinese matches without a segmenter. Scoped to queries and the short fields (`key`/`name`/`i18nNames`/`type`) — **not `content`**, because the game's large localized text blobs (`journal`, `ui`, `*.text_lines`) contain nearly every Chinese character and would swamp real hits. Fuzzy and prefix matching are turned off for CJK terms for the same reason.
+
+Filters (`type`, `faction`, `weapon_class`, `mod_name`) are applied post-search against stored fields.
 
 ## Graph Index & Agent Tools (src/agent/)
 
-The graph index is a **file-system + relationship overlay** that solves three gaps that embedding-RAG alone cannot address: locating original source files, tracing inheritance chains, and querying AngelScript symbols.
+A file-system + relationship overlay covering what full-text search cannot: locating source files, tracing inheritance, querying AngelScript symbols.
 
-```bash
-npm run build:graph                                      # default: --source ./data --mod GFL_Castling
-npm run build:graph -- --source ./other-data --mod MyMod # custom source
-npm run validate:graph                                   # smoke-test all 7 tools against real data
-```
-
-Output files (generated in `output/`, not tracked by git):
-- `output/graph.json` — nodes (entities keyed by `key`/`name`/filename) + edges (relationships)
-- `output/script-symbols.json` — AngelScript function/class/include signatures with line numbers
-- `output/search-index.json` — Minisearch full-text index (replaces pgvector + embedding + rerank)
+Node `file` paths are relative to the **data root** (not the package dir), so one `dataRoot` serves `readSource` across every package. `resolveFilePath` tries, in order: the referring file's directory → its package root → the data root — which is how cross-package overlay references resolve.
 
 **Edge types extracted:**
 
@@ -64,156 +97,85 @@ Output files (generated in `output/`, not tracked by git):
 - `getInheritanceChain(key)` — full parent chain with depth
 - `findReferences(key)` — reverse lookup: who points to this entity
 - `getTransformChain(key)` — armor/item degradation layers
-- `readSource(file, startLine?, endLine?)` — read raw source with path-traversal guard
+- `readSource(file, startLine?, endLine?)` — read raw source with a path-traversal guard
 - `listFiles(pattern, type?)` — glob search over indexed nodes
-- `getScriptSymbols(file)` — AngelScript function/class/include signatures
+- `getScriptSymbols(file)` — AngelScript signatures
 - `getNode(key)` — basic entity lookup
 - `lookupUpgrade(query)` — Castling mod weapon upgrade chain: localized name → carry_item → source/upgraded weapons
 
-These are plain async functions designed to be wrapped as AI SDK `tool()` definitions and are **now integrated** into `chat.ts` via `streamText({ tools, stopWhen: stepCountIs(5) })`. The LLM autonomously calls these tools during multi-step agent loops, interleaved with the existing RAG context (now powered by Minisearch local full-text search). Tool-call and tool-result events are streamed to the frontend as `tool-step` NDJSON lines for live UI feedback.
+Wrapped as AI SDK `tool()` definitions in `toolDefs.ts` and passed to `streamText({ tools, stopWhen: stepCountIs(5) })`. Tool-call/result events stream to the frontend as `tool-step` NDJSON lines.
 
-## Extract CLI (Step 1: Parse → Structured JSON)
+## Parsers (src/ingestion/)
 
-```bash
-npm run extract -- --source ./data --mod GFL_Castling
-npm run extract -- --source ./data --mod GFL_Castling --output ./my-data.json
-npm run extract -- --source ./data --mod GFL_Castling --languages ./custom/path/languages
-```
+- **Excluded dirs**: `models/`, `maps/` (skipped by `collectFiles`).
+- **Supported extensions**: `.weapon`, `.projectile`, `.carry_item`, `.base_weapon`, `.base_carry_item`, `.animation_base`, `.base`, `.call`, `.character`, `.xml` → XML parser (with `file=` inheritance resolution); `.as` → AngelScript parser; `.ai`, `.resources`, `.models`, `.name`, `.text_lines` → plain-text fallback.
+- `i18n.ts` loads `<translation><text key="…" text="…"/>` files from a package's `languages/<lang>/` dirs, following `file=` indirections.
 
-Output is a JSON file (`output/extracted-documents.json` by default) containing **structured documents** with:
-- `type`, `key`, `label` — document identity
-- `description` — natural language description generated from attributes
-- `raw_text` — raw text representation
-- `data` — the full parsed/resolved XML structure as JSON (for verifying inheritance, nested elements, multi-state items, etc.)
-- `flat_attributes` — flattened key-value pairs for quick reference
-- `metadata` — extra fields (faction, weapon_class, etc.)
-- `i18n` — localized names resolved from translation files (e.g. `{"cn": {"GK-Adeline": "Adeline 艾德琳"}}`)
-
-The extract CLI automatically discovers the `languages/` directory inside the source path or its subdirectories. Translation files (`<translation><text key="..." text="..."/>`) are loaded and matched against document `name` attributes to add localized names.
-
-Review/edit this JSON before embedding. The `data` field contains the XML-as-JSON structure so you can verify inheritance resolution, nested elements, and multi-state items (e.g. armor transform chains).
-
-## Embed CLI (Step 2: JSON → Database)
-
-```bash
-npm run embed -- --input ./output/extracted-documents.json
-npm run embed -- --input ./output/extracted-documents.json --clear   # wipe mod first
-npm run embed -- --input ./output/extracted-documents.json --resume  # skip existing
-npm run embed -- --input ./output/extracted-documents.json --filter-type weapon  # only weapons
-npm run embed -- --input ./output/extracted-documents.json --limit 10  # embed first 10 docs (testing)
-```
-
-## Ingestion CLI (Legacy: Combined Extract + Embed)
-
-```bash
-npm run ingest -- --source ./data --mod GFL_Castling
-npm run ingest -- --source ./data --mod GFL_Castling --clear   # wipe mod first
-npm run ingest -- --source ./data --mod GFL_Castling --resume  # skip existing
-```
-
-- **Excluded dirs**: `models/`, `maps/` (3D assets / terrain, skipped by `collectFiles`).
-- **Supported extensions**: `.weapon`, `.projectile`, `.call`, `.character`, `.xml` → XML parser; `.as` → AngelScript parser; `.ai`, `.resources`, `.models`, `.name`, `.text_lines` → plain text fallback.
-- **Resume dedup key**: `${type}:${key}`.
-- **Batch delay**: 500ms between embedding batches to avoid rate limits (SiliconFlow).
+Parsed `StructuredDocument`s feed the index builder directly — there is no intermediate `extracted-documents.json` stage any more.
 
 ## Architecture
 
 ### Entry Points
+- `src/app.ts` — `buildApp()`: `await ensureIndexes()`, CORS, `/v1/*`, `/health`, static serving.
+- `src/api/server.ts` — local entry (`app.listen`).
+- `src/index.ts` / `api/index.ts` — Vercel serverless entry (no `listen`).
+- Static serving splits on `process.env.VERCEL`: locally `@fastify/static` over `public/` with an SPA fallback; on Vercel `public/index.html` is read manually.
 
-- `src/index.ts` — Vercel entry point. Creates app via `buildApp()`, exports the Fastify instance for Vercel Functions.
-- `src/api/server.ts` — Local development entry point. Same `buildApp()` but with `app.listen()`.
-- `src/app.ts` — `buildApp()` factory: registers CORS, API routes (`/v1/*`), health check, and static file serving (`public/`).
+### Routes
+| Route | Purpose |
+|---|---|
+| `POST /v1/chat/completions` | Main endpoint. Extra fields: `mod`, `response_format` |
+| `GET /v1/models` | Model list |
+| `GET /v1/packages` | Packages in the current index (`name`, `displayName`, `count`) |
+| `GET /health` | `{status, index:{ready, documents, packages, builtAt, reason?}}` — no external check |
 
-### Database Provider (Dual Driver)
+### Request pipeline (src/api/routes/chat.ts)
+1. External `system` messages dropped; server enforces `SYSTEM_PROMPT`. Anti-injection.
+2. Token-size guard at ~`maxContextTokens * 0.7`.
+3. `x-session-id` keys a rolling summary (`src/memory/summarizer.ts`, in-process `Map`, never persisted).
+4. `isMetaQuery` short-circuits search for questions about the bot.
+5. `buildSearchQuery` merges history + summary + CN↔EN synonym expansion.
+6. `localSearch(query, filters, topK, enrichedQuery)` — `topK` 150 for enumeration, else 60.
+7. `streamText` with graph tools, or `streamObject` with `EnumResultSchema`/`ComparisonResultSchema` when the query is enumeration/comparison **and** `response_format: json_object` (or `x-response-format`) is set.
 
-`DATABASE_PROVIDER` selects the database driver at startup:
-
-| Value | Driver | Use case |
-|-------|--------|----------|
-| `pg` (default) | `pg` + `drizzle-orm/node-postgres` | Local Docker, traditional servers |
-| `neon` | `@neondatabase/serverless` + `drizzle-orm/neon-serverless` | Vercel + Neon |
-
-`src/db/index.ts` uses top-level `await` to dynamically import the correct driver. The rest of the codebase (`pool.connect()`, raw SQL, Drizzle insert) works unchanged because both drivers expose the same `Pool` / query interface.
+### Streaming format
+Custom **NDJSON**, not SSE. One JSON object per line, keyed by `type`: `text-delta`, `reasoning-delta`, `json-delta`, `tool-step`, `finish`, `error`.
 
 ### Frontend
-
-The chat UI is a **Svelte 5 + Vite + Tailwind 4 + daisyUI** app in `web/`. `vite build` outputs to `../public`, so `public/` is **build output, not hand-written** — do not edit `public/index.html` directly. Served by `@fastify/static` in local dev (with SPA fallback to `index.html`); on Vercel, `src/app.ts` reads `public/index.html` manually and `vercel.json` includes it.
-
-- Frontend dev server: `npm run web:dev` (vite on :5173, proxies `/v1` and `/health`).
-- ⚠️ `web/vite.config.ts` proxies to `http://localhost:3344`, but the backend defaults to port `3000` (`config.port`). When developing the UI against the backend, run the backend with `PORT=3344` or update the proxy target.
-- The UI consumes the backend's custom NDJSON stream (see Gotchas), not OpenAI SSE. It calls `/v1/chat/completions` and sends an `x-session-id` header for session memory.
-
-### Gotchas
-
-- **Drizzle ORM is only used for schema definition and basic queries**. Vector search and migration use **raw SQL** through the `pg` Pool because Drizzle does not support pgvector operators (`<=>`).
-- **Migration is custom SQL**, not `drizzle-kit push`. `src/db/migrate.ts` runs `CREATE EXTENSION vector`, `CREATE TABLE ...`, and HNSW/GIN indexes.
-- **Search has an exact-key fast path**: if the query contains `key=...` or `key: ...`, embeddings are bypassed entirely for a direct SQL lookup.
-- **Hybrid search with weighted RRF**: `src/retrieval/search.ts` fuses vector (pgvector `<=>`), Postgres FTS, and `ILIKE` candidate lists via Reciprocal Rank Fusion (`RRF_K`, `RRF_WEIGHT_VECTOR/FTS/ILIKE`). Exact/normalized entity matches are pinned ahead of the fused list (`RERANK_PINNED_PREFIX`), then results go through the reranker.
-- **Query intent is hardcoded in `src/retrieval/intent.ts`**: Chinese/English regex patterns infer document type (`weapon`, `soldier`, `vehicle`, etc.), detect enumeration/comparison requests, and extract `class="N"` filters — not LLM-driven.
-- **External system prompts are dropped**: `chat.ts` filters out all `role: 'system'` messages from the request and enforces `SYSTEM_PROMPT` server-side.
-- **Multi-turn with session memory**: full conversation history is passed to the LLM, and an `x-session-id` header keys a rolling summary (`src/memory/summarizer.ts`, regenerated every `SUMMARY_INTERVAL_TURNS`). Retrieval is history-aware — `src/retrieval/queryRewrite.ts` enriches the latest user query with history + summary before searching.
-- **Custom NDJSON streaming (not SSE)**: the streamed response is newline-delimited JSON for the Vercel AI SDK, not OpenAI `data:` SSE. Each line is one object with a `type`: `text-delta` (`{textDelta}`), `json-delta` (`{jsonDelta}`, partial structured object), `finish` (`{usage}`), or `error`. Consumed by `web/src/lib/api.ts`.
-- **Structured output for enumeration/comparison**: when `classifyQuery` returns `enumeration`/`comparison` AND the request sets `response_format: json_object` (or the `x-response-format` header), `chat.ts` uses `streamObject` with `EnumResultSchema`/`ComparisonResultSchema` (`src/types/schemas.ts`); otherwise plain `streamText`.
-- **Meta queries skip search**: `isMetaQuery` (`src/retrieval/intent.ts`) short-circuits retrieval for questions about the bot itself.
-- **Embedding content uses compact format**: `structuredDocToRWRDocument` produces content from `description` + `flat_attributes` + `i18n`, omitting the verbose `raw_text` to save ~60% storage. The full XML structure is preserved in the extracted JSON `data` field for review.
+Svelte 5 + Vite + Tailwind 4 + daisyUI in `web/`, building into `public/` — treat `public/` as generated. `web/vite.config.ts` reads `PORT` from the repo-root `.env` via `loadEnv`, so the dev proxy always follows the backend port. The Header's dropdown is a package filter fed by `GET /v1/packages`; it hides itself when there is only one package.
 
 ## Environment & Config
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LLM_API_KEY` | falls back to `SILICONFLOW_API_KEY` | LLM API key (required) |
-| `LLM_BASE_URL` | SiliconFlow URL | LLM API base URL |
-| `LLM_MODEL` | `deepseek-v4-flash` | LLM model name |
-| `DATA_DIR` | `./data` | Source data directory (for file-reading tools) |
-| `GRAPH_PATH` | `./output/graph.json` | Graph index path |
-| `SEARCH_INDEX_PATH` | `./output/search-index.json` | Minisearch index path |
-| `PORT` | `3000` | Server port |
+`LLM_API_KEY` is the only required variable (`SILICONFLOW_API_KEY` is still accepted as a fallback for older `.env` files). Everything else has a default in `src/config/index.ts`:
 
-> **Note**: PostgreSQL / pgvector / embedding API / rerank API are **no longer required** for the main chat flow. The legacy `src/retrieval/search.ts` (pgvector hybrid search) and `src/db/` modules remain for backward compatibility with the extract/embed CLI, but `chat.ts` now uses `src/retrieval/localSearch.ts` (Minisearch) exclusively.
+| Variable | Default | Notes |
+|---|---|---|
+| `LLM_BASE_URL` | `https://api.siliconflow.cn/v1` | |
+| `LLM_MODEL` | `deepseek-v4-flash` | |
+| `DATA_DIR` | `./data` | Single package or directory of packages |
+| `OUTPUT_DIR` | `./output` | |
+| `GRAPH_PATH` / `SEARCH_INDEX_PATH` | `<OUTPUT_DIR>/…` | Individual overrides |
+| `AUTO_BUILD_INDEX` | `true` | |
+| `PORT` | `3000` | |
+| `MAX_CONTEXT_TOKENS` | `500000` | |
+| `LLM_MAX_OUTPUT_TOKENS` | `32768` | Reasoning + answer share this budget |
+| `LLM_REASONING_EFFORT` / `LLM_THINKING_ENABLED` / `LLM_TEMPERATURE` | unset | Omitted from the request when unset |
+| `SUMMARY_INTERVAL_TURNS` / `SUMMARY_MODEL` | `3` / `LLM_MODEL` | |
+| `LANGFUSE_*` | disabled | |
 
-## Vercel + Neon Deployment
+## Deployment
 
-1. Create a Neon database and run migration once:
-   ```bash
-   DATABASE_URL=postgresql://user:pass@ep-xxx.neon.tech/db?sslmode=require \
-   DATABASE_PROVIDER=neon DATABASE_SSL=true \
-   npm run db:migrate
-   ```
-2. Ingest data (run locally with Neon connection string):
-   ```bash
-   DATABASE_URL=postgresql://... DATABASE_PROVIDER=neon DATABASE_SSL=true \
-   npm run ingest -- --source ./data --mod GFL_Castling
-   ```
-3. Deploy to Vercel:
-   ```bash
-   vercel
-   ```
-4. Set Vercel environment variables:
-   - `DATABASE_URL` — Neon connection string (with `?sslmode=require`)
-   - `DATABASE_PROVIDER=neon`
-   - `DATABASE_SSL=true`
-   - `DATABASE_POOL_MAX=10`
-   - `SILICONFLOW_API_KEY`
-   - `LLM_API_KEY`
+### Docker
+`docker compose up -d --build` — a single `app` service. `./data` mounts read-only at `/app/data`; `./output` is a writable volume so restarts skip the rebuild.
 
-The frontend chat UI is available at the deployed root URL. The API remains at `/v1/chat/completions`.
-
-## Docker
-
-```bash
-docker compose up -d                          # Postgres + App
-docker compose run --rm app npm run db:migrate:prod
-docker compose run --rm app npm run ingest:prod -- --source /app/data --mod GFL_Castling
-docker compose down -v                        # wipe Postgres data
-```
-
-Production targets use compiled `dist/` (not `tsx`). Data directory is mounted read-only at `/app/data`.
+### Vercel
+`vercel.json` bundles `dist/**`, `public/**`, `output/**` into the function. The data directory is not uploaded, so the index must exist before deploy — `ensureIndexes()` will only load, never build, when `VERCEL` is set.
 
 ## Testing
 
-- **No unit-test runner** (no Jest/Vitest/Mocha). Retrieval quality is checked by the **eval harness**: `npm run eval` runs `src/eval/run.ts` over cases in `tests/eval/`, scoring with `src/eval/metrics.ts`. `test.sh` (if present) is a single `curl` smoke test against `/v1/chat/completions`.
+- `npm run eval` — 30-case retrieval harness over `tests/eval/dataset.json`, writes a timestamped report into `tests/eval/`. Note the dataset references some keys that no longer exist in the current `./data` snapshot, so absolute recall understates real quality; track deltas, not the absolute number.
+- `npm run validate:index` — exercises all 7 graph tools, picking real sample keys out of the built graph so it works against any data directory.
 
 ## Style
 
-- Strict TypeScript (`strict: true`).
-- Prefer concise, accurate responses. Use existing relative import style.
+Prettier defaults, no config file. Match the surrounding code.

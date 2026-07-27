@@ -1,4 +1,6 @@
-import * as path from 'path';
+import * as fs from 'fs/promises';
+import { config } from '../config/index.js';
+import type { RwrGraph } from './types.js';
 import {
   configureGraph,
   getInheritanceChain,
@@ -21,38 +23,50 @@ async function section(title: string, fn: () => Promise<unknown>) {
 }
 
 async function main() {
-  const dataDir = path.resolve('./data');
-  configureGraph(dataDir, path.resolve('./output/graph.json'));
+  configureGraph(config.dataDir, config.graphPath);
 
+  const graph = JSON.parse(await fs.readFile(config.graphPath, 'utf-8')) as RwrGraph;
   console.log('=== TOOL VALIDATION ===');
+  console.log(`data dir : ${config.dataDir}`);
+  console.log(`graph    : ${config.graphPath}`);
+  console.log(`packages : ${graph.packages.map((p) => p.name).join(', ')}`);
+  console.log(`nodes    : ${graph.stats.nodes}, edges: ${graph.stats.edges}`);
 
-  await section('getInheritanceChain("base_primary_rare.weapon")', () =>
-    getInheritanceChain('base_primary_rare.weapon'),
-  );
+  // Pick real samples out of the graph so this stays valid for any data directory.
+  const extendsEdge = graph.edges.find((e) => e.rel === 'extends');
+  const transformEdge = graph.edges.find((e) => e.rel === 'transforms_to');
+  const firesEdge = graph.edges.find((e) => e.rel === 'fires');
+  const weaponNode = graph.nodes.find((n) => n.type === 'weapon');
+  const scriptNode = graph.nodes.find((n) => n.type === 'script');
 
-  await section('getTransformChain("K309.carry_item")', async () => {
-    const tc = await getTransformChain('K309.carry_item');
-    return { length: tc.chain.length, chain: tc.chain.map((c) => c.key).join(' → ') };
-  });
+  if (extendsEdge) {
+    await section(`getInheritanceChain("${extendsEdge.from}")`, () => getInheritanceChain(extendsEdge.from));
+  }
 
-  await section('findReferences("vehicle_drop_script.projectile")', async () => {
-    const refs = await findReferences('vehicle_drop_script.projectile');
-    return { count: refs.referencedBy.length, referencedBy: refs.referencedBy };
-  });
+  if (transformEdge) {
+    await section(`getTransformChain("${transformEdge.from}")`, async () => {
+      const tc = await getTransformChain(transformEdge.from);
+      return { length: tc.chain.length, chain: tc.chain.map((c) => c.key).join(' → ') };
+    });
+  }
 
-  await section('readSource("weapons/base_primary_rare.weapon")', () =>
-    readSource('weapons/base_primary_rare.weapon'),
-  );
+  if (firesEdge) {
+    await section(`findReferences("${firesEdge.to}")`, async () => {
+      const refs = await findReferences(firesEdge.to);
+      return { count: refs.referencedBy.length, referencedBy: refs.referencedBy.slice(0, 10) };
+    });
+  }
+
+  if (weaponNode) {
+    await section(`readSource("${weaponNode.file}")`, () => readSource(weaponNode.file, 1, 20));
+    await section(`getNode("${weaponNode.key}")`, () => getNode(weaponNode.key));
+  }
 
   await section('listFiles("*.call", type=call, limit=5)', () => listFiles('*.call', 'call', 5));
 
-  await section('getScriptSymbols("scripts/start_1.as")', () =>
-    getScriptSymbols('scripts/start_1.as'),
-  );
-
-  await section('getNode("binoculars_aek999_spawn_fairy.weapon")', () =>
-    getNode('binoculars_aek999_spawn_fairy.weapon'),
-  );
+  if (scriptNode) {
+    await section(`getScriptSymbols("${scriptNode.file}")`, () => getScriptSymbols(scriptNode.file));
+  }
 
   console.log('\n=== DONE ===');
 }

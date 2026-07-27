@@ -2,99 +2,98 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> A detailed `AGENTS.md` also exists. It is **partially stale** — see "Where AGENTS.md is outdated" below. When the two disagree, trust this file.
+> A detailed `AGENTS.md` also exists. When the two disagree, trust this file.
 
 ## What this is
 
-A RAG agent for *Running With Rifles* game data: a Fastify server exposing an **OpenAI-compatible** `/v1/chat/completions` endpoint with built-in retrieval over a pgvector store, plus a Svelte chat UI. Data flows through a two-stage ingestion pipeline (parse game files → JSON → embed).
+An AI agent over *Running With Rifles* game data: a Fastify server exposing an **OpenAI-compatible** `/v1/chat/completions` endpoint, plus a Svelte chat UI. Retrieval is a **local in-process index** (MiniSearch full-text + an entity graph), built directly from the game files on disk. There is **no database** — no Postgres, no pgvector, no embeddings.
 
 ## Critical conventions
 
 - **ESM only** (`"type": "module"`, `NodeNext` resolution). All relative imports use `.js` extensions even from `.ts` source. The `~/*` path alias is mapped in tsconfig but **unused in practice** — follow the relative-import style.
-- Strict TypeScript. No test framework; correctness is checked via the eval harness (see below) and a curl smoke test.
-- ESLint/Prettier run with **default config** (no config files).
+- Strict TypeScript. No test framework; correctness is checked via the eval harness (`npm run eval`) and curl smoke tests.
+- ⚠️ `npm run lint` is broken: ESLint 10 requires an `eslint.config.js`, and this repo has none. Use `npx tsc --noEmit` as the real check.
+
+## Getting started
+
+```bash
+cp .env.example .env      # fill in LLM_API_KEY
+npm install
+npm run dev               # index is built automatically on first boot
+```
+
+That is the whole setup. `DATA_DIR` (default `./data`) is the only other knob most people touch.
 
 ## Commands
 
 ```bash
-npm run dev          # backend hot-reload (tsx) — src/api/server.ts
-npm run web:dev      # frontend dev server (vite :5173, proxies /v1 + /health)
-npm run build        # tsc → dist/  AND  vite build web/ → public/
-npm start            # node dist/api/server.js
+npm run dev            # backend hot-reload (tsx) — src/api/server.ts
+npm run web:dev        # frontend dev server (vite :5173, proxies /v1 + /health)
+npm run build          # tsc → dist/  AND  vite build web/ → public/
+npm start              # node dist/api/server.js
 
-npm run db:migrate   # custom SQL: CREATE EXTENSION vector + table + HNSW/GIN indexes
-npm run extract -- --source ./data --mod GFL_Castling   # game files → extracted JSON
-npm run embed   -- --input ./extracted-documents.json   # JSON → vector DB
-npm run ingest  -- --source ./data --mod GFL_Castling   # legacy: extract+embed combined
-
-npm run eval         # retrieval eval harness → src/eval/run.ts (no unit-test runner exists)
-npm run lint         # eslint src
-npm run format       # prettier
+npm run build:index    # explicit index rebuild (also runs automatically at startup)
+npm run validate:index # smoke-test the graph tools against the built index
+npm run eval           # retrieval eval harness → src/eval/run.ts
 ```
 
-Ingestion flags: `--clear` (wipe mod first), `--resume` (skip existing, dedup key `${type}:${key}`), `--filter-type <t>`, `--limit <n>`. `*:prod` script variants run compiled `dist/` for Docker.
+`build:index` flags: `-s/--source <dir>` (default `DATA_DIR`), `-o/--output <dir>` (default `OUTPUT_DIR`), `--only <pkg,pkg>` to restrict to specific packages.
 
-### Required local startup order
-1. `docker compose up -d` (Postgres + pgvector)
-2. `cp .env.example .env`, fill `DATABASE_URL`, `SILICONFLOW_API_KEY`, `LLM_API_KEY`
-3. `npm run db:migrate`
-4. `npm run extract …` then `npm run embed …`
-5. `npm run dev`
+## Data model: packages, not tables
+
+A RWR **package** is any directory containing `package_config.xml`. `DATA_DIR` points at either:
+
+- a single package — `./data/GFL_Castling`, or (as configured by default) `./data`, whose only child is a package; or
+- a directory of packages — `./ww2-data` holds `ww2_base`, `edelweiss`, `pacific`, `ww2_combined`, `ww2_invasion`.
+
+`discoverPackages()` (`src/ingestion/packages.ts`) looks at the root and its **immediate children only**. That non-recursion is deliberate: `ww2_base/packages/<overlay>/` subtrees belong to `ww2_base` and must not become packages of their own.
+
+Every indexed document is tagged with its package directory name as `mod`. Requests may narrow retrieval to one package via `body.mod`; `GET /v1/packages` lists what is available. (This replaced the old `DATABASE_TABLE` / `body.table` / `GET /v1/tables` mechanism, which is gone.)
 
 ## Architecture
 
 ### Entry points & app factory
-- `src/app.ts` — `buildApp()` factory: registers CORS, `/v1/*` routes, `/health`, and static serving. Used by both entry points.
+- `src/app.ts` — `buildApp()`: awaits `ensureIndexes()`, then registers CORS, `/v1/*` routes, `/health`, and static serving. Used by both entry points.
 - `src/api/server.ts` — local dev entry (`app.listen()`).
 - `src/index.ts` / `api/index.ts` — Vercel serverless entry (exports the Fastify instance, no `listen`).
 - Static serving is environment-split: **local** uses `@fastify/static` over `public/` with an SPA fallback to `index.html`; **Vercel** (`process.env.VERCEL`) reads `public/index.html` manually.
 
+### Index lifecycle (`src/indexing/`)
+- `build.ts` — `buildIndexes()`: discover packages → `buildGraph()` → write `graph.json` + `script-symbols.json` → `buildSearchIndex()` → write `search-index.json`. Shared by the CLI and the startup path.
+- `bootstrap.ts` — `ensureIndexes()`: loads the index header, rebuilds when it is missing, was built from a different `DATA_DIR`, has a stale version, or the data fingerprint (file count + max mtime) moved. Then warms the index into memory. **Never throws** — failures degrade to a warning and surface via `/health`.
+- On Vercel the data directory is not bundled, so bootstrap only ever loads what shipped (`vercel.json` `includeFiles` covers `output/**`).
+- `AUTO_BUILD_INDEX=false` disables the automatic rebuild.
+
 ### Frontend (`web/` → builds into `public/`)
-The UI is a **Svelte 5 + Vite + Tailwind 4 + daisyUI** app in `web/`. `vite build` outputs to `../public`, which the backend serves. `public/` is therefore **build output**, not hand-written. The dev server proxies `/v1` and `/health` to the backend.
-- ⚠️ `web/vite.config.ts` proxies to **`http://localhost:3344`**, but the backend defaults to **port 3000** (`config.port`). Run the backend on 3344 (`PORT=3344`) or update the proxy when developing the UI together.
+Svelte 5 + Vite + Tailwind 4 + daisyUI. `vite build` outputs to `../public`, which the backend serves — treat `public/` as **build output**, not hand-written. `web/vite.config.ts` reads `PORT` from the repo-root `.env` so its proxy always follows the backend.
 
 ### Request pipeline (`src/api/routes/chat.ts`)
-This is the heart of the system. Per request:
-1. **External `system` messages are dropped** — server enforces its own `SYSTEM_PROMPT` (`src/retrieval/prompt.ts`). Anti-injection.
+1. **External `system` messages are dropped** — the server enforces its own `SYSTEM_PROMPT` (`src/retrieval/prompt.ts`). Anti-injection.
 2. Token-size guard rejects oversized requests (~`maxContextTokens * 0.7`).
-3. **Session memory**: `x-session-id` header keys a rolling summary (`src/memory/summarizer.ts`); summaries regenerate every `SUMMARY_INTERVAL_TURNS`.
-4. **Meta-query detection** (`isMetaQuery`) short-circuits search entirely for questions about the bot itself.
-5. **Query rewrite** (`src/retrieval/queryRewrite.ts`) enriches the query with conversation history + summary before searching.
-6. **Search** (`src/retrieval/search.ts`) → **rerank** (`src/retrieval/rerank.ts`).
-7. **Structured vs text output**: when the query is classified `enumeration`/`comparison` AND the request sets `response_format: json_object` (or `x-response-format` header), it uses `streamObject` with `EnumResultSchema`/`ComparisonResultSchema` (`src/types/schemas.ts`); otherwise `streamText`.
+3. **Session memory**: `x-session-id` header keys a rolling summary (`src/memory/summarizer.ts`, an in-process `Map`); summaries regenerate every `SUMMARY_INTERVAL_TURNS`.
+4. **Meta-query detection** (`isMetaQuery`) short-circuits search for questions about the bot itself.
+5. **Query rewrite** (`src/retrieval/queryRewrite.ts`) enriches the query with conversation history, the session summary, and CN↔EN synonym expansion.
+6. **Search** — `src/retrieval/localSearch.ts`, optionally filtered by `body.mod`.
+7. **Graph tools** — the LLM gets seven entity-navigation tools (`src/agent/toolDefs.ts`) it can call mid-answer.
+8. **Structured vs text output**: when the query is classified `enumeration`/`comparison` AND the request sets `response_format: json_object` (or the `x-response-format` header), it uses `streamObject` with `EnumResultSchema`/`ComparisonResultSchema` (`src/types/schemas.ts`); otherwise `streamText`.
 
 ### ⚠️ Streaming is custom NDJSON, not OpenAI SSE
-Despite the "OpenAI-compatible" framing, the streaming response is **newline-delimited JSON** built for the Vercel AI SDK, not SSE `data:` chunks. Each line is one JSON object with a `type`:
-- `{type:'text-delta', textDelta}` — plain text chunks
-- `{type:'json-delta', jsonDelta}` — partial structured object
-- `{type:'finish', usage}` / `{type:'error', error}`
+Each line is one JSON object with a `type`: `text-delta`, `reasoning-delta`, `json-delta`, `finish`, `error`. The frontend (`web/src/App.svelte`) consumes this format.
 
-The frontend (`web/src/lib/api.ts`) consumes this format. README/AGENTS.md examples showing SSE are aspirational for the non-streaming shape only.
+### Retrieval internals (`src/retrieval/localSearch.ts`)
+- One MiniSearch index over `key`, `name`, `i18nNames`, `content`, `type`; loaded from `output/search-index.json` as a process-lifetime singleton.
+- **i18n is indexed.** During the build, `resolveI18n()` runs per package against that package's own `languages/` directory, and the resolved names land in `i18nNames`. Only `cn`/`en` are indexed — the other eight languages ship as ISO-8859-1 and read back as mojibake, and indexing all of them dilutes term frequencies.
+- **CJK tokenization**: `tokenize()` splits CJK runs into unigrams + bigrams so Chinese queries match without a dictionary segmenter. Applied to queries and to the short fields (`key`/`name`/`i18nNames`/`type`) **but not to `content`** — expanding content would drown real hits in noise from the game's large localized text blobs. Fuzzy and prefix matching are disabled for CJK terms.
+- Filters (`type`, `faction`, `weapon_class`, `mod_name`) are applied post-search on stored fields.
 
-### Retrieval internals (`src/retrieval/search.ts`)
-- **Exact-key fast path**: queries containing `key=…`/`key: …` bypass embeddings for a direct SQL lookup.
-- **Hybrid search with weighted RRF**: fuses vector (pgvector `<=>` cosine), Postgres FTS, and `ILIKE` candidate lists via Reciprocal Rank Fusion. Weights are configurable (`RRF_WEIGHT_VECTOR/FTS/ILIKE`, `RRF_K`).
-- **Pinned prefix**: exact/normalized entity matches are pinned ahead of the fused results (`RERANK_PINNED_PREFIX`).
-- **Intent parsing** (`src/retrieval/intent.ts`): Chinese/English regex infer document type (`weapon`, `soldier`, `vehicle`, …), detect enumeration/comparison, and extract `class="N"` filters. This logic is **hardcoded**, not LLM-driven.
+### Graph index (`src/agent/`)
+`graphBuilder.ts` walks every package and emits nodes (entities keyed by `key`/`name`) and six edge relations (`extends`, `fires`, `transforms_to`, `includes`, `next_in_chain`, `references`). Node `file` paths are relative to the **data root**, not the package dir, so a single `dataRoot` serves the `readSource` tool across packages. `resolveFilePath` tries the referring file's directory → its package root → the data root, which is what makes cross-package overlay references resolve.
 
-### Database (dual driver)
-`DATABASE_PROVIDER` selects the driver at startup via top-level `await` in `src/db/index.ts`: `pg` (default, Docker/local) or `neon` (`@neondatabase/serverless`, for Vercel). Both expose the same `Pool` interface so the rest of the code is driver-agnostic.
-- **Drizzle is only for schema definition** (`src/db/schema.ts`). All vector search and migration use **raw SQL** through the `pg` Pool — Drizzle has no pgvector operator support, and `db:migrate.ts` is hand-written SQL, **not** `drizzle-kit push`.
-- `DATABASE_TABLE` isolates environments (dev/staging/prod) without code changes. `GET /v1/tables` auto-discovers tables (by `doc_id` column) and requests may target one via `body.table`.
-
-### Ingestion (`src/ingestion/`)
-Two stages, reviewable in between:
-- **extract** (`extract.ts`): walks the source tree, dispatches by extension to `xmlParser.ts` (`.weapon/.projectile/.call/.character/.xml`, with inheritance resolution), `asParser.ts` (`.as` AngelScript), or plain-text fallback. Resolves i18n (`i18n.ts`) from `languages/` dirs into an `i18n` field so Chinese names match. Skips `models/` and `maps/`. Output: structured JSON with `description`, `raw_text`, full `data` (XML-as-JSON), `flat_attributes`, `metadata`, `i18n`.
-- **embed** (`embed.ts` + `store.ts` + `embeddings.ts`): chunks, embeds via SiliconFlow `bge-m3`, stores. Embedding content is the **compact** form (`description` + `flat_attributes` + `i18n`, dropping verbose `raw_text` to save ~60% storage); the full XML lives in the extracted JSON only.
+### Ingestion parsers (`src/ingestion/`)
+`shared.ts` walks the tree (skipping `models/` and `maps/`) and dispatches by extension to `xmlParser.ts` (`.weapon/.projectile/.call/.character/.xml`, with inheritance resolution), `asParser.ts` (`.as` AngelScript), or a plain-text fallback. `i18n.ts` loads translations from a package's `languages/` dir. There is no separate extract/embed stage any more — parsing feeds the index builder directly.
 
 ### Cross-cutting
-- **Caching** (`src/cache/`): memory + Postgres backends, gated by `CACHE_ENABLED` / `CACHE_TTL_SECONDS`.
-- **Observability** (`src/observability/langfuse.ts`, `src/instrumentation.ts`): Langfuse OTel tracing wraps the chat chain (search/rerank/generation spans), gated by `LANGFUSE_ENABLED`.
-
-## Where AGENTS.md is outdated
-- **"Single-turn only / no session history"** — no longer true. Full message history is used, plus `x-session-id` session summaries and history-aware query rewrite.
-- **"`public/index.html` is a self-contained UI, no build step"** — replaced by the Svelte app in `web/` that builds into `public/`. Treat `public/` as generated.
-- **Streaming as SSE** — actual format is custom NDJSON (above).
+- **Observability** (`src/observability/langfuse.ts`, `src/instrumentation.ts`): Langfuse OTel tracing wraps the chat chain (search/generation spans), gated by `LANGFUSE_ENABLED`.
 
 ## Key environment variables
-Beyond the required keys, notable knobs (all in `src/config/index.ts`): `DATABASE_PROVIDER`, `DATABASE_TABLE`, `EMBEDDING_DIMENSION` (1024; **changing after data exists requires recreating the table**), `RERANK_MODEL`, `RRF_*` weights, `SUMMARY_INTERVAL_TURNS`, `CACHE_*`, `LANGFUSE_*`, `MAX_CONTEXT_TOKENS`, `PORT`.
+`LLM_API_KEY` is the only required one. Notable optional knobs (all in `src/config/index.ts`): `DATA_DIR`, `OUTPUT_DIR`, `GRAPH_PATH`, `SEARCH_INDEX_PATH`, `AUTO_BUILD_INDEX`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_MAX_OUTPUT_TOKENS`, `MAX_CONTEXT_TOKENS`, `SUMMARY_INTERVAL_TURNS`, `LANGFUSE_*`, `PORT`.

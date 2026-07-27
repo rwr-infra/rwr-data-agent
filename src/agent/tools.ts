@@ -23,7 +23,7 @@ async function loadGraph(): Promise<RwrGraph> {
     const raw = await fs.readFile(graphPath, 'utf-8');
     graphCache = JSON.parse(raw) as RwrGraph;
   } catch {
-    throw new Error(`Graph index not found at ${graphPath}. Run "npm run build:graph" first.`);
+    throw new Error(`Graph index not found at ${graphPath}. Run "npm run build:index" first.`);
   }
   return graphCache;
 }
