@@ -274,6 +274,7 @@
     let fullContent = '';
     let fullReasoning = '';
     let aiItemIdx = -1;
+    let currentTraceIdx = -1;
 
     try {
       const res = await fetch('/v1/chat/completions', {
@@ -346,12 +347,12 @@
             } else if (event.type === 'tool-step') {
               const icon = event.done ? '\u2713' : '\uD83D\uDD27';
               const text = event.summary ?? event.toolName ?? 'tool';
-              const trace = displayItems.findLast((it) => it.type === 'tool-trace');
-              if (trace && trace.type === 'tool-trace') {
-                trace.steps.push({ icon, text });
+              if (currentTraceIdx >= 0 && displayItems[currentTraceIdx]?.type === 'tool-trace') {
+                displayItems[currentTraceIdx].steps.push({ icon, text });
                 displayItems = [...displayItems];
               } else {
                 displayItems.push({ type: 'tool-trace', steps: [{ icon, text }], id: uid() });
+                currentTraceIdx = displayItems.length - 1;
                 displayItems = displayItems;
               }
             } else if (event.type === 'finish') {
