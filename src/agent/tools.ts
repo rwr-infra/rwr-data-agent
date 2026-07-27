@@ -106,6 +106,8 @@ export interface ReferenceResult {
   key: string;
   type: string;
   file: string;
+  referencedByCount: number;
+  referencesCount: number;
   referencedBy: { key: string; type: string; file: string; rel: EdgeRel }[];
   references: { key: string; type: string; file: string; rel: EdgeRel }[];
 }
@@ -115,17 +117,30 @@ export async function findReferences(key: string): Promise<ReferenceResult> {
   const node = findNode(graph, key);
   const nodeInfo = node ?? { key, type: 'unknown', file: '' };
 
-  const referencedBy = edgesTo(graph, key).map((e) => {
+  const allReferencedBy = edgesTo(graph, key).map((e) => {
     const n = findNode(graph, e.from);
     return { key: e.from, type: n?.type ?? 'unknown', file: n?.file ?? '', rel: e.rel };
   });
+  const referencedBy = allReferencedBy.slice(0, 15);
+  if (allReferencedBy.length > 15) {
+    (referencedBy as unknown as { _truncated?: string })._truncated = `${allReferencedBy.length - 15} more omitted`;
+  }
 
-  const references = edgesFrom(graph, key).map((e) => {
+  const allReferences = edgesFrom(graph, key).map((e) => {
     const n = findNode(graph, e.to);
     return { key: e.to, type: n?.type ?? 'unknown', file: n?.file ?? '', rel: e.rel };
   });
+  const references = allReferences.slice(0, 15);
 
-  return { key: nodeInfo.key, type: nodeInfo.type, file: nodeInfo.file, referencedBy, references };
+  return {
+    key: nodeInfo.key,
+    type: nodeInfo.type,
+    file: nodeInfo.file,
+    referencedByCount: allReferencedBy.length,
+    referencesCount: allReferences.length,
+    referencedBy,
+    references,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -182,7 +197,7 @@ export async function readSource(relFile: string, startLine?: number, endLine?: 
   const start = Math.max(1, startLine ?? 1);
   const end = Math.min(totalLines, endLine ?? totalLines);
   const slice = lines.slice(start - 1, end).join('\n');
-  const maxChars = 8000;
+  const maxChars = 4000;
   const truncated = slice.length > maxChars;
 
   return {
@@ -205,7 +220,7 @@ export interface ListFilesResult {
   files: { file: string; type: string; key: string; name?: string }[];
 }
 
-export async function listFiles(pattern: string, type?: string, limit = 50): Promise<ListFilesResult> {
+export async function listFiles(pattern: string, type?: string, limit = 15): Promise<ListFilesResult> {
   const graph = await loadGraph();
   const regex = new RegExp(pattern.split('*').map(escapeRegex).join('.*'), 'i');
   let matched = graph.nodes.filter((n) => regex.test(n.file) || regex.test(n.key));

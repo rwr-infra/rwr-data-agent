@@ -228,7 +228,7 @@ export async function chatRoutes(app: FastifyInstance) {
           console.log(`[chat] Query enriched: "${truncatedQuery}" → "${enrichedQuery.length > 120 ? enrichedQuery.slice(0, 120) + '…' : enrichedQuery}"`);
         }
         // Enumeration needs broad coverage; detail/comparison queries stay focused.
-        const topK = queryCategory === 'enumeration' ? 150 : 60;
+        const topK = queryCategory === 'enumeration' ? 150 : 30;
         const filters = body.mod ? { mod_name: body.mod } : {};
         results = await localSearch(query, filters, topK, enrichedQuery);
         console.log(
@@ -370,7 +370,62 @@ export async function chatRoutes(app: FastifyInstance) {
           system: SYSTEM_PROMPT,
           messages: llmMessages,
           maxOutputTokens: maxTokens,
-          ...(tools ? { tools, stopWhen: stepCountIs(100) } : {}),
+          ...(tools
+            ? {
+                tools,
+                stopWhen: stepCountIs(100),
+                prepareStep: async ({ messages }: { messages: Record<string, unknown>[] }) => {
+                  // Compress tool results from older steps to prevent context explosion,
+                  // AND ensure all messages are provider-compatible (some providers like
+                  // Volcengine reject assistant messages with null/missing content when
+                  // they only contain tool calls).
+                  const MAX_OUTPUT_CHARS = 800;
+                  const KEEP_RECENT = 4;
+
+                  const toolIdx = messages.flatMap((m, i) => (m.role === 'tool' ? [i] : []));
+                  const oldIdx = new Set(toolIdx.slice(0, Math.max(0, toolIdx.length - KEEP_RECENT)));
+
+                  let changed = false;
+                  const processed = messages.map((msg, i) => {
+                    // 1) Compress old tool results
+                    if (oldIdx.has(i) && Array.isArray(msg.content)) {
+                      const newContent = (msg.content as Record<string, unknown>[]).map((part) => {
+                        if (part.type !== 'tool-result') return part;
+                        const output = part.output;
+                        const outStr = typeof output === 'string' ? output : JSON.stringify(output);
+                        if (outStr.length <= MAX_OUTPUT_CHARS) return part;
+                        changed = true;
+                        return {
+                          ...part,
+                          output: outStr.slice(0, MAX_OUTPUT_CHARS) +
+                            `\n…[compressed: ${outStr.length} → ${MAX_OUTPUT_CHARS} chars]`,
+                        };
+                      });
+                      return { ...msg, content: newContent };
+                    }
+
+                    // 2) Fix assistant messages that have only tool-call parts (no text)
+                    //    — providers like Volcengine reject `content: null`.
+                    if (
+                      msg.role === 'assistant' &&
+                      Array.isArray(msg.content) &&
+                      (msg.content as Record<string, unknown>[]).length > 0 &&
+                      !(msg.content as Record<string, unknown>[]).some((p) => p.type === 'text')
+                    ) {
+                      changed = true;
+                      return {
+                        ...msg,
+                        content: [{ type: 'text', text: ' ' }, ...(msg.content as Record<string, unknown>[])],
+                      };
+                    }
+
+                    return msg;
+                  });
+
+                  return changed ? { messages: processed as never } : {};
+                },
+              }
+            : {}),
           providerOptions: buildLlmProviderOptions(),
           onFinish: ({ text, usage }) => {
             const outputText = text.slice(0, 500);

@@ -65,8 +65,12 @@ export function buildUserPrompt(
     contextParts.push('[Low Confidence] The following documents were retrieved but may not closely match the query.');
   }
 
+  const MAX_RESULT_CHARS = 2000;
   results.forEach((r, i) => {
-    contextParts.push(`[Document ${i + 1}] Type: ${r.type}, Key: ${r.key}\n${r.content}`);
+    const content = r.content.length > MAX_RESULT_CHARS
+      ? r.content.slice(0, MAX_RESULT_CHARS) + '…'
+      : r.content;
+    contextParts.push(`[Document ${i + 1}] Type: ${r.type}, Key: ${r.key}\n${content}`);
   });
 
   const context = contextParts.join('\n\n---\n\n');

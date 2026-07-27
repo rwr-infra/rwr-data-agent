@@ -341,6 +341,15 @@ function applyFilters<T extends { type: string; faction: string; weaponClass: st
   return out;
 }
 
+/** Extract entity-like tokens (alphanumeric identifiers like "M4A1", "g36", "ak47") from a query. */
+function extractEntityTokens(query: string): string[] {
+  const tokens = query.match(/[a-zA-Z][a-zA-Z0-9_-]{1,}/g) ?? [];
+  const stopWords = new Set(['weapon', 'the', 'and', 'for', 'with', 'list', 'all', 'data']);
+  return tokens
+    .filter((t) => !stopWords.has(t.toLowerCase()) && t.length >= 2)
+    .slice(0, 5);
+}
+
 export async function search(
   query: string,
   filters: SearchFilters = {},
@@ -352,12 +361,45 @@ export async function search(
   const effectiveQuery = (searchQuery ?? query).trim();
   if (!effectiveQuery) return [];
 
-  const results = index.search(effectiveQuery, SEARCH_OPTIONS) as unknown as (IndexEntry & {
+  // --- Entity pinning: extract alphanumeric tokens (M4A1, G36, etc.) and search
+  // them against key/name fields only, then pin those results at the top. This
+  // prevents high-frequency CJK content terms ("武器") from drowning exact
+  // key/name matches. ---
+  const entityTokens = extractEntityTokens(effectiveQuery);
+  const pinnedIds = new Set<string>();
+  const pinnedResults: (IndexEntry & { id: string; score: number })[] = [];
+
+  if (entityTokens.length > 0) {
+    const entityQuery = entityTokens.join(' ');
+    const entityHits = index.search(entityQuery, {
+      fields: ['key', 'name'],
+      boost: { key: 10, name: 8 },
+      fuzzy: 0.2,
+      prefix: true,
+      combineWith: 'AND',
+    }) as unknown as (IndexEntry & { id: string; score: number })[];
+
+    for (const hit of entityHits.slice(0, 10)) {
+      if (!pinnedIds.has(hit.id)) {
+        pinnedIds.add(hit.id);
+        pinnedResults.push({ ...hit, score: hit.score * 5 });
+      }
+    }
+  }
+
+  // --- Full-text search for everything else ---
+  const fullResults = index.search(effectiveQuery, SEARCH_OPTIONS) as unknown as (IndexEntry & {
     id: string;
     score: number;
   })[];
 
-  return applyFilters(results, filters)
+  // Merge: pinned results first, then full-text (minus already-pinned)
+  const merged = [...pinnedResults];
+  for (const r of fullResults) {
+    if (!pinnedIds.has(r.id)) merged.push(r);
+  }
+
+  return applyFilters(merged, filters)
     .slice(offset, offset + topK)
     .map((r) => ({
       doc_id: r.id,
