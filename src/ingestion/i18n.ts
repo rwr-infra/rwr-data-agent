@@ -1,7 +1,8 @@
 import { XMLParser } from 'fast-xml-parser';
 import * as fs from 'fs/promises';
-import * as fsSync from 'fs';
 import * as path from 'path';
+import type { Dirent } from 'fs';
+import { walkFiles } from './walk.js';
 
 const parser = new XMLParser({
   ignoreAttributes: false,
@@ -69,15 +70,7 @@ function findTextNodes(val: unknown): Record<string, unknown>[] {
 }
 
 async function collectTranslationFiles(dir: string): Promise<string[]> {
-  const entries = await fs.readdir(dir, { withFileTypes: true, recursive: true });
-  const files: string[] = [];
-  for (const entry of entries) {
-    if (!entry.isFile()) continue;
-    if (!entry.name.toLowerCase().endsWith('.xml')) continue;
-    const fullPath = path.join(entry.parentPath ?? dir, entry.name);
-    files.push(fullPath);
-  }
-  return files;
+  return walkFiles(dir, { keepFile: (name) => name.toLowerCase().endsWith('.xml') });
 }
 
 async function loadTranslationFile(filePath: string, translations: TranslationMap): Promise<void> {
@@ -129,20 +122,25 @@ export async function loadLanguageData(languagesDir: string, language: string): 
 }
 
 export async function loadAllLanguages(languagesDir: string): Promise<LanguageData[]> {
-  let entries: fsSync.Dirent[];
+  let entries: Dirent[];
   try {
-    entries = fsSync.readdirSync(languagesDir, { withFileTypes: true });
+    entries = await fs.readdir(languagesDir, { withFileTypes: true });
   } catch {
     return [];
   }
 
   const languages: LanguageData[] = [];
   for (const entry of entries) {
-    if (entry.isDirectory()) {
-      const langData = await loadLanguageData(languagesDir, entry.name);
-      if (Object.keys(langData.translations).length > 0) {
-        languages.push(langData);
-      }
+    // A symlinked `languages/<lang>` reports isDirectory() === false; stat() follows it.
+    const isDir = entry.isSymbolicLink()
+      ? ((await fs.stat(path.join(languagesDir, entry.name)).catch(() => null))?.isDirectory() ??
+        false)
+      : entry.isDirectory();
+    if (!isDir) continue;
+
+    const langData = await loadLanguageData(languagesDir, entry.name);
+    if (Object.keys(langData.translations).length > 0) {
+      languages.push(langData);
     }
   }
 

@@ -145,11 +145,23 @@ export default function register(host) {
 
 ## Parsers (src/ingestion/)
 
-- **Excluded dirs**: `models/`, `maps/` (skipped by `collectFiles`).
+- **Excluded dirs**: `models/`, `maps/` — pruned by `walkFiles` *before* descending, so their ~1.4 GB never gets enumerated.
 - **Supported extensions**: `.weapon`, `.projectile`, `.carry_item`, `.base_weapon`, `.base_carry_item`, `.animation_base`, `.base`, `.call`, `.character`, `.xml` → XML parser (with `file=` inheritance resolution); `.as` → AngelScript parser; `.ai`, `.resources`, `.models`, `.name`, `.text_lines` → plain-text fallback.
 - `i18n.ts` loads `<translation><text key="…" text="…"/>` files from a package's `languages/<lang>/` dirs, following `file=` indirections.
 
 Parsed `StructuredDocument`s feed the index builder directly — there is no intermediate `extracted-documents.json` stage any more.
+
+### Directory walking (`walk.ts`) — symlinks are supported
+
+`walkFiles()` is the one directory traversal behind `collectFiles()` and `collectTranslationFiles()`. **Do not replace it with `fs.readdir(dir, { recursive: true })`.** That built-in reports a symlink as neither file nor directory (`Dirent.isFile()` and `isDirectory()` are both `false`) and never descends into a symlinked directory — so a `DATA_DIR` assembled out of links into a steamcmd download indexes as *zero documents*, silently: `discoverPackages()` uses `fs.stat` and still finds the package, the build "succeeds", and the only symptom is `documents: 0` on `GET /health`. `loadAllLanguages()` has the same hazard for a symlinked `languages/<lang>` and stats explicitly for it.
+
+Three invariants the walker holds:
+
+- **Paths stay lexical, never `realpath`'d.** `readSource` guards traversal with a lexical `dataRoot` prefix check ([`tools.ts`](src/agent/tools.ts)), so a resolved path pointing outside the data root would make every linked file unreadable. `fs.readFile` follows the link on its own.
+- **Cycle guard.** Realpaths of the root and of every directory entered *through* a link are memoised. A cycle must cross a link each lap, so that is sufficient — and seeding the root is what stops a self-link (`pkg/x -> pkg`) from indexing the package twice under a different lexical prefix.
+- **Dangling links are skipped**, not fatal.
+
+Verified: an index built from a symlinked data root is byte-identical to one built from the real tree (modulo the positional `entry.id`, which is per-build and never persisted).
 
 ### AngelScript (`asSymbols.ts`)
 
@@ -222,6 +234,16 @@ Svelte 5 + Vite + Tailwind 4 + daisyUI in `web/`, building into `public/` — tr
 
 ### Docker
 `docker compose up -d --build` — a single `app` service. `./data` mounts read-only at `/app/data`; `./output` is a writable volume so restarts skip the rebuild; `./tools.d` mounts read-only at `/app/tools.d`.
+
+**Sharing a steamcmd download.** `DATA_DIR` may be a directory of symlinks into a steamcmd tree instead of a copy — `walkFiles` follows them (see [Directory walking](#directory-walking-walkts--symlinks-are-supported)). The links must resolve *inside the container*, so mount the steam tree and point the links at the container-side path:
+
+```yaml
+    volumes:
+      - /srv/steam/rwr:/srv/steam/rwr:ro    # same path inside and out, so links stay valid
+      - ./data:/app/data:ro                 # dir of symlinks -> /srv/steam/rwr/...
+```
+
+Workshop packages live at `steamapps/workshop/content/270150/<itemid>/<pkgname>/`. `discoverPackages()` only looks at the root and its immediate children, so link the `<pkgname>` level — pointing at `<itemid>` finds nothing.
 
 ### Vercel
 `vercel.json` bundles `dist/**`, `public/**`, `output/**`, `tools.d/**` into the function. The data directory is not uploaded, so the index must exist before deploy — `ensureIndexes()` will only load, never build, when `VERCEL` is set. Plugins load once per cold start; hot reload is off.
