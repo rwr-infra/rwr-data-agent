@@ -1,5 +1,7 @@
 # AGENTS.md
 
+> This is the single source of truth for agent guidance in this repository. `CLAUDE.md` is a pointer to this file.
+
 ## Project Overview
 
 An AI agent over *Running With Rifles* game data. Fastify server, **OpenAI-compatible** `/v1/chat/completions`, Svelte 5 chat UI. Retrieval is a **local in-process index** built straight from the game files: MiniSearch full-text + an entity graph the LLM can walk with tools.
@@ -10,18 +12,19 @@ An AI agent over *Running With Rifles* game data. Fastify server, **OpenAI-compa
 
 - **ESM only** (`"type": "module"`, `NodeNext`). Relative imports carry `.js` extensions even in `.ts` sources. The `~/*` tsconfig alias exists but is unused — follow the relative-import style.
 - Strict TypeScript. No unit-test runner; `npm run eval` + curl smoke tests are the correctness net.
-- `npm run lint` (ESLint 10 flat config) and `npm run typecheck` (`tsc --noEmit`) are both green and both required. Type-aware rules apply to `src/`; `api/`, `types/`, `tools.d/` get syntax-layer checks only. `web/` is out of scope. Ignores come from `.gitignore` via `@eslint/compat` — add new generated directories there, not to `eslint.config.js`.
+- `npm run lint` (ESLint 10 flat config, `eslint.config.js`) and `npm run typecheck` (`tsc --noEmit`) are both green and both required. Type-aware rules (`recommendedTypeChecked`) apply to `src/`; `api/`, `types/`, `tools.d/` get syntax-layer checks only — `api/` imports from the gitignored `dist/`, so type-aware rules there would depend on having built first. `web/` has its own Svelte toolchain and is out of scope.
 
 ## Developer Commands
 
 ```bash
 npm run dev             # backend hot-reload (tsx) — src/api/server.ts
 npm run web:dev         # vite :5173, proxies /v1 + /health to the backend
+npm run web:install     # npm install inside web/
 npm run build           # tsc → dist/  AND  vite build web/ → public/
 npm start               # node dist/api/server.js
 
-npm run build:index     # rebuild graph + search indexes
-npm run build:index:prod
+npm run build:index     # rebuild graph + search indexes (also runs automatically at startup)
+npm run build:index:prod # same, from dist/ (no tsx)
 npm run validate:index  # smoke-test the 7 graph tools against the built index
 npm run eval            # retrieval eval harness → src/eval/run.ts
 
@@ -29,7 +32,12 @@ npm run lint            # eslint . --max-warnings 0
 npm run lint:fix        # same, with --fix
 npm run typecheck       # tsc --noEmit
 npm run format          # Prettier over src/ api/ types/ tools.d/
+npm run format:check    # same, check-only
 ```
+
+`build:index` flags: `-s/--source <dir>` (default `DATA_DIR`), `-o/--output <dir>` (default `OUTPUT_DIR`), `--only <pkg,pkg>` to restrict to specific packages.
+
+⚠️ ESLint's ignore list is generated from `.gitignore` via `@eslint/compat`'s `includeIgnoreFile()` — **add new build/data directories to `.gitignore`, not to `eslint.config.js`**. The `web/` entry is the one manual addition (it is version-controlled). Directory patterns must keep their trailing slash: `data/` prunes the whole tree, `data/**` does not and makes ESLint walk ~24k game-data files.
 
 ## Running Locally
 
@@ -39,7 +47,7 @@ npm install
 npm run dev             # indexes build automatically on first boot
 ```
 
-No ordering constraints, no migrations, no docker prerequisite.
+That is the whole setup — no ordering constraints, no migrations, no docker prerequisite. `DATA_DIR` (default `./data`) is the only other knob most people touch.
 
 ## Packages: the unit of data isolation
 
@@ -72,7 +80,7 @@ Output files (in `OUTPUT_DIR`, gitignored):
 
 ## Search Index (src/retrieval/localSearch.ts)
 
-MiniSearch over `key`, `name`, `i18nNames`, `content`, `type`. Boosts: key 3, name 2.5, i18nNames 2.5, content 1.
+One MiniSearch index over `key`, `name`, `i18nNames`, `content`, `type`, loaded from `output/search-index.json` as a process-lifetime singleton. Boosts: key 3, name 2.5, i18nNames 2.5, content 1.
 
 **i18n is part of the index.** The builder runs `resolveI18n()` per package against that package's own `languages/` dir — this is what fixed the old `findLanguagesDir` bug where a multi-package root resolved to the first `languages/` it found and silently dropped the rest. Only `cn`/`en` are indexed: the other eight ship as ISO-8859-1 (mojibake when read as UTF-8) and indexing all ten dilutes term frequencies.
 
@@ -171,19 +179,23 @@ Every `.as` file becomes exactly **one** `script_chunk` document. Because `struc
 | `GET /health` | `{status, index:{ready, documents, packages, builtAt, reason?}}` — no external check |
 
 ### Request pipeline (src/api/routes/chat.ts)
-1. External `system` messages dropped; server enforces `SYSTEM_PROMPT`. Anti-injection.
+1. External `system` messages dropped; server enforces its own `SYSTEM_PROMPT` (`src/retrieval/prompt.ts`). Anti-injection.
 2. Token-size guard at ~`maxContextTokens * 0.7`.
-3. `x-session-id` keys a rolling summary (`src/memory/summarizer.ts`, in-process `Map`, never persisted).
+3. `x-session-id` keys a rolling summary (`src/memory/summarizer.ts`, in-process `Map`, never persisted); summaries regenerate every `SUMMARY_INTERVAL_TURNS`.
 4. `isMetaQuery` short-circuits search for questions about the bot.
-5. `buildSearchQuery` merges history + summary + CN↔EN synonym expansion.
-6. `localSearch(query, filters, topK, enrichedQuery)` — `topK` 150 for enumeration, else 60.
-7. `streamText` with graph tools, or `streamObject` with `EnumResultSchema`/`ComparisonResultSchema` when the query is enumeration/comparison **and** `response_format: json_object` (or `x-response-format`) is set.
+5. `buildSearchQuery` (`src/retrieval/queryRewrite.ts`) merges history + summary + CN↔EN synonym expansion.
+6. `localSearch(query, filters, topK, enrichedQuery)` — `topK` 150 for enumeration, else 60; optionally filtered by `body.mod`.
+7. Tools come from `getAgentTools()` (`src/agent/toolDefs.ts`), re-queried per request so hot-reloaded plugins take effect.
+8. `streamText` with graph tools, or `streamObject` with `EnumResultSchema`/`ComparisonResultSchema` (`src/types/schemas.ts`) when the query is enumeration/comparison **and** `response_format: json_object` (or `x-response-format`) is set.
 
 ### Streaming format
 Custom **NDJSON**, not SSE. One JSON object per line, keyed by `type`: `text-delta`, `reasoning-delta`, `json-delta`, `tool-step`, `finish`, `error`.
 
 ### Frontend
 Svelte 5 + Vite + Tailwind 4 + daisyUI in `web/`, building into `public/` — treat `public/` as generated. `web/vite.config.ts` reads `PORT` from the repo-root `.env` via `loadEnv`, so the dev proxy always follows the backend port. The Header's dropdown is a package filter fed by `GET /v1/packages`; it hides itself when there is only one package.
+
+### Observability
+`src/observability/langfuse.ts` + `src/instrumentation.ts` — Langfuse OTel tracing wraps the chat chain (search / generation spans), gated by `LANGFUSE_ENABLED`.
 
 ## Environment & Config
 
@@ -221,4 +233,4 @@ Svelte 5 + Vite + Tailwind 4 + daisyUI in `web/`, building into `public/` — tr
 
 ## Style
 
-Prettier defaults, no config file. Match the surrounding code.
+Prettier, configured in `.prettierrc.json` (single quotes, `printWidth` 100, trailing commas, semicolons, 2-space tabs). Prettier does **not** read `.gitignore`, so `.prettierignore` must be kept in sync with it by hand — `web/` is the one manual addition (its own toolchain). Otherwise, match the surrounding code.

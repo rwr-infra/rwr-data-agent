@@ -366,26 +366,46 @@ export async function search(
   // --- Entity pinning: extract alphanumeric tokens (M4A1, G36, etc.) and search
   // them against key/name fields only, then pin those results at the top. This
   // prevents high-frequency CJK content terms ("武器") from drowning exact
-  // key/name matches. ---
-  const entityTokens = extractEntityTokens(effectiveQuery);
+  // key/name matches.
+  //
+  // Tokens come from the ORIGINAL query, not the enriched one. The enriched query
+  // prepends entity keys from earlier turns, and those tokens would (a) fill the
+  // 5-token cap in extractEntityTokens so the current question's own entity never
+  // makes it in, and (b) match nothing once combined — asking about AK47 after a
+  // turn about M1 pinned neither. ---
+  const entityTokens = extractEntityTokens(query.trim() || effectiveQuery);
   const pinnedIds = new Set<string>();
   const pinnedResults: (IndexEntry & { id: string; score: number })[] = [];
 
   if (entityTokens.length > 0) {
-    const entityQuery = entityTokens.join(' ');
-    const entityHits = index.search(entityQuery, {
-      fields: ['key', 'name'],
-      boost: { key: 10, name: 8 },
-      fuzzy: 0.2,
-      prefix: true,
-      combineWith: 'AND',
-    }) as unknown as (IndexEntry & { id: string; score: number })[];
+    // One search per token rather than one AND search over all of them: a query that
+    // names two entities ("M4A1 vs G36") has no document matching both, so AND pins
+    // nothing at all.
+    const PIN_PER_TOKEN = 8;
+    const PIN_TOTAL = 20;
 
-    for (const hit of entityHits.slice(0, 10)) {
-      if (!pinnedIds.has(hit.id)) {
+    for (const token of entityTokens) {
+      const entityHits = index.search(token, {
+        fields: ['key', 'name'],
+        boost: { key: 10, name: 8 },
+        fuzzy: 0.2,
+        prefix: true,
+      }) as unknown as (IndexEntry & { id: string; score: number })[];
+
+      for (const hit of entityHits.slice(0, PIN_PER_TOKEN)) {
+        if (pinnedIds.has(hit.id)) continue;
         pinnedIds.add(hit.id);
         pinnedResults.push({ ...hit, score: hit.score * 5 });
       }
+    }
+
+    pinnedResults.sort((a, b) => b.score - a.score);
+    if (pinnedResults.length > PIN_TOTAL) {
+      pinnedResults.length = PIN_TOTAL;
+      // Rebuild the id set so the dropped entries can still surface through the
+      // full-text pass instead of being filtered out of both.
+      pinnedIds.clear();
+      for (const p of pinnedResults) pinnedIds.add(p.id);
     }
   }
 

@@ -85,6 +85,10 @@ function summarizeToolInput(toolName: string | undefined, input: unknown): strin
   const key = inputField(inp, 'key') || '?';
   const file = inputField(inp, 'file') || '?';
   switch (toolName) {
+    case 'searchDocs': {
+      const type = inputField(inp, 'type');
+      return `Search: ${inputField(inp, 'query') || '?'}${type ? ` [${type}]` : ''}`;
+    }
     case 'getInheritanceChain':
       return `Inheritance: ${key}`;
     case 'findReferences':

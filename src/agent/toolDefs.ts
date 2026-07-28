@@ -11,6 +11,7 @@ import {
   listFiles,
   getScriptSymbols,
   getNode,
+  searchDocs,
 } from './tools.js';
 import { createToolHost, loadToolPlugins, type PluginEntry } from './plugins.js';
 
@@ -26,6 +27,27 @@ export function buildBuiltinTools() {
   initGraphTools();
 
   return {
+    searchDocs: tool({
+      description:
+        'Full-text search over the game data index (the same index the pre-fetched context ' +
+        'came from). Matches Keys, English/Chinese localized names, and document content. ' +
+        'USE THIS FIRST whenever the pre-fetched context does not contain the item the user ' +
+        'asked about — retry with the bare item name, a Key fragment, an alias, or the ' +
+        'English/Chinese equivalent. Never tell the user an item does not exist without ' +
+        'having searched for it here.',
+      inputSchema: z.object({
+        query: z
+          .string()
+          .describe('Search terms, e.g. "ak47", "AK-47 突击步枪", "gkw_ak". Short and specific beats a full sentence.'),
+        type: z
+          .string()
+          .optional()
+          .describe('Optional node type filter (weapon, carry_item, projectile, call, character, script_chunk, …)'),
+        limit: z.number().optional().describe('Max results, 1-30 (default 10)'),
+      }),
+      execute: async ({ query, type, limit }) => searchDocs(query, type, limit ?? 10),
+    }),
+
     getInheritanceChain: tool({
       description:
         'Trace the full inheritance chain of an entity (weapon, carry_item, etc.). ' +

@@ -1,6 +1,8 @@
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
+import { search as indexSearch } from '../retrieval/localSearch.js';
+import type { DocumentType, SearchFilters } from '../types/index.js';
 import type { GraphNode, GraphEdge, EdgeRel, ScriptSymbol, RwrGraph } from './types.js';
 
 let graphCache: RwrGraph | null = null;
@@ -271,4 +273,41 @@ export async function getScriptSymbols(file: string): Promise<ScriptSymbolsResul
 export async function getNode(key: string): Promise<GraphNode | null> {
   const graph = await loadGraph();
   return findNode(graph, key) ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Tool 8: search_docs — full-text retrieval, the same index the RAG context comes from
+// ---------------------------------------------------------------------------
+export interface SearchDocsResult {
+  query: string;
+  total: number;
+  results: { key: string; type: string; file: string; mod?: string; snippet: string }[];
+}
+
+/**
+ * Re-run retrieval with a model-chosen query. The pre-fetched RAG context is a single
+ * shot at one phrasing; this lets the agent retry with an alias, a Key fragment, or a
+ * translated term before it can honestly claim an entity is absent.
+ *
+ * Snippet is 500 chars because `structuredDocToRWRDocument` puts the tag line, Key and
+ * the "Localized Names" section in the first two blocks — that prefix is what a name
+ * match has to be judged on.
+ */
+export async function searchDocs(query: string, type?: string, limit = 10): Promise<SearchDocsResult> {
+  const SNIPPET_CHARS = 500;
+  const capped = Math.min(Math.max(limit, 1), 30);
+  const filters: SearchFilters = type ? { type: type as DocumentType } : {};
+  const hits = await indexSearch(query, filters, capped);
+
+  return {
+    query,
+    total: hits.length,
+    results: hits.map((r) => ({
+      key: r.key,
+      type: r.type,
+      file: r.metadata.file_path ?? '',
+      mod: r.metadata.mod_name,
+      snippet: r.content.length > SNIPPET_CHARS ? r.content.slice(0, SNIPPET_CHARS) + '…' : r.content,
+    })),
+  };
 }
