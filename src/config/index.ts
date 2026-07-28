@@ -22,6 +22,18 @@ export const config = {
   /** Build/refresh the index at startup when it is missing or stale. */
   autoBuildIndex: process.env.AUTO_BUILD_INDEX !== 'false',
 
+  // ── Agent tool plugins ────────────────────────────────────────────────────
+  /** Directory of runtime tool plugins (plain ESM .js). Optional — skipped if absent. */
+  toolsDir: path.resolve(process.env.TOOLS_DIR ?? './tools.d'),
+  /**
+   * Watch the plugin directory and reload on change. Off in production and on Vercel,
+   * where the filesystem is read-only and a watcher buys nothing.
+   */
+  toolsHotReload:
+    process.env.TOOLS_HOT_RELOAD !== undefined
+      ? process.env.TOOLS_HOT_RELOAD === 'true'
+      : process.env.NODE_ENV !== 'production' && !process.env.VERCEL,
+
   // ── Server ────────────────────────────────────────────────────────────────
   port: parseInt(process.env.PORT ?? '3000', 10),
   maxContextTokens: parseInt(process.env.MAX_CONTEXT_TOKENS ?? '500000', 10),

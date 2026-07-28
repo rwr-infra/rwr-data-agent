@@ -3,6 +3,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { collectFiles } from '../ingestion/shared.js';
 import { discoverPackages, type DataPackage } from '../ingestion/packages.js';
+import { extractScriptSymbols } from '../ingestion/asSymbols.js';
 import pLimit from 'p-limit';
 import type { GraphNode, GraphEdge, EdgeRel, ScriptSymbol, RwrGraph } from './types.js';
 
@@ -218,30 +219,10 @@ async function resolveFilePath(
   return undefined;
 }
 
-export async function extractScriptSymbols(filePath: string): Promise<ScriptSymbol[]> {
+/** Read a `.as` file and extract its symbols. Shared implementation lives in ingestion/asSymbols. */
+export async function extractScriptSymbolsFromFile(filePath: string): Promise<ScriptSymbol[]> {
   const content = await fs.readFile(filePath, 'utf-8');
-  const lines = content.split('\n');
-  const symbols: ScriptSymbol[] = [];
-  const fileBase = path.basename(filePath);
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const inc = line.match(/^\s*#include\s+"([^"]+)"/);
-    if (inc) {
-      symbols.push({ file: fileBase, name: inc[1], signature: `#include "${inc[1]}"`, kind: 'include', line: i + 1 });
-      continue;
-    }
-    const cls = line.match(/^\s*(?:class|interface|mixin)\s+(\w+)/);
-    if (cls) {
-      symbols.push({ file: fileBase, name: cls[1], signature: line.trim(), kind: 'class', line: i + 1 });
-      continue;
-    }
-    const fn = line.match(/^\s*(?:(?:void|bool|int|float|double|string|uint|array<[^>]+>)|[A-Za-z_]\w*(?:\s*[@&])?)\s+(\w+)\s*\(([^)]*)\)\s*\{?\s*$/);
-    if (fn && !line.includes('=')) {
-      symbols.push({ file: fileBase, name: fn[1], signature: line.trim().replace(/\{?\s*$/, ''), kind: 'function', line: i + 1 });
-    }
-  }
-  return symbols;
+  return extractScriptSymbols(content, path.basename(filePath));
 }
 
 /**
@@ -321,7 +302,7 @@ export async function buildGraph(
   const symbols: ScriptSymbol[] = [];
   for (const f of scriptFiles) {
     try {
-      symbols.push(...await extractScriptSymbols(f));
+      symbols.push(...await extractScriptSymbolsFromFile(f));
     } catch {}
   }
 

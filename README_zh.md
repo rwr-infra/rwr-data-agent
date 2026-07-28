@@ -94,6 +94,19 @@ curl -X POST http://localhost:3000/v1/chat/completions \
 }
 ```
 
+### GET /v1/tools
+
+列出模型可调用的工具 —— 7 个内置工具 + 插件目录里加载成功的工具，加载失败的会带 `error` 字段。
+
+```json
+{
+  "builtin": ["getInheritanceChain", "findReferences", "…"],
+  "plugins": [{ "name": "lookupUpgrade", "file": "lookup-upgrade.js", "description": "…", "loadedAt": "…" }],
+  "toolsDir": "/app/tools.d",
+  "hotReload": true
+}
+```
+
 ### GET /v1/models
 
 返回可用模型列表。
@@ -137,8 +150,8 @@ curl -N http://localhost:3000/v1/chat/completions \
 Prompt 构建     （强制系统提示词 + 检索到的上下文）
   |
   v
-LLM 生成        （+ 7 个可被模型调用的图谱工具：继承链、反向引用、
-                  转换链、读源码、按 glob 列文件、脚本符号、按 key 查节点）
+LLM 生成        （+ 7 个内置图谱工具：继承链、反向引用、转换链、读源码、
+                  按 glob 列文件、脚本符号、按 key 查节点；以及运行时加载的插件工具）
 ```
 
 ### 索引构建
@@ -159,15 +172,55 @@ DATA_DIR ──发现数据包──▶ 逐包：解析文件 + 解析 languages
 | 扩展名 | 类型 | 解析器 |
 |--------|------|--------|
 | `.weapon`、`.projectile`、`.carry_item`、`.call`、`.character`、`.xml` 等 | XML | 标签驱动解析，含继承（`file=`）解析 |
-| `.as` | AngelScript | 提取函数 / 类 / include 符号 |
+| `.as` | AngelScript | 符号扫描：类、函数（含多行签名与默认参数）、成员变量、`enum`/`namespace`/`funcdef`、`#include` |
 | `.ai`、`.resources`、`.name`、`.text_lines` | 纯文本 | 兜底文本处理 |
 
 `models/` 与 `maps/` 子树会被跳过。
+
+### AngelScript 与脚本检索
+
+`asSymbols.ts` 是一个「注释与字符串置空后的逐行 + 括号计数扫描器」，不是完整语法解析器 —— 但足以覆盖真正影响召回的情况：多行签名、带默认值的参数、类成员、构造/析构、`enum` / `namespace` / `funcdef`。
+
+每个 `.as` 文件生成**一条** `script_chunk` 文档。由于 `structuredDocToRWRDocument` 只把 `raw_text` 的前 500 字符放进可检索内容，符号摘要被写入 `description` 与 `flat_attributes`（`classes` / `functions` / `includes` / …，每项最多 120 个名字）—— 这两处会被完整拼进 content。因此「哪个脚本定义了 X」「哪些脚本 include 了 Y」可以直接被全文检索命中，而不必先让模型猜对文件名。
+
+关于 tree-sitter：只有在需要调用图、跨文件符号解析或 `#include` 依赖图时才值得引入。目前 npm 上没有发布 AngelScript 语法（[Relrin/tree-sitter-angelscript](https://github.com/Relrin/tree-sitter-angelscript) 覆盖最全但需自行 clone 构建），采用它意味着自己编出 `.wasm` 并入库。迁移面只有一个函数：`extractScriptSymbols(source, fileBase)`。
 
 ### 中文检索
 
 - 构建索引时，`resolveI18n()` 会**按包**读取该包自己的 `languages/` 目录，把译名写入索引的 `i18nNames` 字段。只索引 `cn` / `en`：其余 8 种语言的文件是 ISO-8859-1 编码，读出来是乱码，而且全部索引会稀释词频。
 - `tokenize()` 把连续的中日韩字符切成**单字 + 二元组**，让「伤害」「突击步枪」这类词无需分词词典就能命中。该切分只作用于查询和短字段（`key`/`name`/`i18nNames`/`type`），**不作用于 `content`** —— 否则游戏里那些超大的本地化文本块会淹没真正的结果。中文词条不做模糊匹配和前缀匹配。
+
+## 工具插件
+
+除了 7 个内置图谱工具，你可以把自己的工具放进 `./tools.d`（用 `TOOLS_DIR` 改路径）。启动时自动加载；在非生产环境下，改文件即生效，不用重启。
+
+插件是普通的 ESM **`.js`** 文件（不能是 `.ts` —— 生产跑的是编译产物，加载链上没有转译器），默认导出一个返回工具定义的工厂：
+
+```js
+/** @type {import('../types/tool-plugin.js').PluginFactory} */
+export default function register(host) {
+  return [{
+    name: 'findByFaction',
+    description: '列出属于某个阵营的武器。',
+    inputSchema: {
+      type: 'object',
+      properties: { faction: { type: 'string' } },
+      required: ['faction'],
+    },
+    async execute({ faction }) {
+      return host.search('weapon', { faction, type: 'weapon' }, 20);
+    },
+  }];
+}
+```
+
+`host` 提供索引路径、`search()` 以及全部图谱原语（`getNode`、`getInheritanceChain`、`readSource` 等），类型定义见 [types/tool-plugin.d.ts](./types/tool-plugin.d.ts)。schema 用 JSON Schema，插件因此不依赖服务端的校验库版本。
+
+插件写坏了会被跳过并在 `GET /v1/tools` 里带上错误信息，其它工具不受影响；插件也无法覆盖内置工具的同名工具。
+
+`tools.d/lookup-upgrade.js` 是随仓库提供的可用样例（Castling 武器升级链）。
+
+> ⚠️ **插件在服务进程内运行，拥有与主进程相同的权限** —— 文件系统、网络、环境变量。只放你自己写过或审过的文件。这不是沙箱，插件目录**绝不能**接第三方上传。要开放上传必须换 `worker_threads` 隔离方案。
 
 ## 开发
 
@@ -192,11 +245,11 @@ npx tsc --noEmit        # 类型检查
 docker compose up -d --build
 ```
 
-以只读方式把 `./data` 挂到 `/app/data`，并把生成的索引持久化在 `./output`。配置从 `.env` 读取。
+以只读方式把 `./data` 挂到 `/app/data`、`./tools.d` 挂到 `/app/tools.d`，并把生成的索引持久化在 `./output`。配置从 `.env` 读取。
 
 ### Vercel
 
-`vercel.json` 会把 `dist/`、`public/`、`output/` 打进 Serverless 函数。数据目录本身不会上传，因此索引必须在部署前构建好 —— 函数只负责加载。
+`vercel.json` 会把 `dist/`、`public/`、`output/`、`tools.d/` 打进 Serverless 函数。数据目录本身不会上传，因此索引必须在部署前构建好 —— 函数只负责加载。插件在每次冷启动加载一次，热重载关闭。
 
 ## 配置
 
@@ -210,6 +263,8 @@ docker compose up -d --build
 | `DATA_DIR` | `./data` | RWR 数据根目录（单包或多包目录） |
 | `OUTPUT_DIR` | `./output` | 索引输出目录 |
 | `AUTO_BUILD_INDEX` | `true` | 启动时自动构建/刷新索引 |
+| `TOOLS_DIR` | `./tools.d` | 工具插件目录（可选） |
+| `TOOLS_HOT_RELOAD` | 非生产环境默认开 | 改插件文件后不重启即生效 |
 | `PORT` | `3000` | HTTP 端口 |
 
 ## 许可证

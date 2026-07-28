@@ -11,6 +11,7 @@ services:
     environment:
       DATA_DIR: /app/data
       OUTPUT_DIR: /app/output
+      TOOLS_DIR: /app/tools.d
     ports:
       - "3000:3000"
     volumes:
@@ -18,3 +19,5 @@ services:
       - ./data:/app/data:ro
       # Generated indexes, persisted so restarts skip the rebuild.
       - ./output:/app/output
+      # Agent tool plugins. Read-only: they execute in-process with full privileges.
+      - ./tools.d:/app/tools.d:ro

@@ -33,6 +33,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/public ./public
+COPY tools.d ./tools.d
 
 # /app/data is the mounted RWR data root; /app/output holds the generated indexes.
 RUN mkdir -p /app/data /app/output && chown -R appuser:appgroup /app

@@ -1,3 +1,4 @@
+import * as fsSync from 'fs';
 import type { FastifyInstance } from 'fastify';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { streamText, streamObject, stepCountIs } from 'ai';
@@ -11,11 +12,11 @@ import { buildLlmProviderOptions } from '../../llm/providerOptions.js';
 import { classifyQuery, isMetaQuery } from '../../retrieval/intent.js';
 import { EnumResultSchema, ComparisonResultSchema } from '../../types/schemas.js';
 import { getSummary, generateSummary, shouldGenerateSummary } from '../../memory/summarizer.js';
-import { buildAgentTools } from '../../agent/toolDefs.js';
+import { getAgentTools as loadAgentTools } from '../../agent/toolDefs.js';
+import type { Tool } from 'ai';
 import type { ChatCompletionRequest, SearchResult } from '../../types/index.js';
 
 let provider: ReturnType<typeof createOpenAICompatible> | null = null;
-let agentTools: ReturnType<typeof buildAgentTools> | null | undefined;
 
 function getProvider() {
   if (!provider) {
@@ -24,22 +25,35 @@ function getProvider() {
       name: 'llm',
       apiKey: config.llmApiKey,
       baseURL: config.llmBaseUrl,
+      // DEBUG_HTTP dumps the last outgoing request body — the only reliable way to see
+      // what the provider converter actually produced when a backend rejects a message.
+      ...(process.env.DEBUG_HTTP
+        ? {
+            fetch: (async (...args: Parameters<typeof fetch>) => {
+              try {
+                fsSync.writeFileSync('/tmp/rwr-wire.json', String(args[1]?.body ?? ''));
+              } catch {}
+              return fetch(...args);
+            }) as typeof fetch,
+          }
+        : {}),
     });
   }
   return provider;
 }
 
-/** Try to load graph tools; return null if graph.json is missing (graceful fallback to pure RAG). */
-function getAgentTools(): ReturnType<typeof buildAgentTools> | null {
-  if (agentTools !== undefined) return agentTools;
+/**
+ * Built-in graph tools + runtime plugins. Returns null if the registry cannot be built
+ * at all (graceful fallback to pure RAG). Re-queried per request so a hot-reloaded
+ * plugin takes effect without a restart.
+ */
+async function getAgentTools(): Promise<Record<string, Tool> | null> {
   try {
-    agentTools = buildAgentTools();
-    console.log('[chat] Agent graph tools enabled');
+    return await loadAgentTools();
   } catch (err) {
-    console.warn(`[chat] Graph tools unavailable (${(err as Error).message}), falling back to pure RAG`);
-    agentTools = null;
+    console.warn(`[chat] Agent tools unavailable (${(err as Error).message}), falling back to pure RAG`);
+    return null;
   }
-  return agentTools;
 }
 
 /** Char-based token estimate, matching the request-size guard divisor (chat.ts ~line 59).
@@ -364,7 +378,7 @@ export async function chatRoutes(app: FastifyInstance) {
         reply.raw.write(finishData + '\n');
         (reply.raw as unknown as { flush?: () => void }).flush?.();
       } else {
-        const tools = getAgentTools();
+        const tools = await getAgentTools();
         const result = streamText({
           model: getProvider().chatModel(config.llmModel),
           system: SYSTEM_PROMPT,
@@ -387,18 +401,39 @@ export async function chatRoutes(app: FastifyInstance) {
 
                   let changed = false;
                   const processed = messages.map((msg, i) => {
-                    // 1) Compress old tool results
-                    if (oldIdx.has(i) && Array.isArray(msg.content)) {
+                    // 1) Normalise + compress tool results.
+                    //    `output` is a tagged union — {type:'json'|'text'|…, value} — and the
+                    //    provider's converter switches on that tag. Replacing it with a bare
+                    //    string makes the tag undefined, the converter emits nothing, and the
+                    //    request goes out with a tool message that has no `content` at all
+                    //    (Volcengine: "missing `messages.content` parameter"). Truncated JSON
+                    //    is no longer valid JSON either, so compressed output becomes 'text'.
+                    if (msg.role === 'tool' && Array.isArray(msg.content)) {
                       const newContent = (msg.content as Record<string, unknown>[]).map((part) => {
                         if (part.type !== 'tool-result') return part;
-                        const output = part.output;
-                        const outStr = typeof output === 'string' ? output : JSON.stringify(output);
-                        if (outStr.length <= MAX_OUTPUT_CHARS) return part;
+
+                        const output = part.output as { type?: string; value?: unknown } | string | undefined;
+                        const value =
+                          output !== null && typeof output === 'object' && 'value' in output ? output.value : output;
+                        const asString = typeof value === 'string' ? value : JSON.stringify(value);
+
+                        // A tool that resolved to undefined would serialise to nothing at all.
+                        if (asString === undefined) {
+                          changed = true;
+                          return { ...part, output: { type: 'text', value: 'null' } };
+                        }
+
+                        if (!oldIdx.has(i) || asString.length <= MAX_OUTPUT_CHARS) return part;
+
                         changed = true;
                         return {
                           ...part,
-                          output: outStr.slice(0, MAX_OUTPUT_CHARS) +
-                            `\n…[compressed: ${outStr.length} → ${MAX_OUTPUT_CHARS} chars]`,
+                          output: {
+                            type: 'text',
+                            value:
+                              asString.slice(0, MAX_OUTPUT_CHARS) +
+                              `\n…[compressed: ${asString.length} → ${MAX_OUTPUT_CHARS} chars]`,
+                          },
                         };
                       });
                       return { ...msg, content: newContent };

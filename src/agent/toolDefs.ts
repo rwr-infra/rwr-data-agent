@@ -1,4 +1,5 @@
-import { tool } from 'ai';
+import * as fsSync from 'fs';
+import { tool, type Tool } from 'ai';
 import { z } from 'zod';
 import { config } from '../config/index.js';
 import {
@@ -11,7 +12,7 @@ import {
   getScriptSymbols,
   getNode,
 } from './tools.js';
-import { configureUpgradeIndex, lookupUpgrade } from './upgradeLookup.js';
+import { createToolHost, loadToolPlugins, type PluginEntry } from './plugins.js';
 
 let configured = false;
 
@@ -21,7 +22,7 @@ export function initGraphTools(): void {
   configured = true;
 }
 
-export function buildAgentTools() {
+export function buildBuiltinTools() {
   initGraphTools();
 
   return {
@@ -110,16 +111,77 @@ export function buildAgentTools() {
       execute: async ({ key }) => getNode(key),
     }),
 
-    lookupUpgrade: tool({
-      description:
-        'Look up Castling mod weapon upgrade items by Chinese name, English name, carry_item key, or weapon key. ' +
-        'Traces the full upgrade chain: localized name → upgrade carry_item → source weapons → upgraded (MOD3) weapons. ' +
-        'Use to answer "高性能战术发饰是给哪个武器用的" or "汉阳造的升级配件是什么". ' +
-        'Returns the carry_item key, pid name, source weapon keys, and upgraded weapon keys.',
-      inputSchema: z.object({
-        query: z.string().describe('The upgrade item name, carry_item key, or weapon key to search for'),
-      }),
-      execute: async ({ query }) => lookupUpgrade(query),
-    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Tool registry: built-ins + runtime plugins
+// ---------------------------------------------------------------------------
+
+let registry: Record<string, Tool> | null = null;
+let pluginEntries: PluginEntry[] = [];
+let builtinNames: string[] = [];
+let dirty = true;
+let watching = false;
+let reloadTimer: NodeJS.Timeout | null = null;
+
+/** Mark the registry stale; the next getAgentTools() rebuilds it. */
+export function invalidateToolRegistry(): void {
+  dirty = true;
+}
+
+/**
+ * Watch the plugin directory. Changes only flip the `dirty` flag — the actual reload
+ * happens when the next request asks for tools, so an in-flight stream is never
+ * swapped out from under itself.
+ */
+function watchPluginDir(): void {
+  if (watching || !config.toolsHotReload) return;
+  watching = true;
+  try {
+    fsSync.watch(config.toolsDir, { persistent: false }, () => {
+      if (reloadTimer) clearTimeout(reloadTimer);
+      reloadTimer = setTimeout(() => {
+        console.log('[plugin] Change detected — tools will reload on the next request');
+        dirty = true;
+      }, 300);
+    });
+  } catch {
+    // Directory does not exist (or the platform refuses to watch it) — plugins stay static.
+    watching = false;
+  }
+}
+
+/** Built-in tools plus every successfully loaded plugin. Rebuilds when marked dirty. */
+export async function getAgentTools(): Promise<Record<string, Tool>> {
+  if (registry && !dirty) return registry;
+
+  const builtin = buildBuiltinTools() as unknown as Record<string, Tool>;
+  builtinNames = Object.keys(builtin);
+
+  const { tools: plugins, entries } = await loadToolPlugins(createToolHost(), builtinNames);
+  pluginEntries = entries;
+  registry = { ...builtin, ...plugins };
+  dirty = false;
+
+  const ok = entries.filter((e) => !e.error);
+  if (ok.length > 0 || entries.length > 0) {
+    console.log(
+      `[plugin] ${ok.length} plugin tool(s) loaded from ${config.toolsDir}` +
+        (entries.length > ok.length ? ` (${entries.length - ok.length} failed)` : ''),
+    );
+  }
+
+  watchPluginDir();
+  return registry;
+}
+
+/** Snapshot for GET /v1/tools. Does not trigger a load. */
+export function getToolInventory(): { builtin: string[]; plugins: PluginEntry[]; toolsDir: string; hotReload: boolean } {
+  return {
+    builtin: builtinNames,
+    plugins: pluginEntries,
+    toolsDir: config.toolsDir,
+    hotReload: config.toolsHotReload,
   };
 }

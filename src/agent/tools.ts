@@ -256,8 +256,8 @@ export async function getScriptSymbols(file: string): Promise<ScriptSymbolsResul
     const absPath = path.resolve(dataRoot, file);
     if (!absPath.startsWith(dataRoot + path.sep)) throw new Error('Path traversal blocked');
     if (fsSync.existsSync(absPath)) {
-      const { extractScriptSymbols } = await import('./graphBuilder.js');
-      const fresh = await extractScriptSymbols(absPath);
+      const { extractScriptSymbolsFromFile } = await import('./graphBuilder.js');
+      const fresh = await extractScriptSymbolsFromFile(absPath);
       return { file, total: fresh.length, symbols: fresh };
     }
   }

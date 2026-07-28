@@ -1,143 +1,76 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { extractScriptSymbols, summarizeSymbols } from './asSymbols.js';
 import type { StructuredDocument } from '../types/index.js';
 
-interface ParsedSoldier {
-  key: string;
-  stats: Record<string, string | number>;
-  weapons: string[];
-  behaviors: string[];
+/**
+ * AngelScript files become one `script_chunk` document each.
+ *
+ * `structuredDocToRWRDocument` only puts the first 500 chars of `raw_text` into the
+ * searchable content, so a long script would otherwise be almost invisible to
+ * full-text search. The symbol summary goes into `description` + `flat_attributes`
+ * instead — both of which are rendered into the content in full — which is what makes
+ * "which script defines OnPlayerSpawn" and "what includes gamemode_campaign.as"
+ * answerable without the model first guessing the file name.
+ */
+
+/** Cap per attribute so one huge script cannot dominate the index. */
+const MAX_NAMES = 120;
+
+function joinNames(names: string[]): string | undefined {
+  if (names.length === 0) return undefined;
+  const shown = names.slice(0, MAX_NAMES);
+  const suffix = names.length > MAX_NAMES ? `, …+${names.length - MAX_NAMES} more` : '';
+  return shown.join(', ') + suffix;
 }
 
-function extractSoldierBlocks(text: string): ParsedSoldier[] {
-  const blocks: ParsedSoldier[] = [];
-  const blockRegex = /<(\w+)>\s*([\s\S]*?)\s*<\/\w+>/g;
-  let match;
-  while ((match = blockRegex.exec(text)) !== null) {
-    const key = match[1];
-    const body = match[2];
-    const stats: Record<string, string | number> = {};
-    const weapons: string[] = [];
-    const behaviors: string[] = [];
-
-    const lines = body.split('\n');
-    let inBehavior = false;
-    let behaviorLines: string[] = [];
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('//')) continue;
-
-      if (trimmed === 'behavior {') {
-        inBehavior = true;
-        behaviorLines = [];
-        continue;
-      }
-      if (inBehavior) {
-        if (trimmed === '}') {
-          behaviors.push(behaviorLines.join('\n'));
-          inBehavior = false;
-        } else {
-          behaviorLines.push(trimmed);
-        }
-        continue;
-      }
-
-      const parts = trimmed.split(/\s+/);
-      if (parts.length >= 2) {
-        const k = parts[0];
-        const v = parts[1];
-        if (k === 'weapon') {
-          weapons.push(v);
-        } else {
-          const num = Number(v);
-          stats[k] = Number.isNaN(num) ? v : num;
-        }
-      }
-    }
-
-    blocks.push({ key, stats, weapons, behaviors });
-  }
-  return blocks;
-}
-
-function describeSoldierStats(stats: Record<string, string | number>): string {
-  const parts: string[] = [];
-
-  const xp = stats.xp;
-  if (xp !== undefined) parts.push(`This soldier requires ${xp} experience points.`);
-
-  const health = stats.health;
-  if (health !== undefined) parts.push(`Its base health is ${health}.`);
-
-  const accuracy = stats.accuracy;
-  if (accuracy !== undefined) parts.push(`Its accuracy rating is ${accuracy}.`);
-
-  const shooting = stats.shooting;
-  if (shooting !== undefined) parts.push(`Its shooting skill is ${shooting}.`);
-
-  const running = stats.running;
-  if (running !== undefined) parts.push(`Its running speed factor is ${running}.`);
-
-  const detecting = stats.detecting;
-  if (detecting !== undefined) parts.push(`Its detection skill is ${detecting}.`);
-
-  const stamina = stats.stamina;
-  if (stamina !== undefined) parts.push(`Its stamina is ${stamina}.`);
-
-  const carrying = stats.carrying;
-  if (carrying !== undefined) parts.push(`Its carrying capacity factor is ${carrying}.`);
-
+function describe(base: string, s: ReturnType<typeof summarizeSymbols>): string {
+  const parts = [`AngelScript file: ${base}.`];
+  if (s.classes.length) parts.push(`Defines ${s.classes.length === 1 ? 'class' : 'classes'} ${s.classes.join(', ')}.`);
+  if (s.namespaces.length) parts.push(`Namespaces: ${s.namespaces.join(', ')}.`);
+  if (s.functions.length) parts.push(`${s.functions.length} function${s.functions.length === 1 ? '' : 's'}.`);
+  if (s.includes.length) parts.push(`Includes ${s.includes.length} file${s.includes.length === 1 ? '' : 's'}.`);
   return parts.join(' ');
-}
-
-function soldierToRawText(s: ParsedSoldier): string {
-  const rawLines: string[] = [`Soldier class: ${s.key}`];
-  if (Object.keys(s.stats).length) {
-    rawLines.push('Stats:');
-    for (const [k, v] of Object.entries(s.stats)) {
-      rawLines.push(`  ${k}: ${v}`);
-    }
-  }
-  if (s.weapons.length) {
-    rawLines.push(`Weapons: ${s.weapons.join(', ')}`);
-  }
-  if (s.behaviors.length) {
-    rawLines.push(`Behaviors:\n${s.behaviors.join('\n')}`);
-  }
-  return rawLines.join('\n');
 }
 
 export async function parseAngelScriptFile(filePath: string, modName: string): Promise<StructuredDocument[]> {
   const content = await fs.readFile(filePath, 'utf-8');
   const base = path.basename(filePath, '.as');
+  const symbols = extractScriptSymbols(content, path.basename(filePath));
+  const summary = summarizeSymbols(symbols);
 
-  const soldiers = extractSoldierBlocks(content);
-  if (soldiers.length > 0) {
-    return soldiers.map((s) => ({
-      type: 'soldier' as const,
-      key: s.key,
-      label: 'Soldier',
-      source_file: filePath,
-      mod_name: modName,
-      description: describeSoldierStats(s.stats),
-      raw_text: soldierToRawText(s),
-      data: { stats: s.stats, weapons: s.weapons, behaviors: s.behaviors },
-      flat_attributes: { ...s.stats, weapons: s.weapons.join(', ') },
-      metadata: { ...s.stats, weapons: s.weapons },
-    }));
+  const flat: Record<string, unknown> = { file: base };
+  const attrs: [string, string[]][] = [
+    ['classes', summary.classes],
+    ['namespaces', summary.namespaces],
+    ['functions', summary.functions],
+    ['includes', summary.includes],
+    ['enums', summary.enums],
+    ['funcdefs', summary.funcdefs],
+    ['properties', summary.properties],
+  ];
+  for (const [key, names] of attrs) {
+    const joined = joinNames(names);
+    if (joined) flat[key] = joined;
   }
 
-  return [{
-    type: 'script_chunk' as const,
-    key: base,
-    label: 'AngelScript',
-    source_file: filePath,
-    mod_name: modName,
-    description: `AngelScript file: ${base}`,
-    raw_text: content,
-    data: { content },
-    flat_attributes: { file: base },
-    metadata: {},
-  }];
+  return [
+    {
+      type: 'script_chunk' as const,
+      key: base,
+      label: 'AngelScript',
+      source_file: filePath,
+      mod_name: modName,
+      description: describe(base, summary),
+      raw_text: content,
+      data: { content, symbols },
+      flat_attributes: flat,
+      metadata: {
+        symbol_count: symbols.length,
+        classes: summary.classes,
+        functions: summary.functions,
+        includes: summary.includes,
+      },
+    },
+  ];
 }

@@ -90,6 +90,19 @@ Lists the packages present in the built index.
 }
 ```
 
+### GET /v1/tools
+
+Lists the tools the model can call — seven built-ins plus anything loaded from the plugin directory, including per-file load errors.
+
+```json
+{
+  "builtin": ["getInheritanceChain", "findReferences", "…"],
+  "plugins": [{ "name": "lookupUpgrade", "file": "lookup-upgrade.js", "description": "…", "loadedAt": "…" }],
+  "toolsDir": "/app/tools.d",
+  "hotReload": true
+}
+```
+
 ### GET /v1/models
 
 Returns available models.
@@ -133,8 +146,9 @@ Local Search        (MiniSearch over key / name / i18n names / content, optional
 Prompt Builder      (enforced system prompt + retrieved context)
   |
   v
-LLM Generation      (+ 7 graph tools the model can call: inheritance, references,
-                     transform chains, source reading, file listing, script symbols)
+LLM Generation      (+ 7 built-in graph tools the model can call — inheritance,
+                     references, transform chains, source reading, file listing,
+                     script symbols — plus any runtime plugins)
 ```
 
 ### Index build
@@ -148,12 +162,44 @@ DATA_DIR ──discover packages──▶ per package: parse files + resolve lan
                   output/script-symbols.json
 ```
 
+## Tool Plugins
+
+Beyond the seven built-in graph tools, you can drop your own tools into `./tools.d` (configurable via `TOOLS_DIR`). They are picked up at startup and, outside production, reloaded when the file changes — no restart.
+
+A plugin is a plain ESM **`.js`** file (not `.ts` — production runs compiled output with no transpiler) whose default export returns tool specs:
+
+```js
+/** @type {import('../types/tool-plugin.js').PluginFactory} */
+export default function register(host) {
+  return [{
+    name: 'findByFaction',
+    description: 'List weapons belonging to a faction.',
+    inputSchema: {
+      type: 'object',
+      properties: { faction: { type: 'string' } },
+      required: ['faction'],
+    },
+    async execute({ faction }) {
+      return host.search('weapon', { faction, type: 'weapon' }, 20);
+    },
+  }];
+}
+```
+
+`host` exposes the index paths, `search()`, and the graph primitives (`getNode`, `getInheritanceChain`, `readSource`, …) — see [types/tool-plugin.d.ts](./types/tool-plugin.d.ts). Schemas are JSON Schema, so plugins carry no dependency on the server's validation library.
+
+A broken plugin is skipped with its error reported on `GET /v1/tools`; the rest keep working. A plugin cannot take over a built-in tool's name.
+
+`tools.d/lookup-upgrade.js` ships as a working example (Castling weapon upgrade chains).
+
+> ⚠️ **Plugins run inside the server process with its full privileges** — filesystem, network, environment. Only put files there that you wrote or reviewed. This is not a sandbox, and the plugin directory must never be wired to untrusted uploads.
+
 ## Supported File Types
 
 | Extension | Type | Parser |
 |-----------|------|--------|
 | `.weapon`, `.projectile`, `.carry_item`, `.call`, `.character`, `.xml`, … | XML | Tag-driven parser with inheritance resolution |
-| `.as` | AngelScript | Function/class/include symbol extractor |
+| `.as` | AngelScript | Symbol scanner — classes, functions (incl. multi-line signatures and default args), members, `enum`/`namespace`/`funcdef`, `#include` |
 | `.ai`, `.resources`, `.name`, `.text_lines` | Plain text | Fallback text |
 
 `models/` and `maps/` subtrees are skipped.
@@ -179,11 +225,11 @@ npx tsc --noEmit        # typecheck
 docker compose up -d --build
 ```
 
-Mounts `./data` read-only at `/app/data` and persists the generated indexes in `./output`. Configuration comes from `.env`.
+Mounts `./data` and `./tools.d` read-only at `/app/data` and `/app/tools.d`, and persists the generated indexes in `./output`. Configuration comes from `.env`.
 
 ### Vercel
 
-`vercel.json` bundles `dist/`, `public/` and `output/` into the serverless function. The data directory is not shipped, so the index must be built and committed/generated before deploy — the function only loads it.
+`vercel.json` bundles `dist/`, `public/`, `output/` and `tools.d/` into the serverless function. The data directory is not shipped, so the index must be built and committed/generated before deploy — the function only loads it. Plugins load once per cold start; hot reload is off.
 
 ## Configuration
 
@@ -197,6 +243,8 @@ Mounts `./data` read-only at `/app/data` and persists the generated indexes in `
 | `DATA_DIR` | `./data` | RWR data root (single package or directory of packages) |
 | `OUTPUT_DIR` | `./output` | Where the generated indexes live |
 | `AUTO_BUILD_INDEX` | `true` | Build/refresh the index at startup |
+| `TOOLS_DIR` | `./tools.d` | Tool plugin directory (optional) |
+| `TOOLS_HOT_RELOAD` | on outside production | Reload changed plugins without a restart |
 | `PORT` | `3000` | HTTP port |
 
 ## License

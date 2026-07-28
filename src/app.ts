@@ -7,6 +7,7 @@ import { chatRoutes } from './api/routes/chat.js';
 import { modelsRoutes } from './api/routes/models.js';
 import { healthRoutes } from './api/routes/health.js';
 import { packagesRoutes } from './api/routes/packages.js';
+import { toolsRoutes } from './api/routes/tools.js';
 import { shutdownLangfuse } from './observability/langfuse.js';
 import { ensureIndexes } from './indexing/bootstrap.js';
 import { config } from './config/index.js';
@@ -30,6 +31,7 @@ export async function buildApp() {
   await app.register(chatRoutes, { prefix: '/v1' });
   await app.register(modelsRoutes, { prefix: '/v1' });
   await app.register(packagesRoutes, { prefix: '/v1' });
+  await app.register(toolsRoutes, { prefix: '/v1' });
   await app.register(healthRoutes);
 
   if (!isVercel) {

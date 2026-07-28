@@ -93,7 +93,7 @@ Node `file` paths are relative to the **data root** (not the package dir), so on
 | `next_in_chain` | Weapon mode switching | `<next_in_chain key="m4_gl"/>` |
 | `references` | Generic weapon file include | `<weapon file="..."/>` inside other elements |
 
-**Tool functions** (`src/agent/tools.ts`, in-process, no external service):
+**Built-in tool functions** (`src/agent/tools.ts`, in-process, no external service):
 - `getInheritanceChain(key)` — full parent chain with depth
 - `findReferences(key)` — reverse lookup: who points to this entity
 - `getTransformChain(key)` — armor/item degradation layers
@@ -101,9 +101,35 @@ Node `file` paths are relative to the **data root** (not the package dir), so on
 - `listFiles(pattern, type?)` — glob search over indexed nodes
 - `getScriptSymbols(file)` — AngelScript signatures
 - `getNode(key)` — basic entity lookup
-- `lookupUpgrade(query)` — Castling mod weapon upgrade chain: localized name → carry_item → source/upgraded weapons
 
-Wrapped as AI SDK `tool()` definitions in `toolDefs.ts` and passed to `streamText({ tools, stopWhen: stepCountIs(5) })`. Tool-call/result events stream to the frontend as `tool-step` NDJSON lines.
+Wrapped as AI SDK `tool()` definitions in `toolDefs.ts` and passed to `streamText({ tools, stopWhen: stepCountIs(100) })`. Tool-call/result events stream to the frontend as `tool-step` NDJSON lines.
+
+## Tool Plugins (src/agent/plugins.ts, TOOLS_DIR)
+
+`getAgentTools()` is an async registry: built-ins ⊕ plugins discovered in `TOOLS_DIR` (default `./tools.d`). Mod-specific tools belong here, not in the core set — `tools.d/lookup-upgrade.js` (Castling weapon upgrade chains) is the reference implementation.
+
+A plugin is a plain ESM **`.js`** file — not `.ts`, because production runs `node dist/…` with no transpiler in the loader chain. Its default export is `(host) => PluginToolSpec[]`:
+
+```js
+/** @type {import('../types/tool-plugin.js').PluginFactory} */
+export default function register(host) {
+  return [{
+    name: 'myTool',                                  // may not shadow a built-in
+    description: 'What the model should use it for.',
+    inputSchema: { type: 'object', properties: { q: { type: 'string' } }, required: ['q'] },
+    async execute({ q }) { return host.search(q); },
+  }];
+}
+```
+
+- **JSON Schema, not zod** — specs are wrapped with `dynamicTool()` + `jsonSchema()`, so plugin files carry no dependency on the host's zod version. `types/tool-plugin.d.ts` gives JSDoc-based autocompletion.
+- **`host`** (`createToolHost()`) injects `config` paths, `search()`, and the raw graph primitives — a plugin never imports internal modules.
+- **Failure is isolated.** A load-time throw or an execute-time throw is logged, recorded on the `/v1/tools` entry, and skipped; other tools are unaffected. An execute error is returned to the model as `{ error }` rather than breaking the stream.
+- **No shadowing.** A plugin whose `name` matches a built-in is rejected, so an external file cannot hijack core behaviour.
+- **Hot reload** (`TOOLS_HOT_RELOAD`, defaults on outside production / off on Vercel): `fs.watch` + 300ms debounce sets a dirty flag; the reload itself happens when the next request asks for tools, so an in-flight stream is never swapped. It works via `import(url + '?v=<mtime>')` — the ESM module cache cannot be purged, so each reload leaks the previous module. That is why it defaults off in production.
+- **`GET /v1/tools`** reports `{ builtin, plugins[], toolsDir, hotReload }` with per-file errors. Hot reload without this is undebuggable.
+
+⚠️ **Trust model.** Plugins are `import()`ed into the server process and run with its full privileges — filesystem, network, `process.env`. This is fine for files an operator placed themselves. It is **not** a sandbox: never wire plugin loading to untrusted uploads. That would require `worker_threads` isolation, which this loader deliberately does not implement.
 
 ## Parsers (src/ingestion/)
 
@@ -112,6 +138,16 @@ Wrapped as AI SDK `tool()` definitions in `toolDefs.ts` and passed to `streamTex
 - `i18n.ts` loads `<translation><text key="…" text="…"/>` files from a package's `languages/<lang>/` dirs, following `file=` indirections.
 
 Parsed `StructuredDocument`s feed the index builder directly — there is no intermediate `extracted-documents.json` stage any more.
+
+### AngelScript (`asSymbols.ts`)
+
+One implementation shared by `asParser.ts` (documents) and `graphBuilder.ts` (`script-symbols.json`). A line/brace scanner over comment- and string-blanked source — deliberately not a parser. Handles multi-line signatures, default-valued parameters, class members and ctor/dtor, `enum` / `namespace` / `funcdef`, and tracks the enclosing container as `ScriptSymbol.parent`.
+
+Every `.as` file becomes exactly **one** `script_chunk` document. Because `structuredDocToRWRDocument` only feeds `raw_text.slice(0, 500)` into the searchable content, the symbol summary is written into `description` + `flat_attributes` (`classes`, `functions`, `includes`, `enums`, `funcdefs`, `properties`, capped at 120 names each) — those are rendered into the content in full. That is what makes "which script defines X" / "what includes Y" answerable by search instead of only via `getScriptSymbols`.
+
+**Historical trap:** an `extractSoldierBlocks` heuristic used to match `<tag>…</tag>` inside `.as`. It was actually matching AngelScript generics (`array<string>`, `dictionary`), emitting junk `soldier` documents keyed `string`/`float`/`int`, and returning early so the entire script body never reached the index — 16 of 108 files were invisible. Real soldier data comes from faction XML. Never reintroduce tag-shaped matching over `.as`.
+
+**On tree-sitter:** worth it only when call graphs, cross-file symbol resolution, or `#include` dependency graphs are needed. No AngelScript grammar is published to npm ([Relrin/tree-sitter-angelscript](https://github.com/Relrin/tree-sitter-angelscript) is the most complete but must be cloned and built), so adopting it means vendoring a self-built `.wasm` for `web-tree-sitter`. The migration surface is one function: `extractScriptSymbols(source, fileBase)`.
 
 ## Architecture
 
@@ -127,6 +163,7 @@ Parsed `StructuredDocument`s feed the index builder directly — there is no int
 | `POST /v1/chat/completions` | Main endpoint. Extra fields: `mod`, `response_format` |
 | `GET /v1/models` | Model list |
 | `GET /v1/packages` | Packages in the current index (`name`, `displayName`, `count`) |
+| `GET /v1/tools` | Tool inventory: built-ins, plugin entries with per-file errors, `toolsDir`, `hotReload` |
 | `GET /health` | `{status, index:{ready, documents, packages, builtAt, reason?}}` — no external check |
 
 ### Request pipeline (src/api/routes/chat.ts)
@@ -156,6 +193,8 @@ Svelte 5 + Vite + Tailwind 4 + daisyUI in `web/`, building into `public/` — tr
 | `OUTPUT_DIR` | `./output` | |
 | `GRAPH_PATH` / `SEARCH_INDEX_PATH` | `<OUTPUT_DIR>/…` | Individual overrides |
 | `AUTO_BUILD_INDEX` | `true` | |
+| `TOOLS_DIR` | `./tools.d` | Runtime tool plugins; skipped if absent |
+| `TOOLS_HOT_RELOAD` | on outside prod, off on Vercel | Watch `TOOLS_DIR` and reload on the next request |
 | `PORT` | `3000` | |
 | `MAX_CONTEXT_TOKENS` | `500000` | |
 | `LLM_MAX_OUTPUT_TOKENS` | `32768` | Reasoning + answer share this budget |
@@ -166,10 +205,10 @@ Svelte 5 + Vite + Tailwind 4 + daisyUI in `web/`, building into `public/` — tr
 ## Deployment
 
 ### Docker
-`docker compose up -d --build` — a single `app` service. `./data` mounts read-only at `/app/data`; `./output` is a writable volume so restarts skip the rebuild.
+`docker compose up -d --build` — a single `app` service. `./data` mounts read-only at `/app/data`; `./output` is a writable volume so restarts skip the rebuild; `./tools.d` mounts read-only at `/app/tools.d`.
 
 ### Vercel
-`vercel.json` bundles `dist/**`, `public/**`, `output/**` into the function. The data directory is not uploaded, so the index must exist before deploy — `ensureIndexes()` will only load, never build, when `VERCEL` is set.
+`vercel.json` bundles `dist/**`, `public/**`, `output/**`, `tools.d/**` into the function. The data directory is not uploaded, so the index must exist before deploy — `ensureIndexes()` will only load, never build, when `VERCEL` is set. Plugins load once per cold start; hot reload is off.
 
 ## Testing
 

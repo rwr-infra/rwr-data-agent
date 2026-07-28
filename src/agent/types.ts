@@ -21,12 +21,24 @@ export interface GraphEdge {
   context?: string;
 }
 
+export type ScriptSymbolKind =
+  | 'function'
+  | 'class'
+  | 'include'
+  | 'hook'
+  | 'enum'
+  | 'namespace'
+  | 'funcdef'
+  | 'property';
+
 export interface ScriptSymbol {
   file: string;
   name: string;
   signature: string;
-  kind: 'function' | 'class' | 'include' | 'hook';
+  kind: ScriptSymbolKind;
   line: number;
+  /** Enclosing class/namespace, when the symbol is a member. */
+  parent?: string;
 }
 
 export interface GraphPackage {
