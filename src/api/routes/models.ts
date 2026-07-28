@@ -1,8 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import { config } from '../../config/index.js';
 
+// eslint-disable-next-line @typescript-eslint/require-await -- Fastify plugin contract: register() awaits the returned promise, so `async` is the interface here.
 export async function modelsRoutes(app: FastifyInstance) {
-  app.get('/models', async () => {
+  app.get('/models', () => {
     return {
       object: 'list',
       data: [

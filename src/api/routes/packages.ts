@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { getIndexMeta, readIndexMeta } from '../../retrieval/localSearch.js';
 import { config } from '../../config/index.js';
 
+// eslint-disable-next-line @typescript-eslint/require-await -- Fastify plugin contract: register() awaits the returned promise, so `async` is the interface here.
 export async function packagesRoutes(app: FastifyInstance) {
   app.get('/packages', async () => {
     // Served from the loaded index when the bootstrap warmed it; otherwise read the header.

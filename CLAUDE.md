@@ -12,7 +12,7 @@ An AI agent over *Running With Rifles* game data: a Fastify server exposing an *
 
 - **ESM only** (`"type": "module"`, `NodeNext` resolution). All relative imports use `.js` extensions even from `.ts` source. The `~/*` path alias is mapped in tsconfig but **unused in practice** — follow the relative-import style.
 - Strict TypeScript. No test framework; correctness is checked via the eval harness (`npm run eval`) and curl smoke tests.
-- ⚠️ `npm run lint` is broken: ESLint 10 requires an `eslint.config.js`, and this repo has none. Use `npx tsc --noEmit` as the real check.
+- `npm run lint` (ESLint 10 flat config, `eslint.config.js`) and `npm run typecheck` (`tsc --noEmit`) are both green and both required. Lint covers `src/` with **type-aware** rules (`recommendedTypeChecked`) plus `api/`, `types/`, `tools.d/` at the syntax layer only — `api/` imports from the gitignored `dist/`, so type-aware rules there would depend on having built first. `web/` has its own Svelte toolchain and is out of scope.
 
 ## Getting started
 
@@ -35,7 +35,14 @@ npm start              # node dist/api/server.js
 npm run build:index    # explicit index rebuild (also runs automatically at startup)
 npm run validate:index # smoke-test the graph tools against the built index
 npm run eval           # retrieval eval harness → src/eval/run.ts
+
+npm run lint           # eslint . --max-warnings 0
+npm run lint:fix       # same, with --fix
+npm run typecheck      # tsc --noEmit
+npm run format         # Prettier over src/ api/ types/ tools.d/
 ```
+
+⚠️ ESLint's ignore list is generated from `.gitignore` via `@eslint/compat`'s `includeIgnoreFile()` — **add new build/data directories to `.gitignore`, not to `eslint.config.js`**. The `web/` entry is the one manual addition (it is version-controlled). Directory patterns must keep their trailing slash: `data/` prunes the whole tree, `data/**` does not and makes ESLint walk ~24k game-data files.
 
 `build:index` flags: `-s/--source <dir>` (default `DATA_DIR`), `-o/--output <dir>` (default `OUTPUT_DIR`), `--only <pkg,pkg>` to restrict to specific packages.
 

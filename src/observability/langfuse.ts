@@ -1,5 +1,4 @@
-import { trace, SpanStatusCode, type Span } from '@opentelemetry/api';
-import { config } from '../config/index.js';
+import { trace } from '@opentelemetry/api';
 
 const TRACER_NAME = 'rwr-data-agent';
 
@@ -11,7 +10,9 @@ export async function flushLangfuse(): Promise<void> {
   try {
     const { langfuseSpanProcessor } = await import('../instrumentation.js');
     await langfuseSpanProcessor.forceFlush();
-  } catch {}
+  } catch {
+    // Tracing is best-effort; a flush failure must never fail the request.
+  }
 }
 
 export async function shutdownLangfuse(): Promise<void> {
@@ -19,5 +20,7 @@ export async function shutdownLangfuse(): Promise<void> {
     const { langfuseSpanProcessor } = await import('../instrumentation.js');
     await langfuseSpanProcessor.forceFlush();
     await langfuseSpanProcessor.shutdown();
-  } catch {}
+  } catch {
+    // Tracing is best-effort; a shutdown failure must never block process exit.
+  }
 }

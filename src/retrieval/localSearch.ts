@@ -192,7 +192,9 @@ async function buildPackageEntries(root: string, pkg: DataPackage): Promise<Inde
         try {
           const parsed = await parseFile(file, pkg.name);
           docs.push(...parsed);
-        } catch {}
+        } catch {
+          // A single unparseable game file must not abort the package index build.
+        }
       }),
     ),
   );
@@ -206,7 +208,7 @@ async function buildPackageEntries(root: string, pkg: DataPackage): Promise<Inde
 
   return docs.map((doc, i) => {
     const rwr = structuredDocToRWRDocument(doc);
-    const absFile = (rwr.metadata.file_path as string) ?? doc.source_file;
+    const absFile = rwr.metadata.file_path ?? doc.source_file;
     return {
       id: `${pkg.name}:${doc.type}:${doc.key}:${i}`,
       key: doc.key,

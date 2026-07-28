@@ -12,6 +12,35 @@ const parser = new XMLParser({
   alwaysCreateTextNode: false,
 });
 
+/** Narrow an XML node to an indexable object, or undefined if it is a leaf. */
+function asNode(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined;
+}
+
+/**
+ * fast-xml-parser types `parse()` as `any`, which leaks unchecked member access
+ * into every call site. Narrow it once, here — the parse result is always a
+ * plain object tree, and the rest of this file already treats nodes as unknown.
+ */
+function parseXml(content: string): Record<string, unknown> {
+  const parsed: unknown = parser.parse(content);
+  return asNode(parsed) ?? {};
+}
+
+/**
+ * Render an XML node value as text. With `parseAttributeValue: false` every
+ * attribute comes back as a string, so the object branch is unreachable in
+ * practice — it exists so a node can never land in the index as
+ * '[object Object]'.
+ */
+function toText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value);
+  }
+  return '';
+}
+
 // ---------------------------------------------------------------------------
 // Inheritance resolution: RWR XML files use file="parent.file" to inherit
 // from a parent. This resolves the chain recursively and merges content.
@@ -55,8 +84,8 @@ async function expandCallIncludes(
       } else {
         try {
           const content = await fs.readFile(refPath, 'utf-8');
-          const parsed = parser.parse(content);
-          includedCalls = ensureArray(parsed.calls?.call);
+          const parsed = parseXml(content);
+          includedCalls = ensureArray(asNode(parsed['calls'])?.['call']);
           callIncludeCache.set(refPath, includedCalls);
         } catch {
           callIncludeCache.set(refPath, []);
@@ -131,8 +160,7 @@ async function resolveInheritance(
   } else {
     try {
       const content = await fs.readFile(parentPath, 'utf-8');
-      const parsed = parser.parse(content);
-      parentParsed = extractRootElement(parsed);
+      parentParsed = extractRootElement(parseXml(content));
       parentFileCache.set(parentPath, parentParsed);
     } catch {
       parentFileCache.set(parentPath, null);
@@ -191,7 +219,7 @@ function extractText(obj: unknown, depth = 0): string {
         const text = String(v).trim();
         if (text) lines.push(text);
       } else if (k.startsWith('@_')) {
-        lines.push(`${k.slice(2)}: ${v}`);
+        lines.push(`${k.slice(2)}: ${toText(v)}`);
       } else {
         const childText = extractText(v, depth + 1);
         if (childText) {
@@ -478,7 +506,7 @@ function extractDeathProtection(resolved?: Record<string, unknown>): DeathProtec
           'melee';
         results.push({
           source: sourceLabel,
-          output: String(output),
+          output: toText(output),
           consumesItem: m['@_consumes_item'] === '1',
         });
       }
@@ -587,23 +615,6 @@ function describeCarryItem(attrs: Record<string, unknown>, resolved?: Record<str
   return parts.length > 0 ? parts.join(' ') : '';
 }
 
-// ---------------------------------------------------------------------------
-// Build final document content: natural language description + raw data
-// ---------------------------------------------------------------------------
-function buildContent(
-  description: string,
-  rawData: string
-): string {
-  const sections: string[] = [];
-  if (description.trim()) {
-    sections.push(`Description: ${description.trim()}`);
-  }
-  if (rawData.trim()) {
-    sections.push(`Raw Data:\n${rawData.trim()}`);
-  }
-  return sections.join('\n\n');
-}
-
 function buildMetadataTags(
   type: DocumentType,
   key: string,
@@ -621,7 +632,7 @@ function buildMetadataTags(
   for (const [metaKey, tagLabel] of tagMappings) {
     const value = extraMetadata[metaKey];
     if (value !== undefined && value !== null && value !== '') {
-      tags.push(`[${tagLabel}: ${value}]`);
+      tags.push(`[${tagLabel}: ${toText(value)}]`);
     }
   }
 
@@ -669,7 +680,7 @@ function formatFlatAttributes(attrs: Record<string, unknown>): string {
       if (Array.isArray(v)) {
         lines.push(`${k}: ${v.join(', ')}`);
       } else {
-        lines.push(`${k}: ${v}`);
+        lines.push(`${k}: ${toText(v)}`);
       }
     }
   }
@@ -729,13 +740,13 @@ export function structuredDocToRWRDocument(doc: StructuredDocument): RWRDocument
 // ---------------------------------------------------------------------------
 export async function parseCallFile(filePath: string, modName: string): Promise<StructuredDocument[]> {
   const content = await fs.readFile(filePath, 'utf-8');
-  const parsed = parser.parse(content);
-  const rawCalls = ensureArray(parsed.calls?.call);
+  const parsed = parseXml(content);
+  const rawCalls = ensureArray(asNode(parsed['calls'])?.['call']);
   const sourceDir = path.dirname(filePath);
   const calls = await expandCallIncludes(rawCalls, sourceDir);
 
   return calls.map((c: unknown, i: number) => {
-    const attrs = (c ?? {}) as Record<string, unknown>;
+    const attrs = asNode(c) ?? {};
     const flatAttrs = flattenAttributes(c);
     const key = extractKey(attrs, `call_${i}`);
     const description = describeCall(flatAttrs);
@@ -752,16 +763,16 @@ export async function parseCallFile(filePath: string, modName: string): Promise<
 // ---------------------------------------------------------------------------
 export async function parseFactionXml(filePath: string, modName: string): Promise<StructuredDocument[]> {
   const content = await fs.readFile(filePath, 'utf-8');
-  const parsed = parser.parse(content);
+  const parsed = parseXml(content);
   const docs: StructuredDocument[] = [];
 
-  if (parsed.faction) {
-    const factionAttrs = parsed.faction as Record<string, unknown>;
+  const factionAttrs = asNode(parsed['faction']);
+  if (factionAttrs) {
     const factionName = extractKey(factionAttrs, path.basename(filePath, '.xml'));
 
     const soldiers = ensureArray(factionAttrs['soldier']);
     for (const s of soldiers) {
-      const sAttrs = (s ?? {}) as Record<string, unknown>;
+      const sAttrs = asNode(s) ?? {};
       const flatAttrs = flattenAttributes(s);
       const soldierName = extractKey(sAttrs, 'unknown_soldier');
       const description = describeSoldier(flatAttrs);
@@ -775,18 +786,20 @@ export async function parseFactionXml(filePath: string, modName: string): Promis
     }
 
     if (soldiers.length === 0) {
-      const flatAttrs = flattenAttributes(parsed.faction);
+      const flatAttrs = flattenAttributes(factionAttrs);
       const description = describeSoldier(flatAttrs);
-      const raw = extractText(parsed.faction, 0);
-      docs.push(makeStructuredDoc('faction', factionName, 'Faction', description, raw, filePath, modName, parsed.faction, flatAttrs));
+      const raw = extractText(factionAttrs, 0);
+      docs.push(makeStructuredDoc('faction', factionName, 'Faction', description, raw, filePath, modName, factionAttrs, flatAttrs));
     }
   }
 
-  if (parsed.factions?.faction) {
-    const factions = ensureArray(parsed.factions.faction);
+  const factionRefs = asNode(parsed['factions'])?.['faction'];
+  if (factionRefs) {
+    const factions = ensureArray(factionRefs);
     for (const f of factions) {
-      const fAttrs = (f ?? {}) as Record<string, unknown>;
-      const factionFile = (fAttrs['@_file'] ?? 'unknown') as string;
+      const fAttrs = asNode(f) ?? {};
+      const rawFile = fAttrs['@_file'];
+      const factionFile = typeof rawFile === 'string' ? rawFile : 'unknown';
       docs.push(makeStructuredDoc('faction', factionFile, 'Faction reference', '', `file: ${factionFile}`, filePath, modName, f, flattenAttributes(f)));
     }
   }
@@ -799,7 +812,7 @@ export async function parseFactionXml(filePath: string, modName: string): Promis
 // ---------------------------------------------------------------------------
 export async function parseCharacterFile(filePath: string, modName: string): Promise<StructuredDocument[]> {
   const content = await fs.readFile(filePath, 'utf-8');
-  const parsed = parser.parse(content);
+  const parsed = parseXml(content);
   const flatAttrs = flattenAttributes(parsed);
   const description = describeCharacter(flatAttrs);
   const raw = extractText(parsed, 0);
@@ -812,13 +825,13 @@ export async function parseCharacterFile(filePath: string, modName: string): Pro
 // ---------------------------------------------------------------------------
 export async function parseCarryItemFile(filePath: string, modName: string): Promise<StructuredDocument[]> {
   const content = await fs.readFile(filePath, 'utf-8');
-  const parsed = parser.parse(content);
-  const carryItems = ensureArray(parsed.carry_items?.carry_item);
+  const parsed = parseXml(content);
+  const carryItems = ensureArray(asNode(parsed['carry_items'])?.['carry_item']);
   const sourceDir = path.dirname(filePath);
 
   const docs: StructuredDocument[] = [];
   for (let i = 0; i < carryItems.length; i++) {
-    const ci = (carryItems[i] ?? {}) as Record<string, unknown>;
+    const ci = asNode(carryItems[i]) ?? {};
     const resolved = await resolveInheritance(ci, sourceDir);
     const flatAttrs = flattenAttributes(resolved);
     const key = extractKey(ci, `carry_item_${i}`);
@@ -847,20 +860,20 @@ export async function parseXmlFile(filePath: string, modName: string): Promise<S
   }
 
   const content = await fs.readFile(filePath, 'utf-8');
-  const parsed = parser.parse(content);
+  const parsed = parseXml(content);
 
-  if (parsed.calls?.call) {
+  if (asNode(parsed['calls'])?.['call']) {
     return parseCallFile(filePath, modName);
   }
 
-  if (parsed.faction || parsed.factions) {
+  if (parsed['faction'] || parsed['factions']) {
     return parseFactionXml(filePath, modName);
   }
 
-  if (parsed.soldier) {
-    const soldiers = ensureArray(parsed.soldier);
+  if (parsed['soldier']) {
+    const soldiers = ensureArray(parsed['soldier']);
     return soldiers.map((s: unknown, i: number) => {
-      const attrs = (s ?? {}) as Record<string, unknown>;
+      const attrs = asNode(s) ?? {};
       const flatAttrs = flattenAttributes(s);
       const key = extractKey(attrs, `soldier_${i}`);
       const description = describeSoldier(flatAttrs);
@@ -869,12 +882,13 @@ export async function parseXmlFile(filePath: string, modName: string): Promise<S
     });
   }
 
-  if (parsed.weapons?.weapon || parsed.weapon) {
-    const weapons = ensureArray(parsed.weapons?.weapon ?? parsed.weapon);
+  const weaponNodes = asNode(parsed['weapons'])?.['weapon'] ?? parsed['weapon'];
+  if (weaponNodes) {
+    const weapons = ensureArray(weaponNodes);
     const sourceDir = path.dirname(filePath);
     const docs: StructuredDocument[] = [];
     for (let i = 0; i < weapons.length; i++) {
-      const w = (weapons[i] ?? {}) as Record<string, unknown>;
+      const w = asNode(weapons[i]) ?? {};
       const resolved = await resolveInheritance(w, sourceDir);
       const flatAttrs = flattenAttributes(resolved);
       const key = extractKey(w, `weapon_${i}`);
@@ -887,13 +901,13 @@ export async function parseXmlFile(filePath: string, modName: string): Promise<S
     return docs;
   }
 
-  if (parsed.carry_items?.carry_item) {
+  if (asNode(parsed['carry_items'])?.['carry_item']) {
     return parseCarryItemFile(filePath, modName);
   }
 
-  if (parsed.carry_item) {
+  if (parsed['carry_item']) {
     const sourceDir = path.dirname(filePath);
-    const ci = (parsed.carry_item ?? {}) as Record<string, unknown>;
+    const ci = asNode(parsed['carry_item']) ?? {};
     const resolved = await resolveInheritance(ci, sourceDir);
     const flatAttrs = flattenAttributes(resolved);
     const key = extractKey(ci, path.basename(filePath, ext));
@@ -905,10 +919,11 @@ export async function parseXmlFile(filePath: string, modName: string): Promise<S
     })];
   }
 
-  if (parsed.vehicles?.vehicle || parsed.vehicle) {
-    const vehicles = ensureArray(parsed.vehicles?.vehicle ?? parsed.vehicle);
+  const vehicleNodes = asNode(parsed['vehicles'])?.['vehicle'] ?? parsed['vehicle'];
+  if (vehicleNodes) {
+    const vehicles = ensureArray(vehicleNodes);
     return vehicles.map((v: unknown, i: number) => {
-      const attrs = (v ?? {}) as Record<string, unknown>;
+      const attrs = asNode(v) ?? {};
       const flatAttrs = flattenAttributes(v);
       const key = extractKey(attrs, `vehicle_${i}`);
       const description = describeVehicle(flatAttrs);
@@ -917,10 +932,11 @@ export async function parseXmlFile(filePath: string, modName: string): Promise<S
     });
   }
 
-  if (parsed.projectiles?.projectile || parsed.projectile) {
-    const projectiles = ensureArray(parsed.projectiles?.projectile ?? parsed.projectile);
+  const projectileNodes = asNode(parsed['projectiles'])?.['projectile'] ?? parsed['projectile'];
+  if (projectileNodes) {
+    const projectiles = ensureArray(projectileNodes);
     return projectiles.map((p: unknown, i: number) => {
-      const attrs = (p ?? {}) as Record<string, unknown>;
+      const attrs = asNode(p) ?? {};
       const flatAttrs = flattenAttributes(p);
       const key = extractKey(attrs, `projectile_${i}`);
       const description = describeProjectile(flatAttrs);

@@ -125,25 +125,25 @@ function walk(obj: unknown, filePath: string, ctx: BuildCtx, rootElement: string
 
       if (name === 'projectile' && typeof childAttrs['@_file'] === 'string') {
         ctx.edges.push({
-          from: (currentKey ?? path.basename(filePath)) as string,
+          from: currentKey ?? path.basename(filePath),
           fromFile: filePath,
           targetRef: childAttrs['@_file'],
-          targetFile: childAttrs['@_file'] as string,
+          targetFile: childAttrs['@_file'],
           rel: 'fires',
         });
       }
       if (name === 'call' && typeof childAttrs['@_file'] === 'string') {
         ctx.edges.push({
-          from: (currentKey ?? path.basename(filePath)) as string,
+          from: currentKey ?? path.basename(filePath),
           fromFile: filePath,
           targetRef: childAttrs['@_file'],
-          targetFile: childAttrs['@_file'] as string,
+          targetFile: childAttrs['@_file'],
           rel: 'includes',
         });
       }
       if (name === 'next_in_chain' && typeof childAttrs['@_key'] === 'string') {
         ctx.edges.push({
-          from: (currentKey ?? path.basename(filePath)) as string,
+          from: currentKey ?? path.basename(filePath),
           fromFile: filePath,
           targetRef: childAttrs['@_key'],
           rel: 'next_in_chain',
@@ -151,10 +151,10 @@ function walk(obj: unknown, filePath: string, ctx: BuildCtx, rootElement: string
       }
       if (name === 'weapon' && typeof childAttrs['@_file'] === 'string') {
         ctx.edges.push({
-          from: (currentKey ?? path.basename(filePath)) as string,
+          from: currentKey ?? path.basename(filePath),
           fromFile: filePath,
           targetRef: childAttrs['@_file'],
-          targetFile: childAttrs['@_file'] as string,
+          targetFile: childAttrs['@_file'],
           rel: 'references',
         });
       }
@@ -180,10 +180,12 @@ async function buildFileNodes(filePath: string, ctx: BuildCtx): Promise<void> {
 
   try {
     const content = await fs.readFile(filePath, 'utf-8');
-    const parsed = parser.parse(content);
-    const rootKey = Object.keys(parsed).find((k) => k !== '?xml');
+    // fast-xml-parser types parse() as `any`; narrow it at the boundary.
+    const parsed: unknown = parser.parse(content);
+    const root = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
+    const rootKey = Object.keys(root).find((k) => k !== '?xml');
     if (!rootKey) return;
-    walk(parsed[rootKey], filePath, ctx, rootKey, true);
+    walk(root[rootKey], filePath, ctx, rootKey, true);
   } catch {
     ctx.nodes.push({
       key: path.basename(filePath),
@@ -214,7 +216,9 @@ async function resolveFilePath(
     try {
       const stat = await fs.stat(c);
       if (stat.isFile()) return c;
-    } catch {}
+    } catch {
+      // Candidate path does not exist — try the next one.
+    }
   }
   return undefined;
 }
@@ -303,7 +307,9 @@ export async function buildGraph(
   for (const f of scriptFiles) {
     try {
       symbols.push(...await extractScriptSymbolsFromFile(f));
-    } catch {}
+    } catch {
+      // An unreadable or unparseable script must not abort the whole graph build.
+    }
   }
 
   const graph: RwrGraph = {

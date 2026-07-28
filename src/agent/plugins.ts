@@ -52,7 +52,8 @@ export interface PluginToolSpec {
   description: string;
   /** JSON Schema for the tool input — no zod dependency in plugin files. */
   inputSchema: Record<string, unknown>;
-  execute: (input: never) => unknown | Promise<unknown>;
+  /** May return a promise; `unknown` already covers that. */
+  execute: (input: never) => unknown;
 }
 
 export type PluginFactory = (host: ToolHost) => PluginToolSpec[] | Promise<PluginToolSpec[]>;

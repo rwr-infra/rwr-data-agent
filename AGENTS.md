@@ -10,7 +10,7 @@ An AI agent over *Running With Rifles* game data. Fastify server, **OpenAI-compa
 
 - **ESM only** (`"type": "module"`, `NodeNext`). Relative imports carry `.js` extensions even in `.ts` sources. The `~/*` tsconfig alias exists but is unused — follow the relative-import style.
 - Strict TypeScript. No unit-test runner; `npm run eval` + curl smoke tests are the correctness net.
-- ⚠️ `npm run lint` fails — ESLint 10 needs an `eslint.config.js` and there is none. Use `npx tsc --noEmit`.
+- `npm run lint` (ESLint 10 flat config) and `npm run typecheck` (`tsc --noEmit`) are both green and both required. Type-aware rules apply to `src/`; `api/`, `types/`, `tools.d/` get syntax-layer checks only. `web/` is out of scope. Ignores come from `.gitignore` via `@eslint/compat` — add new generated directories there, not to `eslint.config.js`.
 
 ## Developer Commands
 
@@ -24,7 +24,11 @@ npm run build:index     # rebuild graph + search indexes
 npm run build:index:prod
 npm run validate:index  # smoke-test the 7 graph tools against the built index
 npm run eval            # retrieval eval harness → src/eval/run.ts
-npm run format          # Prettier
+
+npm run lint            # eslint . --max-warnings 0
+npm run lint:fix        # same, with --fix
+npm run typecheck       # tsc --noEmit
+npm run format          # Prettier over src/ api/ types/ tools.d/
 ```
 
 ## Running Locally

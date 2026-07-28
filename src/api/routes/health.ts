@@ -2,8 +2,9 @@ import type { FastifyInstance } from 'fastify';
 import { getIndexStatus } from '../../indexing/bootstrap.js';
 import { getIndexMeta } from '../../retrieval/localSearch.js';
 
+// eslint-disable-next-line @typescript-eslint/require-await -- Fastify plugin contract: register() awaits the returned promise, so `async` is the interface here.
 export async function healthRoutes(app: FastifyInstance) {
-  app.get('/health', async () => {
+  app.get('/health', () => {
     const status = getIndexStatus();
     const meta = getIndexMeta() ?? status.meta;
 

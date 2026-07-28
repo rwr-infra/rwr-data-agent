@@ -29,12 +29,17 @@ function getProvider() {
       // what the provider converter actually produced when a backend rejects a message.
       ...(process.env.DEBUG_HTTP
         ? {
-            fetch: (async (...args: Parameters<typeof fetch>) => {
+            fetch: async (...args: Parameters<typeof fetch>) => {
               try {
-                fsSync.writeFileSync('/tmp/rwr-wire.json', String(args[1]?.body ?? ''));
-              } catch {}
+                // The converter always produces a JSON string body; anything else
+                // (stream, Blob) has no useful on-disk form.
+                const body = args[1]?.body;
+                fsSync.writeFileSync('/tmp/rwr-wire.json', typeof body === 'string' ? body : '');
+              } catch {
+                // Debug-only dump; never let it break the actual request.
+              }
               return fetch(...args);
-            }) as typeof fetch,
+            },
           }
         : {}),
     });
@@ -62,27 +67,44 @@ function estimateTokensFromChars(text: string): number {
   return Math.ceil(text.length / 1.5);
 }
 
+/**
+ * Read one field of a tool input as a display string. Tool inputs are model-produced
+ * JSON, so every field is `unknown` — anything non-scalar has no useful label form.
+ */
+function inputField(input: Record<string, unknown>, name: string): string {
+  const value = input[name];
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return '';
+}
+
 /** Build a short human-readable summary of a tool call's input, shown to the UI. */
 function summarizeToolInput(toolName: string | undefined, input: unknown): string {
   if (!toolName || !input || typeof input !== 'object') return '';
   const inp = input as Record<string, unknown>;
+  const key = inputField(inp, 'key') || '?';
+  const file = inputField(inp, 'file') || '?';
   switch (toolName) {
     case 'getInheritanceChain':
-      return `Inheritance: ${inp.key ?? '?'}`;
+      return `Inheritance: ${key}`;
     case 'findReferences':
-      return `References: ${inp.key ?? '?'}`;
+      return `References: ${key}`;
     case 'getTransformChain':
-      return `Transform chain: ${inp.key ?? '?'}`;
-    case 'readSource':
-      return `Read: ${inp.file ?? '?'}${inp.startLine ? ` (L${inp.startLine}-${inp.endLine ?? ''})` : ''}`;
-    case 'listFiles':
-      return `List: ${inp.pattern ?? '?'}${inp.type ? ` [${inp.type}]` : ''}`;
+      return `Transform chain: ${key}`;
+    case 'readSource': {
+      const startLine = inputField(inp, 'startLine');
+      return `Read: ${file}${startLine ? ` (L${startLine}-${inputField(inp, 'endLine')})` : ''}`;
+    }
+    case 'listFiles': {
+      const type = inputField(inp, 'type');
+      return `List: ${inputField(inp, 'pattern') || '?'}${type ? ` [${type}]` : ''}`;
+    }
     case 'getScriptSymbols':
-      return `Script symbols: ${inp.file ?? '?'}`;
+      return `Script symbols: ${file}`;
     case 'getNode':
-      return `Lookup: ${inp.key ?? '?'}`;
+      return `Lookup: ${key}`;
     case 'lookupUpgrade':
-      return `Upgrade lookup: ${inp.query ?? '?'}`;
+      return `Upgrade lookup: ${inputField(inp, 'query') || '?'}`;
     default:
       return toolName;
   }
@@ -111,8 +133,8 @@ function resolveUsage(
   outputText: string,
 ): { promptTokens: number; completionTokens: number; estimated: boolean } {
   const valid = (n: number | undefined): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0;
-  const inReal = valid(usage?.inputTokens) ? usage!.inputTokens! : undefined;
-  const outReal = valid(usage?.outputTokens) ? usage!.outputTokens! : undefined;
+  const inReal = valid(usage?.inputTokens) ? usage.inputTokens : undefined;
+  const outReal = valid(usage?.outputTokens) ? usage.outputTokens : undefined;
   return {
     promptTokens: inReal ?? estimateTokensFromChars(promptText),
     completionTokens: outReal ?? estimateTokensFromChars(outputText),
@@ -157,6 +179,7 @@ function buildBreakdown(
   };
 }
 
+// eslint-disable-next-line @typescript-eslint/require-await -- Fastify plugin contract: register() awaits the returned promise, so `async` is the interface here.
 export async function chatRoutes(app: FastifyInstance) {
   // Point the local MiniSearch index at the configured path (loaded lazily / by bootstrap).
   configureSearch(config.searchIndexPath);
@@ -232,7 +255,7 @@ export async function chatRoutes(app: FastifyInstance) {
           content: m.content,
         }));
 
-        let summary = getSummary(memorySessionId);
+        const summary = getSummary(memorySessionId);
         if (shouldGenerateSummary(memorySessionId, nonSystemMessages.length)) {
           generateSummary(memorySessionId, nonSystemMessages).catch(() => {});
         }
@@ -287,7 +310,7 @@ export async function chatRoutes(app: FastifyInstance) {
 
     const llmMessages = [
       ...historyMessages.map((m) => ({
-        role: m.role as 'user' | 'assistant',
+        role: m.role,
         content: m.content,
       })),
       { role: 'user' as const, content: ragUserPrompt },
@@ -388,7 +411,7 @@ export async function chatRoutes(app: FastifyInstance) {
             ? {
                 tools,
                 stopWhen: stepCountIs(100),
-                prepareStep: async ({ messages }: { messages: Record<string, unknown>[] }) => {
+                prepareStep: ({ messages }: { messages: Record<string, unknown>[] }) => {
                   // Compress tool results from older steps to prevent context explosion,
                   // AND ensure all messages are provider-compatible (some providers like
                   // Volcengine reject assistant messages with null/missing content when

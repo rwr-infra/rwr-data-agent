@@ -35,17 +35,25 @@ export function clearSummary(sessionId: string): void {
 function parseSummaryJson(text: string): ConversationSummary | null {
   try {
     const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    const parsed = JSON.parse(cleaned);
-    if (typeof parsed.summary === 'string' && Array.isArray(parsed.entities)) {
+    // JSON.parse is typed `any`; keep the model's output at arm's length.
+    const parsed: unknown = JSON.parse(cleaned);
+    const obj = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
+    const summary = obj['summary'];
+    const entities = obj['entities'];
+    const topic = obj['topic'];
+    const turnCount = obj['turnCount'];
+    if (typeof summary === 'string' && Array.isArray(entities)) {
       return {
-        summary: parsed.summary,
-        mentionedEntities: parsed.entities.map(String),
-        currentTopic: String(parsed.topic ?? 'general'),
-        turnCount: parsed.turnCount ?? 0,
+        summary,
+        mentionedEntities: (entities as unknown[]).filter((e): e is string => typeof e === 'string'),
+        currentTopic: typeof topic === 'string' ? topic : 'general',
+        turnCount: typeof turnCount === 'number' ? turnCount : 0,
         updatedAt: Date.now(),
       };
     }
-  } catch {}
+  } catch {
+    // Malformed model output — the caller treats a null summary as "no memory yet".
+  }
   return null;
 }
 
