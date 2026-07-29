@@ -26,7 +26,8 @@ npm start               # node dist/api/server.js
 npm run build:index     # rebuild graph + search indexes (also runs automatically at startup)
 npm run build:index:prod # same, from dist/ (no tsx)
 npm run validate:index  # smoke-test the 7 graph tools against the built index
-npm run eval            # retrieval eval harness → src/eval/run.ts
+npm run eval            # retrieval eval harness → src/eval/run.ts (no LLM calls)
+npm run eval:agent      # tool-loop eval → src/eval/agent.ts (spends LLM quota)
 
 npm run lint            # eslint . --max-warnings 0
 npm run lint:fix        # same, with --fix
@@ -216,9 +217,11 @@ Diagrams for the request pipeline, the tool loop, the stream contract and the in
 3. `x-session-id` keys a rolling summary (`src/memory/summarizer.ts`, in-process `Map`, never persisted); summaries regenerate every `SUMMARY_INTERVAL_TURNS`.
 4. `isMetaQuery` short-circuits search for questions about the bot.
 5. `buildSearchQuery` (`src/retrieval/queryRewrite.ts`) merges history + summary + CN↔EN synonym expansion.
-6. `localSearch(query, filters, topK, enrichedQuery)` — `topK` 150 for enumeration, else 30; optionally filtered by `body.mod`. Every result is then embedded in the prompt at up to 2000 chars, so enumeration turns are the dominant token cost — see P1 in [`docs/后续优化项.md`](./docs/后续优化项.md).
-7. Tools come from `getAgentTools()` (`src/agent/toolDefs.ts`), re-queried per request so hot-reloaded plugins take effect.
-8. `streamText` with graph tools, or `streamObject` with `EnumResultSchema`/`ComparisonResultSchema` (`src/types/schemas.ts`) when the query is enumeration/comparison **and** `response_format: json_object` (or `x-response-format`) is set.
+6. `retrievalTopK(category, exactKey)` picks the breadth: 5 for a bare key, 150 for enumeration, 12 for inheritance/source/script (those are answered by graph tools, so prose only has to identify the entity), else 30. `localSearch(query, filters, topK, enrichedQuery)` then runs, optionally filtered by `body.mod`.
+7. `buildUserPrompt` embeds each result at up to 2000 chars **until `CONTEXT_BUDGET_TOKENS` is spent**; the remainder are listed as `Key | type | name | mod | file` one-liners with an instruction to expand them via `searchDocs`/`readSource`. Every hit still appears, so enumeration keeps full coverage while the prompt stops growing.
+8. A second size guard runs here, once the real prompt exists: the first one only sees the incoming messages, and a 150-result enumeration adds far more than the user typed.
+9. Tools come from `getAgentTools()` (`src/agent/toolDefs.ts`), re-queried per request so hot-reloaded plugins take effect.
+10. `streamText` with graph tools, or `streamObject` with `EnumResultSchema`/`ComparisonResultSchema` (`src/types/schemas.ts`) when the query is enumeration/comparison **and** `response_format: json_object` (or `x-response-format`) is set.
 
 ### Streaming format
 Custom **NDJSON**, not SSE. One JSON object per line, keyed by `type`: `text-delta`, `reasoning-delta`, `json-delta`, `tool-step`, `finish`, `error`. Treat these shapes as a contract with the Web UI — **extend with new optional fields, never repurpose an existing one.**
@@ -227,8 +230,12 @@ Custom **NDJSON**, not SSE. One JSON object per line, keyed by `type`: `text-del
 - `finish` — `stopReason` is `completed` | `step-limit` | `output-limit`. `usage` separates **spend** from **occupancy**: `promptTokens`/`completionTokens` sum every step of the tool loop, while `contextTokens` is what the *next* request will carry (the tool transcript is excluded — it never survives the turn, and the UI gates sending on this number). `maxContextTokens` lets the UI follow server config. `breakdown` attributes the totals per slice, with `exact` listing which figures the provider reported verbatim.
 - `error` — the stream itself broke. **Not** used for tool failures (those are `tool-step` with `ok: false`) or for stop reasons (those are `finish.stopReason`). Never put user-facing prose here that the frontend could localize itself.
 
-### Deferred work
-[`docs/后续优化项.md`](./docs/后续优化项.md) records what the design reference asks for that is not implemented yet, with measurements and the reasoning for each deferral. Read it before starting anything that touches retrieval context size, the step limit, or intent classification.
+### Known gap: the step limit is unbounded in practice
+`stopWhen: stepCountIs(100)` is a runaway backstop, not a budget — so a single question has no real cost ceiling. `npm run eval:agent` measured 2–20 steps across its eight cases, and one case ("有哪些武器引用了 bullet.projectile", answerable by a single `findReferences` call) took **20 steps / 889K input tokens on one run and 41 steps / 2.5M on the next** — same question, 3× spread. Two eval cases carry step budgets they currently exceed for this reason.
+
+Before lowering it, note two causes worth fixing first, because they may remove the need:
+- "有哪些 X 引用了 Y" classifies as `enumeration` (topK 150) when it is a reverse lookup that wants `findReferences` and topK 12.
+- `SYSTEM_PROMPT` tells the model to work in 3–6 calls and settle absence in 4–6 attempts; measured runs reach 28–64. Either the constraint needs teeth or the wording needs to stop claiming a budget nothing enforces.
 
 ### Frontend
 Svelte 5 + Vite + Tailwind 4 + daisyUI in `web/`, building into `public/` — treat `public/` as generated. `web/vite.config.ts` reads `PORT` from the repo-root `.env` via `loadEnv`, so the dev proxy always follows the backend port. The Header's dropdown is a package filter fed by `GET /v1/packages`; it hides itself when there is only one package.
@@ -253,6 +260,9 @@ Svelte 5 + Vite + Tailwind 4 + daisyUI in `web/`, building into `public/` — tr
 | `PORT` | `3000` | |
 | `MAX_CONTEXT_TOKENS` | `500000` | Also reported to the UI on `finish`, so the usage bar follows it |
 | `LLM_MAX_OUTPUT_TOKENS` | `32768` | Reasoning + answer share this budget |
+| `CORS_ORIGINS` | empty (reflect any) | Comma-separated allowlist; set it once the port is not LAN-only |
+| `API_TOKEN` | empty (no auth) | When set, `/v1/*` needs `Authorization: Bearer` or `x-api-key` |
+| `CONTEXT_BUDGET_TOKENS` | `24000` | Cap on full-text retrieved context; the rest become one-liners |
 | `TOOL_TIMEOUT_MS` | `15000` | Deadline per tool execution; expiry returns `{error, hint}` |
 | `TOOL_CONTEXT_BUDGET_RATIO` | `0.75` | Window fraction a step's prompt may fill before old tool results are shed |
 | `TOOL_SHED_RESULT_TOKENS` | `600` | Size an old tool result is shrunk to when shedding is unavoidable |
@@ -280,7 +290,10 @@ Workshop packages live at `steamapps/workshop/content/270150/<itemid>/<pkgname>/
 
 ## Testing
 
-- `npm run eval` — 30-case retrieval harness over `tests/eval/dataset.json`, writes a timestamped report into `tests/eval/`. Note the dataset references some keys that no longer exist in the current `./data` snapshot, so absolute recall understates real quality; track deltas, not the absolute number.
+- `npm run eval` — 30-case retrieval harness over `tests/eval/dataset.json`, writes a timestamped report into `tests/eval/`. **No LLM calls.** Note the dataset references some keys that no longer exist in the current `./data` snapshot, so absolute recall understates real quality; track deltas, not the absolute number. Baseline on the current snapshot: 13/30.
+- `npm run eval:agent [id-filter]` — tool-loop harness over `tests/eval/agent-dataset.json`, driving the real route in-process via `app.inject()`. **Spends real LLM quota** (~1–3 min for the full 8 cases) and is non-deterministic, so assertions are "at least this" — `expectedTools` must all have been called, `expectedKeys` must appear in the answer, `stopReason` must be `completed`, and `maxSteps` bounds the loop. Run it after any change to tools, the tool loop, intent classification, or prompt structure.
+  - Step budgets come from the design reference (a single-entity question is 1–3 targeted calls) and the system prompt's own "4–6 attempts settle absence" rule, **not** from observed behaviour — so a case that exceeds its budget is reporting a real inefficiency, not a broken test. `agent-references` and `agent-absence-escalation` currently exceed theirs.
+  - Both report files and the eval reports are untracked build artifacts; `tests/eval/report-*.json` is **not** gitignored, so delete stray reports before committing.
 - `npm run validate:index` — exercises all 7 graph tools, picking real sample keys out of the built graph so it works against any data directory.
 
 ## Style

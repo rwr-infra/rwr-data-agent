@@ -2,8 +2,7 @@
 
 How a question becomes an answer, and how the local RWR game files become a searchable index.
 
-For coding conventions and per-module notes see [`AGENTS.md`](./AGENTS.md). For deferred work and the
-reasoning behind what was left undone, see [`docs/后续优化项.md`](./docs/后续优化项.md).
+For coding conventions and per-module notes see [`AGENTS.md`](./AGENTS.md).
 
 ---
 

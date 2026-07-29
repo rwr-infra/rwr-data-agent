@@ -3,6 +3,7 @@
   import type { Translations } from '../lib/i18n.js';
   import type { PackageOption } from '../lib/types.js';
   import type { Theme } from '../lib/theme.js';
+  import { authHeaders } from '../lib/api.js';
 
   interface Props {
     lang: string;
@@ -37,7 +38,7 @@
 
   onMount(async () => {
     try {
-      const res = await fetch('/v1/packages');
+      const res = await fetch('/v1/packages', { headers: authHeaders() });
       if (!res.ok) return;
       const data = await res.json();
       pkgList = data.packages || [];

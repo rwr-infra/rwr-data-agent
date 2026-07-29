@@ -1,3 +1,6 @@
+// Same script-aware estimator the token accounting uses, so the budget here and the numbers reported
+// on `finish` are measured the same way.
+import { estimateTokens } from '../api/tokenAccounting.js';
 import type { SearchResult } from '../types/index.js';
 
 export const SYSTEM_PROMPT = `You are a Running With Rifles (RWR) game data assistant. Answer questions using the provided context documents and the available tools. You may apply basic reasoning and game knowledge to connect context to the user's question, but do not fabricate data that is absent from the documents or tool results.
@@ -38,18 +41,39 @@ You have full-text search plus graph navigation tools. Use them proactively; a f
 
 **No verbatim repeats**: Calling a tool again with the exact same arguments is rejected with a \`duplicate_call\` error instead of running — the earlier result is already in this conversation, re-read it. To make progress, change the arguments (a different query, a broader glob, the other language) or switch tools. A tool that fails returns \`{ error, hint }\`; the \`hint\` tells you what to try next, so act on it rather than retrying the same call.
 
-- **Item missing from context / any doubt about existence**: \`searchDocs\` — highest priority, see the rule above.
-- **Detail query where the context has only a partial document** (attributes truncated, only the name matched): \`searchDocs\` on the Key, then \`readSource\` on its file for exact values.
-- **Inheritance / parent files**: \`getInheritanceChain\` to trace which base files an entity inherits from. Weapon attributes are often defined in a parent file, so a "missing" attribute usually lives up the chain.
-- **"Who uses X"**: \`findReferences\` for reverse lookups (e.g., which weapons fire a projectile).
-- **Armor / degradation layers**: \`getTransformChain\` to trace item consumption chains.
-- **Exact source data**: \`readSource\` to read the raw XML/AS file when you need to verify attributes or read script code.
-- **Finding files by name**: \`listFiles\` when you know part of a filename or Key but not the exact one.
-- **AngelScript questions**: \`getScriptSymbols\` to list functions/classes/includes in a script file.
+Each tool's own description says when to use it — read those rather than guessing. Only the priorities they cannot express are repeated here:
+
+- **Any doubt that an item exists**: \`searchDocs\` first, before anything else. See the absence rule above.
+- **A context document that is partial** (attributes truncated, only the name matched): \`searchDocs\` on its Key, then \`readSource\` on its file for exact values.
+- **A "missing" attribute on an entity that does exist**: it is usually defined in a parent file — \`getInheritanceChain\` before concluding it is absent.
+- **A hit listed under "more index hits" without full text**: it exists. Fetch it with \`searchDocs\` on its Key or \`readSource\` on its file; do not report it as missing.
 
 Skip tools only when the context already answers the question completely and unambiguously.
 
 **CRITICAL**: When you use a tool, synthesize its result with the context documents to give a complete answer. Always cite the source file path when referencing tool results. Do NOT end your turn with a tool call — always produce a final text answer.
+
+### Traceability (applies to every answer)
+An answer the user cannot verify is worth little. Whenever you state a value that came from a document or a tool result:
+
+- Cite the **source file** it came from, not just the Key. Two entities can share a name; the file is what disambiguates.
+- For inheritance answers, list the chain **in depth order**, cite the file for each layer, and say which layer defines or overrides each attribute you report. "Inherits from base_weapon" is not an answer; "damage 45 comes from layer 2, \`weapons/base_ar.weapon\`, and is not overridden below it" is.
+- When you report the effective value of an attribute, say where the winning definition lives. If you could not determine which layer wins, say so rather than picking one.
+- Values you inferred rather than read must be labelled as inferred.
+
+### Playbooks
+Follow these paths unless the question clearly calls for something else.
+
+**Inheritance / "where does this attribute come from"**
+1. Resolve the Key — from context, or \`searchDocs\`, or \`getNode\`.
+2. \`getInheritanceChain\` on that Key for the full parent chain.
+3. \`readSource\` only on the layers that can carry the attribute in question — not every layer.
+4. Answer ordered by depth, citing each layer's file and what it contributes.
+
+**AngelScript / game mode logic**
+1. Locate the script — \`listFiles\` with a \`*.as\` pattern, or \`searchDocs\` with \`type: script_chunk\`.
+2. \`getScriptSymbols\` for the function/class inventory with line numbers.
+3. \`readSource\` with a **line range** for the specific function that matters.
+4. Cite file and line. Never paste a whole \`.as\` file into the answer.
 
 ### Low Confidence Warning
 If the context section below includes a "[Low Confidence]" marker, the retrieved documents probably do not match the query well. In this case:
@@ -74,10 +98,32 @@ When asked to compare items (e.g., "A vs B", "which is better"):
 - List each item's relevant attributes side by side.
 - Highlight differences; avoid subjective judgments unless explicitly asked.`;
 
+const MAX_RESULT_CHARS = 2000;
+
+/**
+ * One line per result for hits that did not fit the context budget: enough to know the entity exists
+ * and to fetch it, without its body. Enumeration answers are built from exactly these fields, so a
+ * summarised hit still counts toward a complete listing.
+ */
+function summaryLine(r: SearchResult): string {
+  const name = typeof r.metadata.name === 'string' ? r.metadata.name : '';
+  const file = r.metadata.file_path ?? '';
+  return [r.key, r.type, name, r.metadata.mod_name, file].filter(Boolean).join(' | ');
+}
+
+/**
+ * Assemble the user-side prompt: retrieved context, the question, and what to do about them.
+ *
+ * `budgetTokens` caps the *full-text* portion. Every result still appears — once the budget is spent
+ * the rest are listed as one-liners instead of being dropped, so an enumeration keeps complete
+ * coverage while the prompt stops growing. Without a budget every result is embedded in full, which
+ * is how a 150-result enumeration reached ~80K tokens of context re-sent on every step of the tool
+ * loop.
+ */
 export function buildUserPrompt(
   query: string,
   results: SearchResult[],
-  options?: { lowConfidence?: boolean },
+  options?: { lowConfidence?: boolean; budgetTokens?: number },
 ): string {
   const contextParts: string[] = [];
 
@@ -85,13 +131,34 @@ export function buildUserPrompt(
     contextParts.push('[Low Confidence] The following documents were retrieved but may not closely match the query.');
   }
 
-  const MAX_RESULT_CHARS = 2000;
+  const budget = options?.budgetTokens ?? Infinity;
+  const summarised: SearchResult[] = [];
+  let spent = 0;
+
   results.forEach((r, i) => {
-    const content = r.content.length > MAX_RESULT_CHARS
-      ? r.content.slice(0, MAX_RESULT_CHARS) + '…'
-      : r.content;
-    contextParts.push(`[Document ${i + 1}] Type: ${r.type}, Key: ${r.key}\n${content}`);
+    // Once the budget is spent, everything after it is summarised — filling the remaining room with
+    // whichever later document happens to be small would scramble the relevance order.
+    if (summarised.length === 0) {
+      const content = r.content.length > MAX_RESULT_CHARS ? r.content.slice(0, MAX_RESULT_CHARS) + '…' : r.content;
+      const block = `[Document ${i + 1}] Type: ${r.type}, Key: ${r.key}\n${content}`;
+      const cost = estimateTokens(block);
+      if (spent + cost <= budget) {
+        contextParts.push(block);
+        spent += cost;
+        return;
+      }
+    }
+    summarised.push(r);
   });
+
+  if (summarised.length > 0) {
+    contextParts.push(
+      `### ${summarised.length} more index hit(s), listed without their full text\n` +
+        'Format: Key | type | name | mod | file. These entities exist. For any of them, call ' +
+        '`searchDocs` with its Key or `readSource` on its file to get the attributes.\n' +
+        summarised.map(summaryLine).join('\n'),
+    );
+  }
 
   const context = contextParts.join('\n\n---\n\n');
 

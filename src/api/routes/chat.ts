@@ -9,7 +9,7 @@ import { search as localSearch, configureSearch } from '../../retrieval/localSea
 import { SYSTEM_PROMPT, buildUserPrompt } from '../../retrieval/prompt.js';
 import { buildSearchQuery } from '../../retrieval/queryRewrite.js';
 import { buildLlmProviderOptions } from '../../llm/providerOptions.js';
-import { classifyQuery, isMetaQuery } from '../../retrieval/intent.js';
+import { classifyQuery, extractExactKey, isMetaQuery, retrievalTopK } from '../../retrieval/intent.js';
 import { EnumResultSchema, ComparisonResultSchema } from '../../types/schemas.js';
 import { getSummary, generateSummary, shouldGenerateSummary } from '../../memory/summarizer.js';
 import { getAgentTools as loadAgentTools } from '../../agent/toolDefs.js';
@@ -166,8 +166,10 @@ export async function chatRoutes(app: FastifyInstance) {
     const truncatedQuery = query.length > 80 ? query.slice(0, 80) + '…' : query;
     console.log(`[chat] Query: "${truncatedQuery}"`);
 
-    const totalChars = messages.reduce((sum, m) => sum + m.content.length, 0);
-    const estimatedTokens = Math.ceil(totalChars / 1.5);
+    // First guard: reject absurd input before spending any work on it. This only sees the incoming
+    // messages — the system prompt and the retrieved context are added later, so a second guard runs
+    // once the real prompt size is known (search for "Second guard" below).
+    const estimatedTokens = messages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
     const effectiveLimit = Math.floor(config.maxContextTokens * 0.7);
     if (estimatedTokens > effectiveLimit) {
       console.log(`[chat] 400 - Request too large: ~${estimatedTokens} tokens > ${effectiveLimit}`);
@@ -179,10 +181,12 @@ export async function chatRoutes(app: FastifyInstance) {
     const sessionId = (request.headers['x-session-id'] as string) || undefined;
     const memorySessionId = sessionId ?? 'default';
     const queryCategory = classifyQuery(query);
+    // A question that is essentially one entity key needs neither query rewriting nor broad retrieval.
+    const exactKey = extractExactKey(query);
 
     const chainObs = startObservation('chat-completions', {
       input: { query, messages: nonSystemMessages },
-      metadata: { queryCategory },
+      metadata: { queryCategory, exactKey },
     }, { asType: 'chain' });
 
     if (sessionId) {
@@ -201,30 +205,38 @@ export async function chatRoutes(app: FastifyInstance) {
         console.log(`[chat] Meta query detected, skipping search`);
         results = [];
       } else {
+        const topK = retrievalTopK(queryCategory, exactKey !== null);
         const searchObs = chainObs.startObservation('search-pipeline', {
-          input: { query, topK: 60 },
+          input: { query, topK, exactKey },
         }, { asType: 'span' });
 
-        const historyForSearch = nonSystemMessages.slice(0, -1).map((m) => ({
-          role: m.role as 'user' | 'assistant',
-          content: m.content,
-        }));
+        let enrichedQuery: string;
+        if (exactKey !== null) {
+          // The query is essentially one key, so it is already unambiguous. Rewriting would fold in
+          // history and synonyms that can only pull the search away from the key the user named.
+          enrichedQuery = exactKey;
+          console.log(`[chat] Exact key detected: ${exactKey} — skipping query rewrite`);
+        } else {
+          const historyForSearch = nonSystemMessages.slice(0, -1).map((m) => ({
+            role: m.role as 'user' | 'assistant',
+            content: m.content,
+          }));
 
-        const summary = getSummary(memorySessionId);
-        if (shouldGenerateSummary(memorySessionId, nonSystemMessages.length)) {
-          generateSummary(memorySessionId, nonSystemMessages).catch(() => {});
+          const summary = getSummary(memorySessionId);
+          if (shouldGenerateSummary(memorySessionId, nonSystemMessages.length)) {
+            generateSummary(memorySessionId, nonSystemMessages).catch(() => {});
+          }
+
+          enrichedQuery = buildSearchQuery(query, historyForSearch, summary);
+          if (enrichedQuery !== query) {
+            console.log(`[chat] Query enriched: "${truncatedQuery}" → "${enrichedQuery.length > 120 ? enrichedQuery.slice(0, 120) + '…' : enrichedQuery}"`);
+          }
         }
 
-        const enrichedQuery = buildSearchQuery(query, historyForSearch, summary);
-        if (enrichedQuery !== query) {
-          console.log(`[chat] Query enriched: "${truncatedQuery}" → "${enrichedQuery.length > 120 ? enrichedQuery.slice(0, 120) + '…' : enrichedQuery}"`);
-        }
-        // Enumeration needs broad coverage; detail/comparison queries stay focused.
-        const topK = queryCategory === 'enumeration' ? 150 : 30;
         const filters = body.mod ? { mod_name: body.mod } : {};
         results = await localSearch(query, filters, topK, enrichedQuery);
         console.log(
-          `[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (topK=${topK}${body.mod ? `, mod=${body.mod}` : ''})`,
+          `[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (topK=${topK}, intent=${queryCategory}${body.mod ? `, mod=${body.mod}` : ''})`,
         );
 
         searchPath = 'local-index';
@@ -251,7 +263,10 @@ export async function chatRoutes(app: FastifyInstance) {
 
     chainObs.update({ metadata: { queryCategory, searchResults: results.length, searchPath, isLowConfidence } });
 
-    const ragUserPrompt = buildUserPrompt(query, results, { lowConfidence: isLowConfidence });
+    const ragUserPrompt = buildUserPrompt(query, results, {
+      lowConfidence: isLowConfidence,
+      budgetTokens: config.contextBudgetTokens,
+    });
 
     const historyMessages = nonSystemMessages.slice(0, -1).map((m) => ({
       role: m.role as 'user' | 'assistant',
@@ -286,6 +301,28 @@ export async function chatRoutes(app: FastifyInstance) {
       context: Math.max(estimateTokens(ragUserPrompt) - queryTokens, 0),
       messages: historyMessages.reduce((sum, m) => sum + estimateTokens(m.content), 0) + queryTokens,
     };
+
+    // Second guard: now that the retrieved context exists, check what will actually be sent. The
+    // first guard cannot see this — a 150-document enumeration adds far more than the user typed, so
+    // a request that passed there can still fail to fit. Prompt plus reserved output must leave room
+    // in the window. Tool definitions (~1K) are not counted; they are noise at this scale.
+    const promptTokens = inputTokens.system + inputTokens.context + inputTokens.messages;
+    if (promptTokens + maxTokens > config.maxContextTokens) {
+      console.log(
+        `[chat] 400 - Prompt too large: ~${promptTokens} prompt + ${maxTokens} reserved output > ${config.maxContextTokens}`,
+      );
+      chainObs.update({ level: 'ERROR', statusMessage: 'Prompt exceeds context window' });
+      chainObs.end();
+      return reply.status(400).send({
+        error: {
+          message:
+            `Prompt too large: ~${promptTokens} tokens of system prompt + retrieved context + conversation, ` +
+            `plus ${maxTokens} reserved for the answer, exceed the ${config.maxContextTokens} token context window. ` +
+            `Ask a narrower question, or lower LLM_MAX_OUTPUT_TOKENS.`,
+          type: 'invalid_request_error',
+        },
+      });
+    }
 
     const genObs = chainObs.startObservation('llm-generation', {
       input: { messages: llmMessages, system: SYSTEM_PROMPT },

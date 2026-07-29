@@ -36,10 +36,36 @@ export const config = {
 
   // ── Server ────────────────────────────────────────────────────────────────
   port: parseInt(process.env.PORT ?? '3000', 10),
+  /**
+   * Comma-separated allowed origins. Empty means reflect any origin, which is the historical default
+   * and fine for a LAN box behind a firewall — set this the moment the port is reachable from
+   * anywhere else.
+   */
+  corsOrigins: (process.env.CORS_ORIGINS ?? '')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean),
+  /**
+   * When set, every `/v1/*` request must present it as `Authorization: Bearer <token>` or
+   * `x-api-key`. Unset means no authentication, which is the historical behaviour. `/health` and the
+   * static UI stay open either way so a load balancer and a browser can still reach them.
+   */
+  apiToken: process.env.API_TOKEN ?? '',
   maxContextTokens: parseInt(process.env.MAX_CONTEXT_TOKENS ?? '500000', 10),
   // Cap on generated output tokens (reasoning + answer share this budget). Bounds long
   // enumerations/comparisons; raise if answers get truncated. DeepSeek-V4 allows up to 384K.
   llmMaxOutputTokens: parseInt(process.env.LLM_MAX_OUTPUT_TOKENS ?? '32768', 10),
+
+  /**
+   * Token cap on the *full text* of retrieved documents in the prompt. Hits beyond it still appear,
+   * as one-line summaries the model can expand with `searchDocs` / `readSource`, so an enumeration
+   * keeps complete coverage while the prompt stops growing. Uncapped, a 150-result enumeration reached
+   * ~80K tokens of context — re-sent on every step of the tool loop.
+   *
+   * The default is sized so `specific` and `comparison` queries (topK 30) are untouched and only
+   * enumeration is capped. Raise it if answers start missing attributes the model should have seen.
+   */
+  contextBudgetTokens: parseInt(process.env.CONTEXT_BUDGET_TOKENS ?? '24000', 10),
 
   // ── Agent tool transcript ─────────────────────────────────────────────────
   /**

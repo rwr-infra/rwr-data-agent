@@ -5,7 +5,8 @@
   import type { Theme } from './lib/theme.js';
   import { getInitialTheme, toggleTheme } from './lib/theme.js';
   import type { Message, DisplayItem, Session, TokenBreakdown } from './lib/types.js';
-  import { stripMarkdown } from './lib/utils.js';
+  import { estimateTokens, stripMarkdown } from './lib/utils.js';
+  import { authHeaders, captureTokenFromUrl } from './lib/api.js';
   import * as sessionStore from './lib/sessionStore.js';
   import Header from './components/Header.svelte';
   import Chat from './components/Chat.svelte';
@@ -154,6 +155,8 @@
   });
 
   onMount(async () => {
+    // Before anything hits /v1: persist a ?token= if the operator supplied one.
+    captureTokenFromUrl();
     sessions = await sessionStore.getAllSessions();
     if (sessions.length > 0) {
       const latest = sessions[0];
@@ -182,10 +185,6 @@
       window.removeEventListener('beforeunload', onBeforeUnload);
     };
   });
-
-  function estimateTokens(text: string): number {
-    return Math.ceil(text.length / 1.5);
-  }
 
   function estimateHistoryTokens(): number {
     return history.reduce((sum, m) => sum + estimateTokens(m.content), 0);
@@ -284,6 +283,7 @@
         headers: {
           'Content-Type': 'application/json',
           ...(activeSessionId ? { 'x-session-id': activeSessionId } : {}),
+          ...authHeaders(),
         },
         body: JSON.stringify({
           model: 'rwr-agent',

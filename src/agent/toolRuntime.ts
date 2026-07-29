@@ -38,7 +38,7 @@ function stableStringify(value: unknown): string {
 }
 
 /**
- * Has this exact call already been made in this request?
+ * How many times this exact call has already been made in this request.
  *
  * `ToolCallOptions.messages` holds what was sent to the model for this step: the assistant
  * `tool-call` parts and `tool` result messages from *earlier* steps, and explicitly not the
@@ -50,8 +50,9 @@ function stableStringify(value: unknown): string {
  * see each other. Harmless — these tools are idempotent reads — and the runaway case this guards
  * against is repetition across steps.
  */
-function alreadyCalled(messages: ToolCallOptions['messages'], toolName: string, input: unknown): boolean {
+function priorCallCount(messages: ToolCallOptions['messages'], toolName: string, input: unknown): number {
   const fingerprint = stableStringify(input);
+  let count = 0;
   for (const message of messages) {
     if (message.role !== 'assistant' || !Array.isArray(message.content)) continue;
     for (const part of message.content) {
@@ -60,11 +61,11 @@ function alreadyCalled(messages: ToolCallOptions['messages'], toolName: string, 
         part.toolName === toolName &&
         stableStringify(part.input) === fingerprint
       ) {
-        return true;
+        count++;
       }
     }
   }
-  return false;
+  return count;
 }
 
 /** A bare error message teaches the model nothing; each of these names the way out. */
@@ -81,14 +82,30 @@ function hintFor(toolName: string, error: string): string {
   return 'Check the argument values, or reach for a different tool.';
 }
 
-const DUPLICATE_HINT =
-  'You already called this tool with these exact arguments — its result is above, re-read it. ' +
-  'If it did not answer the question, change the arguments (a different query, a broader glob, the other language) or switch tools. ' +
-  'Repeating the call verbatim will keep failing.';
-
-/** Reject rather than replay: handing back the cached result teaches nothing and the model repeats. */
-function duplicateFailure(): ToolFailure {
-  return { error: 'duplicate_call', hint: DUPLICATE_HINT };
+/**
+ * Reject rather than replay: handing back the cached result teaches nothing and the model repeats.
+ *
+ * The wording escalates with the repeat count. A model that ignores the first rejection and asks
+ * again is usually stuck in a loop it will not leave on a politely-worded suggestion, so the second
+ * rejection stops offering alternatives and tells it to answer with what it has.
+ */
+function duplicateFailure(priorCalls: number): ToolFailure {
+  if (priorCalls >= 2) {
+    return {
+      error: 'duplicate_call',
+      hint:
+        `You have now called this tool with these exact arguments ${priorCalls} times and been refused each time. ` +
+        'Stop calling it. Answer the user with the evidence already gathered in this conversation, and say plainly ' +
+        'which parts you could not determine and what you tried.',
+    };
+  }
+  return {
+    error: 'duplicate_call',
+    hint:
+      'You already called this tool with these exact arguments — its result is above, re-read it. ' +
+      'If it did not answer the question, change the arguments (a different query, a broader glob, the other language) or switch tools. ' +
+      'Repeating the call verbatim will keep failing.',
+  };
 }
 
 /** Resolve `work` or fail at `timeoutMs`, whichever comes first. Also fails if the request aborts. */
@@ -181,9 +198,10 @@ export function instrumentTools(tools: Record<string, Tool>): Record<string, Too
       if (!base) return [name, tool];
 
       const execute = async (input: unknown, options: ToolCallOptions): Promise<unknown> => {
-        if (alreadyCalled(options.messages, name, input)) {
-          console.warn(`[tool] ${name} duplicate call rejected`);
-          return duplicateFailure();
+        const priorCalls = priorCallCount(options.messages, name, input);
+        if (priorCalls > 0) {
+          console.warn(`[tool] ${name} duplicate call rejected (attempt ${priorCalls + 1})`);
+          return duplicateFailure(priorCalls);
         }
 
         const startedAt = Date.now();
