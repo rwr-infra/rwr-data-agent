@@ -52,6 +52,11 @@ export const config = {
   toolContextBudgetRatio: parseFloat(process.env.TOOL_CONTEXT_BUDGET_RATIO ?? '0.75'),
   /** Size an old tool result is shrunk to when shedding is unavoidable. */
   toolShedResultTokens: parseInt(process.env.TOOL_SHED_RESULT_TOKENS ?? '600', 10),
+  /**
+   * Deadline for a single tool execution. On expiry the tool returns a `{ error, hint }` the model
+   * can route around, so a hanging plugin or a pathological file read cannot stall the HTTP stream.
+   */
+  toolTimeoutMs: parseInt(process.env.TOOL_TIMEOUT_MS ?? '15000', 10),
 
   // ── Session memory ────────────────────────────────────────────────────────
   summaryIntervalTurns: parseInt(process.env.SUMMARY_INTERVAL_TURNS ?? '3', 10),

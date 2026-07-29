@@ -42,6 +42,8 @@ export interface Translations {
   bdStepsHint: (n: number) => string;
   ctxLabel: string;
   ctxHint: string;
+  stopStepLimit: string;
+  stopOutputLimit: string;
   allPackages: string;
   ctxOver: string;
   reqFailed: string;
@@ -96,6 +98,8 @@ const i18n: Record<Lang, Translations> = {
     bdStepsHint: (n) => `工具循环共 ${n} 步，固定部分每步重发一次`,
     ctxLabel: '上下文',
     ctxHint: '下一次请求要携带的输入量。工具调用记录不跨轮，不计入。',
+    stopStepLimit: '⚠ 工具调用已达步数上限，模型未产出最终答案。请缩小问题范围或换用更具体的关键词重试。',
+    stopOutputLimit: '⚠ 回答已达输出 token 上限被截断。可提高 LLM_MAX_OUTPUT_TOKENS，或把问题拆成几次提问。',
     allPackages: '全部数据包',
     ctxOver: '上下文已达上限，请刷新页面开始新对话',
     reqFailed: '请求失败: ',
@@ -153,6 +157,8 @@ const i18n: Record<Lang, Translations> = {
     bdStepsHint: (n) => `Tool loop ran ${n} steps; the fixed parts are re-sent on each`,
     ctxLabel: 'Context',
     ctxHint: 'Input the next request will carry. Tool call records do not survive the turn and are excluded.',
+    stopStepLimit: '⚠ Hit the tool-call step limit without producing a final answer. Narrow the question or retry with more specific terms.',
+    stopOutputLimit: '⚠ Answer was cut off at the output token limit. Raise LLM_MAX_OUTPUT_TOKENS, or split the question into several turns.',
     allPackages: 'All packages',
     ctxOver: 'Context limit reached, please refresh to start a new conversation',
     reqFailed: 'Request failed: ',

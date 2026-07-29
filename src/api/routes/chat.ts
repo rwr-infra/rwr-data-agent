@@ -14,6 +14,7 @@ import { EnumResultSchema, ComparisonResultSchema } from '../../types/schemas.js
 import { getSummary, generateSummary, shouldGenerateSummary } from '../../memory/summarizer.js';
 import { getAgentTools as loadAgentTools } from '../../agent/toolDefs.js';
 import { createToolTranscriptShaper } from '../../agent/toolTranscript.js';
+import { isToolFailure, repairToolCall } from '../../agent/toolRuntime.js';
 import {
   buildBreakdown,
   estimateTokens,
@@ -121,6 +122,9 @@ function summarizeToolInput(toolName: string | undefined, input: unknown): strin
 function summarizeToolResult(toolName: string | undefined, output: unknown): string {
   if (!output || typeof output !== 'object') return '';
   const out = output as Record<string, unknown>;
+  // Failures come back through the runtime envelope as ordinary results, so check them first —
+  // otherwise a `{error, hint}` payload would fall through and report "done".
+  if (typeof out.error === 'string') return out.error;
   if (typeof out.total === 'number') return `${out.total} result(s)`;
   if (Array.isArray(out.chain)) return `${out.chain.length} layer(s)`;
   if (Array.isArray(out.parents)) return `${out.parents.length} parent(s)`;
@@ -329,9 +333,13 @@ export async function chatRoutes(app: FastifyInstance) {
           (reply.raw as unknown as { flush?: () => void }).flush?.();
         }
 
-        const usage = await result.usage;
+        const [usage, finishReason] = await Promise.all([result.usage, result.finishReason]);
         const answerText = JSON.stringify(lastObject ?? {});
-        // Structured mode has no tool loop: a single step, no tool definitions in the prompt.
+        // Structured mode has no tool loop: a single step, no tool definitions in the prompt, so the
+        // only way it stops early is running out of output tokens.
+        if (finishReason === 'length') {
+          console.warn(`[chat] Structured output truncated at maxOutputTokens=${maxTokens}`);
+        }
         const basis = measureTurn({ ...inputTokens, toolDefs: 0, reasoning: 0, answer: estimateTokens(answerText) }, {
           replay: [],
           toolCallTokens: 0,
@@ -340,6 +348,7 @@ export async function chatRoutes(app: FastifyInstance) {
         const breakdown = buildBreakdown(basis, resolved);
         const finishData = JSON.stringify({
           type: 'finish',
+          stopReason: finishReason === 'length' ? 'output-limit' : 'completed',
           usage: {
             promptTokens: resolved.promptTokens,
             completionTokens: resolved.completionTokens,
@@ -365,6 +374,9 @@ export async function chatRoutes(app: FastifyInstance) {
             maxTokens,
           shedTargetTokens: config.toolShedResultTokens,
         });
+        // Tool execution time, reported by the SDK and keyed by tool call, so the UI can show it
+        // without the timing ever entering the model's context.
+        const toolDurations = new Map<string, number>();
         const result = streamText({
           model: getProvider().chatModel(config.llmModel),
           system: SYSTEM_PROMPT,
@@ -375,6 +387,13 @@ export async function chatRoutes(app: FastifyInstance) {
                 tools,
                 stopWhen: stepCountIs(100),
                 prepareStep: ({ messages }) => shaper.prepare(messages as Record<string, unknown>[]) as never,
+                experimental_onToolCallFinish: ({ toolCall, durationMs }) => {
+                  // The SDK reports fractional milliseconds; the UI only ever shows whole ones.
+                  toolDurations.set(toolCall.toolCallId, Math.round(durationMs));
+                },
+                // Models carry coding-agent priors and invent `grep` / `cat` / `ls`. Remap the
+                // unambiguous ones instead of spending a step on NoSuchToolError.
+                experimental_repairToolCall: repairToolCall,
               }
             : {}),
           providerOptions: buildLlmProviderOptions(),
@@ -405,6 +424,17 @@ export async function chatRoutes(app: FastifyInstance) {
         let reasoningText = '';
         let answerText = '';
         let toolCallCount = 0;
+        let toolFailureCount = 0;
+        // Execution time per tool call, filled by `experimental_onToolCallFinish` above. Measuring
+        // the gap between the `tool-call` and `tool-result` stream parts instead would report the
+        // flush interval, not the work — the SDK can emit both back to back once a tool has already
+        // finished, which showed up as 0ms for calls that actually took tens of ms.
+        const durationOf = (id: string | undefined): number | undefined => {
+          if (!id) return undefined;
+          const ms = toolDurations.get(id);
+          toolDurations.delete(id);
+          return ms;
+        };
         for await (const part of result.fullStream) {
           const p = part as {
             type: string;
@@ -413,6 +443,7 @@ export async function chatRoutes(app: FastifyInstance) {
             delta?: string;
             error?: unknown;
             toolName?: string;
+            toolCallId?: string;
             input?: unknown;
             output?: unknown;
           };
@@ -439,8 +470,39 @@ export async function chatRoutes(app: FastifyInstance) {
             reply.raw.write(JSON.stringify({ type: 'tool-step', toolName: p.toolName, summary }) + '\n');
             (reply.raw as unknown as { flush?: () => void }).flush?.();
           } else if (p.type === 'tool-result') {
+            // The runtime envelope turns thrown tools into ordinary results carrying `error`, so
+            // success has to be read off the output shape rather than the stream part type.
+            const failed = isToolFailure(p.output);
+            if (failed) toolFailureCount++;
             reply.raw.write(
-              JSON.stringify({ type: 'tool-step', toolName: p.toolName, done: true, summary: summarizeToolResult(p.toolName, p.output) }) + '\n',
+              JSON.stringify({
+                type: 'tool-step',
+                toolName: p.toolName,
+                done: true,
+                ok: !failed,
+                durationMs: durationOf(p.toolCallId),
+                summary: summarizeToolResult(p.toolName, p.output),
+              }) + '\n',
+            );
+            (reply.raw as unknown as { flush?: () => void }).flush?.();
+          } else if (p.type === 'tool-error') {
+            // Failures that never reach `execute` — schema validation, unknown tool name. The model
+            // still receives them as tool results, so this must close the UI's trace line and must
+            // NOT throw: only a stream-level `error` may end the response.
+            toolFailureCount++;
+            const message = p.error instanceof Error ? p.error.message : String(p.error);
+            console.warn(`[chat] tool-error ${p.toolName ?? '?'} — ${message}`);
+            reply.raw.write(
+              JSON.stringify({
+                type: 'tool-step',
+                toolName: p.toolName,
+                done: true,
+                ok: false,
+                durationMs: durationOf(p.toolCallId),
+                // The SDK's message appends the full tool inventory, which is useful to the model but
+                // just noise in a one-line trace entry.
+                summary: message.split('. Available tools:')[0],
+              }) + '\n',
             );
             (reply.raw as unknown as { flush?: () => void }).flush?.();
           } else if (p.type === 'error') {
@@ -448,19 +510,27 @@ export async function chatRoutes(app: FastifyInstance) {
           }
         }
 
+        const finishReason = await result.finishReason;
         if (toolCallCount > 0) {
-          const finishReason = await result.finishReason;
-          console.log(`[chat] Agent used ${toolCallCount} tool call(s) | finishReason=${finishReason} | answerLen=${answerText.length}`);
+          console.log(
+            `[chat] Agent used ${toolCallCount} tool call(s)` +
+              (toolFailureCount > 0 ? ` (${toolFailureCount} failed)` : '') +
+              ` | finishReason=${finishReason} | answerLen=${answerText.length}`,
+          );
+        }
 
-          // Step-limit guard: if the loop stopped because of step count but the model was still
-          // requesting tool calls (no final text answer), surface an explicit error instead of
-          // silently truncating.
-          if (finishReason === 'tool-calls' && answerText.trim().length === 0) {
-            const stepLimitMsg = `工具调用已达步数上限（100步），模型未能产出最终答案。请尝试缩小问题范围或换用更具体的关键词重试。`;
-            reply.raw.write(JSON.stringify({ type: 'error', error: stepLimitMsg }) + '\n');
-            (reply.raw as unknown as { flush?: () => void }).flush?.();
-            chainObs.update({ level: 'ERROR', statusMessage: 'Agent step limit reached' });
-          }
+        // Why the loop ended, reported as a field on `finish` rather than as an `error` event: the
+        // UI owns the wording (it is fully localized) and `error` stays reserved for a stream that
+        // actually broke. `output-limit` was previously invisible — the answer just stopped.
+        let stopReason: 'completed' | 'step-limit' | 'output-limit' = 'completed';
+        if (finishReason === 'tool-calls' && answerText.trim().length === 0) {
+          stopReason = 'step-limit';
+          console.warn('[chat] Agent step limit reached without a final answer');
+          chainObs.update({ level: 'ERROR', statusMessage: 'Agent step limit reached' });
+        } else if (finishReason === 'length') {
+          stopReason = 'output-limit';
+          console.warn(`[chat] Output truncated at maxOutputTokens=${maxTokens}`);
+          chainObs.update({ level: 'WARNING', statusMessage: 'Output token limit reached' });
         }
 
         // `totalUsage` sums every step of the tool loop; `usage` is the last step alone, which is
@@ -483,6 +553,7 @@ export async function chatRoutes(app: FastifyInstance) {
         const breakdown = buildBreakdown(basis, resolved);
         const finishData = JSON.stringify({
           type: 'finish',
+          stopReason,
           usage: {
             promptTokens: resolved.promptTokens,
             completionTokens: resolved.completionTokens,

@@ -130,7 +130,10 @@
           </summary>
           <div class="flex flex-col gap-0.5 mt-0.5 pl-3 border-l border-base-300">
             {#each item.steps as step}
-              <span>{step.icon} {step.text}</span>
+              <span class:text-error={step.ok === false}>
+                {step.icon} {step.text}
+                {#if step.durationMs != null}<span class="text-base-content/30">{step.durationMs}ms</span>{/if}
+              </span>
             {/each}
           </div>
         </details>

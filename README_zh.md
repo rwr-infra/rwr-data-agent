@@ -134,36 +134,23 @@ curl -N http://localhost:3000/v1/chat/completions \
 
 ## 架构
 
-```
-用户提问
-  |
-  v
-意图解析        （类型推断、class="N" 提取、枚举/对比识别）
-  |
-  v
-查询改写        （历史对话 + 会话摘要 + 中英同义词扩展）
-  |
-  v
-本地检索        （MiniSearch，字段：key / name / 中文译名 / content，可按包过滤）
-  |
-  v
-Prompt 构建     （强制系统提示词 + 检索到的上下文）
-  |
-  v
-LLM 生成        （+ 7 个内置图谱工具：继承链、反向引用、转换链、读源码、
-                  按 glob 列文件、脚本符号、按 key 查节点；以及运行时加载的插件工具）
+```mermaid
+flowchart TD
+    Q["POST /v1/chat/completions"] --> META{"元问题？<br/>isMetaQuery"}
+    META -- 是 --> LLM
+    META -- 否 --> INTENT["意图分类 classifyQuery<br/>枚举 · 对比 · 具体查询"]
+    INTENT --> REWRITE["查询改写 buildSearchQuery<br/>历史对话 + 会话摘要 + 中英同义词扩展"]
+    REWRITE --> SEARCH["本地检索 localSearch<br/>MiniSearch + 实体图谱"]
+    SEARCH --> PROMPT["Prompt 构建 buildUserPrompt<br/>强制系统提示词 + 检索上下文"]
+    PROMPT --> LLM[["streamText — 有界工具循环"]]
+    LLM -- "工具调用" --> RT["toolRuntime<br/>重复防护 · 超时 · error+hint"]
+    RT --> TOOLS["8 个内置图谱工具<br/>+ tools.d 插件工具"]
+    TOOLS -- 结果 --> SHAPER["toolTranscript 整形<br/>默认全量重放，超预算才裁剪"]
+    SHAPER --> LLM
+    LLM --> OUT[["NDJSON：tool-step · text-delta · finish"]]
 ```
 
-### 索引构建
-
-```
-DATA_DIR ──发现数据包──▶ 逐包：解析文件 + 解析 languages/ 中文译名
-                              │
-                ┌─────────────┴─────────────┐
-                ▼                           ▼
-          output/graph.json          output/search-index.json
-          output/script-symbols.json
-```
+工具循环、上下文整形、流事件契约与索引构建的完整说明见 **[ARCHITECTURE.md](./ARCHITECTURE.md)**。
 
 ## 数据解析
 

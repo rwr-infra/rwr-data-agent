@@ -116,6 +116,24 @@ Node `file` paths are relative to the **data root** (not the package dir), so on
 
 Wrapped as AI SDK `tool()` definitions in `toolDefs.ts` and passed to `streamText({ tools, stopWhen: stepCountIs(100) })`. Tool-call/result events stream to the frontend as `tool-step` NDJSON lines.
 
+### Tool execution envelope (src/agent/toolRuntime.ts)
+
+`instrumentTools()` wraps **every** registered tool — built-ins and plugins alike — once per registry build. In order: reject a call that repeats an earlier one verbatim (`duplicate_call`), race `execute` against `TOOL_TIMEOUT_MS` and the request's `abortSignal`, and convert anything thrown into `{ error, hint }`. Nothing a tool throws escapes.
+
+Two consequences worth knowing before touching this:
+- **A failed tool arrives on the stream as `tool-result`, not `tool-error`** — success has to be read off the output shape via `isToolFailure()`. `tool-error` now only covers failures that never reach `execute` (schema validation, unknown tool name).
+- **Do not add a `try/catch` inside a tool or plugin.** Catching there looks like success to the envelope and the error loses its recovery `hint`.
+
+The duplicate guard is stateless: it scans `ToolCallOptions.messages`, which holds earlier steps' tool calls and results but not the call being executed. Per-request by construction, no shared state. Blind spot: calls issued in parallel *within one step* cannot see each other.
+
+`repairToolCall` (wired as `experimental_repairToolCall`) remaps hallucinated coding-agent tool names — models reach for `grep`, `cat`, `ls` out of habit — onto the real graph tool via the `TOOL_ALIASES` table. Only unambiguous names are mapped, and only when the argument carries a usable string; anything else returns `null` so the SDK's `NoSuchToolError` proceeds and the model self-corrects from the tool list in its message. **Never add a write, shell, or exec name to that table** — the alias exists to save a wasted step, not to widen the tool surface.
+
+### Tool transcript shaping (src/agent/toolTranscript.ts)
+
+`prepareStep` runs `createToolTranscriptShaper().prepare()`. It always applies provider-compatibility rewrites (Volcengine rejects assistant messages with null content; a tool result of `undefined` serialises to nothing). It sheds old tool results **only** when a step's prompt would overflow `MAX_CONTEXT_TOKENS × TOOL_CONTEXT_BUDGET_RATIO` minus the system prompt, tool definitions and output reservation — with the default window, effectively never. Shedding drops whole array items and clips long strings, keeping valid JSON plus a `_shed` note; the newest result is never shed.
+
+The shaper also records each step's measured `messages` size in `replay[]`, which `src/api/tokenAccounting.ts` uses to attribute the tool-transcript token slice from real measurements rather than a modelled rule.
+
 ## Tool Plugins (src/agent/plugins.ts, TOOLS_DIR)
 
 `getAgentTools()` is an async registry: built-ins ⊕ plugins discovered in `TOOLS_DIR` (default `./tools.d`). Mod-specific tools belong here, not in the core set — `tools.d/lookup-upgrade.js` (Castling weapon upgrade chains) is the reference implementation.
@@ -175,6 +193,8 @@ Every `.as` file becomes exactly **one** `script_chunk` document. Because `struc
 
 ## Architecture
 
+Diagrams for the request pipeline, the tool loop, the stream contract and the index build live in [`ARCHITECTURE.md`](./ARCHITECTURE.md). This section covers the details a coding agent needs, not the overview.
+
 ### Entry Points
 - `src/app.ts` — `buildApp()`: `await ensureIndexes()`, CORS, `/v1/*`, `/health`, static serving.
 - `src/api/server.ts` — local entry (`app.listen`).
@@ -196,12 +216,19 @@ Every `.as` file becomes exactly **one** `script_chunk` document. Because `struc
 3. `x-session-id` keys a rolling summary (`src/memory/summarizer.ts`, in-process `Map`, never persisted); summaries regenerate every `SUMMARY_INTERVAL_TURNS`.
 4. `isMetaQuery` short-circuits search for questions about the bot.
 5. `buildSearchQuery` (`src/retrieval/queryRewrite.ts`) merges history + summary + CN↔EN synonym expansion.
-6. `localSearch(query, filters, topK, enrichedQuery)` — `topK` 150 for enumeration, else 60; optionally filtered by `body.mod`.
+6. `localSearch(query, filters, topK, enrichedQuery)` — `topK` 150 for enumeration, else 30; optionally filtered by `body.mod`. Every result is then embedded in the prompt at up to 2000 chars, so enumeration turns are the dominant token cost — see P1 in [`docs/后续优化项.md`](./docs/后续优化项.md).
 7. Tools come from `getAgentTools()` (`src/agent/toolDefs.ts`), re-queried per request so hot-reloaded plugins take effect.
 8. `streamText` with graph tools, or `streamObject` with `EnumResultSchema`/`ComparisonResultSchema` (`src/types/schemas.ts`) when the query is enumeration/comparison **and** `response_format: json_object` (or `x-response-format`) is set.
 
 ### Streaming format
-Custom **NDJSON**, not SSE. One JSON object per line, keyed by `type`: `text-delta`, `reasoning-delta`, `json-delta`, `tool-step`, `finish`, `error`.
+Custom **NDJSON**, not SSE. One JSON object per line, keyed by `type`: `text-delta`, `reasoning-delta`, `json-delta`, `tool-step`, `finish`, `error`. Treat these shapes as a contract with the Web UI — **extend with new optional fields, never repurpose an existing one.**
+
+- `tool-step` — emitted twice per call: opening (`toolName`, `summary`) and closing (`done: true`, `ok`, `durationMs`). `ok: false` marks a failed call; the UI must still close the trace line or a failure reads as still running.
+- `finish` — `stopReason` is `completed` | `step-limit` | `output-limit`. `usage` separates **spend** from **occupancy**: `promptTokens`/`completionTokens` sum every step of the tool loop, while `contextTokens` is what the *next* request will carry (the tool transcript is excluded — it never survives the turn, and the UI gates sending on this number). `maxContextTokens` lets the UI follow server config. `breakdown` attributes the totals per slice, with `exact` listing which figures the provider reported verbatim.
+- `error` — the stream itself broke. **Not** used for tool failures (those are `tool-step` with `ok: false`) or for stop reasons (those are `finish.stopReason`). Never put user-facing prose here that the frontend could localize itself.
+
+### Deferred work
+[`docs/后续优化项.md`](./docs/后续优化项.md) records what the design reference asks for that is not implemented yet, with measurements and the reasoning for each deferral. Read it before starting anything that touches retrieval context size, the step limit, or intent classification.
 
 ### Frontend
 Svelte 5 + Vite + Tailwind 4 + daisyUI in `web/`, building into `public/` — treat `public/` as generated. `web/vite.config.ts` reads `PORT` from the repo-root `.env` via `loadEnv`, so the dev proxy always follows the backend port. The Header's dropdown is a package filter fed by `GET /v1/packages`; it hides itself when there is only one package.
@@ -224,8 +251,11 @@ Svelte 5 + Vite + Tailwind 4 + daisyUI in `web/`, building into `public/` — tr
 | `TOOLS_DIR` | `./tools.d` | Runtime tool plugins; skipped if absent |
 | `TOOLS_HOT_RELOAD` | on outside prod, off on Vercel | Watch `TOOLS_DIR` and reload on the next request |
 | `PORT` | `3000` | |
-| `MAX_CONTEXT_TOKENS` | `500000` | |
+| `MAX_CONTEXT_TOKENS` | `500000` | Also reported to the UI on `finish`, so the usage bar follows it |
 | `LLM_MAX_OUTPUT_TOKENS` | `32768` | Reasoning + answer share this budget |
+| `TOOL_TIMEOUT_MS` | `15000` | Deadline per tool execution; expiry returns `{error, hint}` |
+| `TOOL_CONTEXT_BUDGET_RATIO` | `0.75` | Window fraction a step's prompt may fill before old tool results are shed |
+| `TOOL_SHED_RESULT_TOKENS` | `600` | Size an old tool result is shrunk to when shedding is unavoidable |
 | `LLM_REASONING_EFFORT` / `LLM_THINKING_ENABLED` / `LLM_TEMPERATURE` | unset | Omitted from the request when unset |
 | `SUMMARY_INTERVAL_TURNS` / `SUMMARY_MODEL` | `3` / `LLM_MODEL` | |
 | `LANGFUSE_*` | disabled | |

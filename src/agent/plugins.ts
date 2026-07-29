@@ -111,21 +111,14 @@ function validateSpec(spec: unknown, file: string): PluginToolSpec {
   return s as PluginToolSpec;
 }
 
-function toTool(spec: PluginToolSpec, file: string): Tool {
+function toTool(spec: PluginToolSpec): Tool {
   return dynamicTool({
     description: spec.description,
     inputSchema: jsonSchema(spec.inputSchema),
-    // A throwing plugin must not kill the response stream — hand the model the error
-    // so it can explain or route around it.
-    execute: async (input) => {
-      try {
-        return await spec.execute(input as never);
-      } catch (err) {
-        const message = (err as Error).message;
-        console.warn(`[plugin] ${file}: tool "${spec.name}" threw: ${message}`);
-        return { error: message };
-      }
-    },
+    // No try/catch here: `instrumentTools` (agent/toolRuntime.ts) wraps every registered tool with
+    // the deadline and the `{error, hint}` envelope. Catching here would look like success to it and
+    // the plugin's error would lose its recovery hint.
+    execute: (input) => spec.execute(input as never),
   });
 }
 
@@ -186,7 +179,7 @@ export async function loadToolPlugins(host: ToolHost, reservedNames: Iterable<st
           entries.push({ name: spec.name, file, loadedAt, error: 'duplicate tool name — ignored' });
           continue;
         }
-        tools[spec.name] = toTool(spec, file);
+        tools[spec.name] = toTool(spec);
         entries.push({ name: spec.name, file, description: spec.description, loadedAt });
       }
     } catch (err) {

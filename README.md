@@ -130,37 +130,24 @@ curl -N http://localhost:3000/v1/chat/completions \
 
 ## Architecture
 
-```
-User Query
-  |
-  v
-Intent Parsing      (type inference, class="N" extraction, enumeration detection)
-  |
-  v
-Query Rewrite       (history + session summary + CN↔EN synonym expansion)
-  |
-  v
-Local Search        (MiniSearch over key / name / i18n names / content, optional package filter)
-  |
-  v
-Prompt Builder      (enforced system prompt + retrieved context)
-  |
-  v
-LLM Generation      (+ 7 built-in graph tools the model can call — inheritance,
-                     references, transform chains, source reading, file listing,
-                     script symbols — plus any runtime plugins)
+```mermaid
+flowchart TD
+    Q["POST /v1/chat/completions"] --> META{"isMetaQuery?"}
+    META -- yes --> LLM
+    META -- no --> INTENT["classifyQuery<br/>enumeration · comparison · specific"]
+    INTENT --> REWRITE["buildSearchQuery<br/>history + session summary + CN↔EN synonyms"]
+    REWRITE --> SEARCH["localSearch<br/>MiniSearch + entity graph"]
+    SEARCH --> PROMPT["buildUserPrompt<br/>enforced system prompt + retrieved context"]
+    PROMPT --> LLM[["streamText — bounded tool loop"]]
+    LLM -- "tool call" --> RT["toolRuntime<br/>dedupe · deadline · error+hint"]
+    RT --> TOOLS["8 built-in graph tools<br/>+ tools.d plugins"]
+    TOOLS -- result --> SHAPER["toolTranscript shaper<br/>full replay unless over budget"]
+    SHAPER --> LLM
+    LLM --> OUT[["NDJSON: tool-step · text-delta · finish"]]
 ```
 
-### Index build
-
-```
-DATA_DIR ──discover packages──▶ per package: parse files + resolve languages/ i18n
-                                       │
-                        ┌──────────────┴──────────────┐
-                        ▼                             ▼
-                  output/graph.json            output/search-index.json
-                  output/script-symbols.json
-```
+The tool loop, the transcript shaper, the stream event contract and the index build are documented in
+**[ARCHITECTURE.md](./ARCHITECTURE.md)**.
 
 ## Tool Plugins
 

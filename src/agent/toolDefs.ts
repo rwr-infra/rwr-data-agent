@@ -14,6 +14,7 @@ import {
   searchDocs,
 } from './tools.js';
 import { createToolHost, loadToolPlugins, type PluginEntry } from './plugins.js';
+import { instrumentTools } from './toolRuntime.js';
 
 let configured = false;
 
@@ -183,7 +184,9 @@ export async function getAgentTools(): Promise<Record<string, Tool>> {
 
   const { tools: plugins, entries } = await loadToolPlugins(createToolHost(), builtinNames);
   pluginEntries = entries;
-  registry = { ...builtin, ...plugins };
+  // One envelope over built-ins and plugins alike: duplicate guard, deadline, `{error, hint}` on
+  // failure. Wrapped here rather than per request so the token-accounting cache keeps its key.
+  registry = instrumentTools({ ...builtin, ...plugins });
   dirty = false;
 
   const ok = entries.filter((e) => !e.error);

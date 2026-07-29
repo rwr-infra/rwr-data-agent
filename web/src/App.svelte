@@ -347,13 +347,17 @@
                 }
               }
             } else if (event.type === 'tool-step') {
-              const icon = event.done ? '\u2713' : '\uD83D\uDD27';
+              // `ok` is absent on the opening step and false when the tool returned an error \u2014 a
+              // failed call must still close its line, otherwise it reads as still running.
+              const failed = event.done && event.ok === false;
+              const icon = !event.done ? '\uD83D\uDD27' : failed ? '\u2715' : '\u2713';
               const text = event.summary ?? event.toolName ?? 'tool';
+              const step = { icon, text, ok: event.done ? event.ok !== false : undefined, durationMs: event.durationMs };
               if (currentTraceIdx >= 0 && displayItems[currentTraceIdx]?.type === 'tool-trace') {
-                displayItems[currentTraceIdx].steps.push({ icon, text });
+                displayItems[currentTraceIdx].steps.push(step);
                 displayItems = [...displayItems];
               } else {
-                displayItems.push({ type: 'tool-trace', steps: [{ icon, text }], id: uid() });
+                displayItems.push({ type: 'tool-trace', steps: [step], id: uid() });
                 currentTraceIdx = displayItems.length - 1;
                 displayItems = displayItems;
               }
@@ -377,6 +381,12 @@
               const outTokens = usage?.completionTokens != null ? (est ? `~${usage.completionTokens}` : usage.completionTokens) : '-';
               if (usage?.breakdown) lastBreakdown = usage.breakdown;
               displayItems.push({ type: 'meta', text: tr.metaFormat(ttfb, totalTime, inTokens, outTokens, usage?.breakdown?.steps), id: uid() });
+              // Why the loop ended, when it was not a clean finish. The backend reports the reason,
+              // not the wording, so it can be shown in the user's language.
+              const stopNote = event.stopReason === 'step-limit' ? tr.stopStepLimit
+                : event.stopReason === 'output-limit' ? tr.stopOutputLimit
+                : null;
+              if (stopNote) displayItems.push({ type: 'meta', text: stopNote, id: uid() });
               displayItems = displayItems;
             }
           } catch {}

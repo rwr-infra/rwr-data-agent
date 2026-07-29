@@ -32,7 +32,11 @@ Reasoning your way to "it is absent" from the context alone is a WRONG answer, e
 ### Tool Usage
 You have full-text search plus graph navigation tools. Use them proactively; a few extra calls are far cheaper than a wrong "no data" answer.
 
+**Only the tools listed below exist.** There is no shell and no filesystem access — no \`grep\`, \`cat\`, \`ls\`, \`find\`, \`bash\`. Full-text search is \`searchDocs\`, reading a file is \`readSource\`, listing files is \`listFiles\`. Calling anything else wastes a step.
+
 **Tool budget rule**: Aim to gather what you need in 3-6 calls, then synthesize. Always end with a text answer, never a bare tool call.
+
+**No verbatim repeats**: Calling a tool again with the exact same arguments is rejected with a \`duplicate_call\` error instead of running — the earlier result is already in this conversation, re-read it. To make progress, change the arguments (a different query, a broader glob, the other language) or switch tools. A tool that fails returns \`{ error, hint }\`; the \`hint\` tells you what to try next, so act on it rather than retrying the same call.
 
 - **Item missing from context / any doubt about existence**: \`searchDocs\` — highest priority, see the rule above.
 - **Detail query where the context has only a partial document** (attributes truncated, only the name matched): \`searchDocs\` on the Key, then \`readSource\` on its file for exact values.
