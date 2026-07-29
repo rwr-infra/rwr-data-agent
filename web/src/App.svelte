@@ -36,7 +36,9 @@
   let selectedMod = $state(readCache().selectedMod ?? '');
   let contextUsed = $state(0);
   let lastBreakdown = $state<TokenBreakdown | undefined>(undefined);
-  const MAX_CONTEXT = 500000;
+  // Fallback until the first `finish` event reports the server's own MAX_CONTEXT_TOKENS. Hardcoding
+  // it alone would put the gate and the bar's denominator out of step with the server config.
+  let maxContext = $state(500000);
   let pendingRecallId: string | null = $state(null);
   let prefillText = $state('');
   let toast = $state<{ message: string; visible: boolean }>({ message: '', visible: false });
@@ -250,7 +252,7 @@
 
     if (!isRetry) {
       const checkBase = contextUsed > 0 ? contextUsed : estimateHistoryTokens();
-      if (checkBase + estimateTokens(text) >= MAX_CONTEXT) {
+      if (checkBase + estimateTokens(text) >= maxContext) {
         showWelcome = false;
         displayItems.push({ type: 'message', role: 'error', content: tr.ctxOver, id: uid() });
         displayItems = displayItems;
@@ -358,8 +360,14 @@
             } else if (event.type === 'finish') {
               const usage = event.usage;
               if (usage) {
-                const reportedTotal = (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0);
-                contextUsed = Math.max(contextUsed, reportedTotal, estimateHistoryTokens());
+                // `contextTokens` is what the *next* request will carry: the base prompt plus the
+                // conversation, with this turn's tool transcript excluded — the transcript is never
+                // sent again. It can legitimately shrink (fewer retrieved docs on the next turn), so
+                // it must not be clamped to a high-water mark: doing so would keep an overstated
+                // value forever and eventually trip the send gate below with room still left.
+                // promptTokens/completionTokens are cumulative *spend* across steps, not occupancy.
+                if (usage.maxContextTokens) maxContext = usage.maxContextTokens;
+                contextUsed = Math.max(usage.contextTokens ?? contextUsed, estimateHistoryTokens());
               }
               const totalTime = Math.round(performance.now() - t0);
               const ttfb = firstChunkTime > 0 ? Math.round(firstChunkTime - t0) : '-';
@@ -368,7 +376,7 @@
               const inTokens = usage?.promptTokens != null ? (est ? `~${usage.promptTokens}` : usage.promptTokens) : '-';
               const outTokens = usage?.completionTokens != null ? (est ? `~${usage.completionTokens}` : usage.completionTokens) : '-';
               if (usage?.breakdown) lastBreakdown = usage.breakdown;
-              displayItems.push({ type: 'meta', text: tr.metaFormat(ttfb, totalTime, inTokens, outTokens), id: uid() });
+              displayItems.push({ type: 'meta', text: tr.metaFormat(ttfb, totalTime, inTokens, outTokens, usage?.breakdown?.steps), id: uid() });
               displayItems = displayItems;
             }
           } catch {}
@@ -538,7 +546,7 @@
     {tr}
     {loading}
     contextUsed={effectiveContextUsed}
-    maxContext={MAX_CONTEXT}
+    maxContext={maxContext}
     breakdown={lastBreakdown}
     onsend={sendMessage}
     oninputchange={handleInputChange}

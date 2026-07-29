@@ -13,6 +13,15 @@ import { classifyQuery, isMetaQuery } from '../../retrieval/intent.js';
 import { EnumResultSchema, ComparisonResultSchema } from '../../types/schemas.js';
 import { getSummary, generateSummary, shouldGenerateSummary } from '../../memory/summarizer.js';
 import { getAgentTools as loadAgentTools } from '../../agent/toolDefs.js';
+import { createToolTranscriptShaper } from '../../agent/toolTranscript.js';
+import {
+  buildBreakdown,
+  estimateTokens,
+  measureToolCallTokens,
+  measureToolDefTokens,
+  measureTurn,
+  resolveUsage,
+} from '../tokenAccounting.js';
 import type { Tool } from 'ai';
 import type { ChatCompletionRequest, SearchResult } from '../../types/index.js';
 
@@ -59,12 +68,6 @@ async function getAgentTools(): Promise<Record<string, Tool> | null> {
     console.warn(`[chat] Agent tools unavailable (${(err as Error).message}), falling back to pure RAG`);
     return null;
   }
-}
-
-/** Char-based token estimate, matching the request-size guard divisor (chat.ts ~line 59).
- *  Used as a fallback when the upstream provider omits usage in streaming mode. */
-function estimateTokensFromChars(text: string): number {
-  return Math.ceil(text.length / 1.5);
 }
 
 /**
@@ -125,62 +128,6 @@ function summarizeToolResult(toolName: string | undefined, output: unknown): str
   if (Array.isArray(out.symbols)) return `${out.symbols.length} symbol(s)`;
   if (typeof out.totalLines === 'number') return `${out.totalLines} line(s)`;
   return 'done';
-}
-
-/** Resolve token usage for the finish event. Many OpenAI-compatible backends omit (or return
- *  NaN/0) usage on streamed responses; in that case fall back to a char-based estimate from the
- *  real prompt (system + messages) and generated output, and flag the result as estimated so the
- *  UI can mark it (e.g. with a "~" prefix). */
-function resolveUsage(
-  usage: { inputTokens?: number; outputTokens?: number } | undefined,
-  promptText: string,
-  outputText: string,
-): { promptTokens: number; completionTokens: number; estimated: boolean } {
-  const valid = (n: number | undefined): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0;
-  const inReal = valid(usage?.inputTokens) ? usage.inputTokens : undefined;
-  const outReal = valid(usage?.outputTokens) ? usage.outputTokens : undefined;
-  return {
-    promptTokens: inReal ?? estimateTokensFromChars(promptText),
-    completionTokens: outReal ?? estimateTokensFromChars(outputText),
-    estimated: inReal === undefined || outReal === undefined,
-  };
-}
-
-export interface TokenBreakdown {
-  systemPrompt: number;
-  context: number;
-  messages: number;
-  reasoning: number;
-  answer: number;
-}
-
-/** Break the input/output token totals down by component (system prompt, retrieved context,
- *  conversation messages; reasoning vs answer) using char-based estimates, then scale each group
- *  proportionally so the parts sum to the displayed In/Out totals. Lets the UI show "where the
- *  tokens went" even when the provider only reports aggregate usage. */
-function buildBreakdown(
-  chars: { system: number; context: number; messages: number; reasoning: number; answer: number },
-  inputTotal: number,
-  outputTotal: number,
-): TokenBreakdown {
-  const tok = (c: number) => Math.ceil(c / 1.5);
-  const sys = tok(chars.system);
-  const ctx = tok(chars.context);
-  const msg = tok(chars.messages);
-  const rea = tok(chars.reasoning);
-  const ans = tok(chars.answer);
-  const inSum = sys + ctx + msg;
-  const outSum = rea + ans;
-  const inScale = inSum > 0 ? inputTotal / inSum : 0;
-  const outScale = outSum > 0 ? outputTotal / outSum : 0;
-  const scale = (n: number, s: number) => Math.round(n * s);
-  return {
-    systemPrompt: scale(sys, inScale),
-    context: scale(ctx, inScale),
-    messages: scale(msg, inScale),
-    reasoning: scale(rea, outScale),
-    answer: scale(ans, outScale),
-  };
 }
 
 // eslint-disable-next-line @typescript-eslint/require-await -- Fastify plugin contract: register() awaits the returned promise, so `async` is the interface here.
@@ -324,19 +271,16 @@ export async function chatRoutes(app: FastifyInstance) {
       config.llmMaxOutputTokens,
     );
 
-    // Real prompt sent to the model (system + messages), used to estimate input tokens when the
-    // provider omits usage. Includes the RAG context the frontend can't see, so it is far more
-    // accurate than a client-side estimate.
-    const promptText = SYSTEM_PROMPT + '\n' + llmMessages.map((m) => m.content).join('\n');
-
-    // Char counts per input component for the token breakdown. The RAG user prompt wraps the
-    // retrieved docs + instructions around the question, so "context" is that prompt minus the
-    // raw question, and "messages" is the conversation history plus the question itself.
-    const historyChars = historyMessages.reduce((sum, m) => sum + m.content.length, 0);
-    const inputChars = {
-      system: SYSTEM_PROMPT.length,
-      context: Math.max(ragUserPrompt.length - query.length, 0),
-      messages: historyChars + query.length,
+    // Per-component token estimates for the breakdown, and the fallback input total when the
+    // provider omits usage. Measured server-side, so they include the RAG context the frontend
+    // can't see. The RAG user prompt wraps the retrieved docs + instructions around the question,
+    // so "context" is that prompt minus the raw question, and "messages" is the conversation
+    // history plus the question itself.
+    const queryTokens = estimateTokens(query);
+    const inputTokens = {
+      system: estimateTokens(SYSTEM_PROMPT),
+      context: Math.max(estimateTokens(ragUserPrompt) - queryTokens, 0),
+      messages: historyMessages.reduce((sum, m) => sum + estimateTokens(m.content), 0) + queryTokens,
     };
 
     const genObs = chainObs.startObservation('llm-generation', {
@@ -387,17 +331,20 @@ export async function chatRoutes(app: FastifyInstance) {
 
         const usage = await result.usage;
         const answerText = JSON.stringify(lastObject ?? {});
-        const resolved = resolveUsage(usage, promptText, answerText);
-        const breakdown = buildBreakdown(
-          { ...inputChars, reasoning: 0, answer: answerText.length },
-          resolved.promptTokens,
-          resolved.completionTokens,
-        );
+        // Structured mode has no tool loop: a single step, no tool definitions in the prompt.
+        const basis = measureTurn({ ...inputTokens, toolDefs: 0, reasoning: 0, answer: estimateTokens(answerText) }, {
+          replay: [],
+          toolCallTokens: 0,
+        });
+        const resolved = resolveUsage(usage, usage, basis);
+        const breakdown = buildBreakdown(basis, resolved);
         const finishData = JSON.stringify({
           type: 'finish',
           usage: {
             promptTokens: resolved.promptTokens,
             completionTokens: resolved.completionTokens,
+            contextTokens: resolved.contextTokens,
+            maxContextTokens: config.maxContextTokens,
             estimated: resolved.estimated,
             breakdown,
           },
@@ -406,6 +353,18 @@ export async function chatRoutes(app: FastifyInstance) {
         (reply.raw as unknown as { flush?: () => void }).flush?.();
       } else {
         const tools = await getAgentTools();
+        const toolDefTokens = measureToolDefTokens(tools);
+        // Tool results are replayed in full; the shaper only sheds them if a step's prompt would
+        // otherwise overflow the window. The system prompt, tool definitions and the output
+        // reservation ride alongside `messages`, so they come off the budget first.
+        const shaper = createToolTranscriptShaper({
+          budgetTokens:
+            Math.floor(config.maxContextTokens * config.toolContextBudgetRatio) -
+            inputTokens.system -
+            toolDefTokens -
+            maxTokens,
+          shedTargetTokens: config.toolShedResultTokens,
+        });
         const result = streamText({
           model: getProvider().chatModel(config.llmModel),
           system: SYSTEM_PROMPT,
@@ -415,88 +374,25 @@ export async function chatRoutes(app: FastifyInstance) {
             ? {
                 tools,
                 stopWhen: stepCountIs(100),
-                prepareStep: ({ messages }: { messages: Record<string, unknown>[] }) => {
-                  // Compress tool results from older steps to prevent context explosion,
-                  // AND ensure all messages are provider-compatible (some providers like
-                  // Volcengine reject assistant messages with null/missing content when
-                  // they only contain tool calls).
-                  const MAX_OUTPUT_CHARS = 800;
-                  const KEEP_RECENT = 4;
-
-                  const toolIdx = messages.flatMap((m, i) => (m.role === 'tool' ? [i] : []));
-                  const oldIdx = new Set(toolIdx.slice(0, Math.max(0, toolIdx.length - KEEP_RECENT)));
-
-                  let changed = false;
-                  const processed = messages.map((msg, i) => {
-                    // 1) Normalise + compress tool results.
-                    //    `output` is a tagged union — {type:'json'|'text'|…, value} — and the
-                    //    provider's converter switches on that tag. Replacing it with a bare
-                    //    string makes the tag undefined, the converter emits nothing, and the
-                    //    request goes out with a tool message that has no `content` at all
-                    //    (Volcengine: "missing `messages.content` parameter"). Truncated JSON
-                    //    is no longer valid JSON either, so compressed output becomes 'text'.
-                    if (msg.role === 'tool' && Array.isArray(msg.content)) {
-                      const newContent = (msg.content as Record<string, unknown>[]).map((part) => {
-                        if (part.type !== 'tool-result') return part;
-
-                        const output = part.output as { type?: string; value?: unknown } | string | undefined;
-                        const value =
-                          output !== null && typeof output === 'object' && 'value' in output ? output.value : output;
-                        const asString = typeof value === 'string' ? value : JSON.stringify(value);
-
-                        // A tool that resolved to undefined would serialise to nothing at all.
-                        if (asString === undefined) {
-                          changed = true;
-                          return { ...part, output: { type: 'text', value: 'null' } };
-                        }
-
-                        if (!oldIdx.has(i) || asString.length <= MAX_OUTPUT_CHARS) return part;
-
-                        changed = true;
-                        return {
-                          ...part,
-                          output: {
-                            type: 'text',
-                            value:
-                              asString.slice(0, MAX_OUTPUT_CHARS) +
-                              `\n…[compressed: ${asString.length} → ${MAX_OUTPUT_CHARS} chars]`,
-                          },
-                        };
-                      });
-                      return { ...msg, content: newContent };
-                    }
-
-                    // 2) Fix assistant messages that have only tool-call parts (no text)
-                    //    — providers like Volcengine reject `content: null`.
-                    if (
-                      msg.role === 'assistant' &&
-                      Array.isArray(msg.content) &&
-                      (msg.content as Record<string, unknown>[]).length > 0 &&
-                      !(msg.content as Record<string, unknown>[]).some((p) => p.type === 'text')
-                    ) {
-                      changed = true;
-                      return {
-                        ...msg,
-                        content: [{ type: 'text', text: ' ' }, ...(msg.content as Record<string, unknown>[])],
-                      };
-                    }
-
-                    return msg;
-                  });
-
-                  return changed ? { messages: processed as never } : {};
-                },
+                prepareStep: ({ messages }) => shaper.prepare(messages as Record<string, unknown>[]) as never,
               }
             : {}),
           providerOptions: buildLlmProviderOptions(),
-          onFinish: ({ text, usage }) => {
+          onFinish: ({ text, totalUsage }) => {
             const outputText = text.slice(0, 500);
+            // `totalUsage`, not `usage`: the latter reports only the tool loop's final step.
             genObs.update({
               output: outputText,
               usageDetails: {
-                inputTokens: usage?.inputTokens ?? 0,
-                outputTokens: usage?.outputTokens ?? 0,
-                totalTokens: (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0),
+                inputTokens: totalUsage?.inputTokens ?? 0,
+                outputTokens: totalUsage?.outputTokens ?? 0,
+                totalTokens: (totalUsage?.inputTokens ?? 0) + (totalUsage?.outputTokens ?? 0),
+                ...(totalUsage?.outputTokenDetails?.reasoningTokens
+                  ? { reasoningTokens: totalUsage.outputTokenDetails.reasoningTokens }
+                  : {}),
+                ...(totalUsage?.inputTokenDetails?.cacheReadTokens
+                  ? { cacheReadInputTokens: totalUsage.inputTokenDetails.cacheReadTokens }
+                  : {}),
               },
             });
             chainObs.otelSpan.setAttribute('langfuse.trace.output', outputText);
@@ -567,18 +463,31 @@ export async function chatRoutes(app: FastifyInstance) {
           }
         }
 
-        const usage = await result.usage;
-        const resolved = resolveUsage(usage, promptText, reasoningText + answerText);
-        const breakdown = buildBreakdown(
-          { ...inputChars, reasoning: reasoningText.length, answer: answerText.length },
-          resolved.promptTokens,
-          resolved.completionTokens,
+        // `totalUsage` sums every step of the tool loop; `usage` is the last step alone, which is
+        // what still occupies the context window.
+        const [totalUsage, lastStepUsage, stepResults] = await Promise.all([
+          result.totalUsage,
+          result.usage,
+          result.steps,
+        ]);
+        const basis = measureTurn(
+          {
+            ...inputTokens,
+            toolDefs: toolDefTokens,
+            reasoning: estimateTokens(reasoningText),
+            answer: estimateTokens(answerText),
+          },
+          { replay: shaper.replay, toolCallTokens: measureToolCallTokens(stepResults) },
         );
+        const resolved = resolveUsage(totalUsage, lastStepUsage, basis);
+        const breakdown = buildBreakdown(basis, resolved);
         const finishData = JSON.stringify({
           type: 'finish',
           usage: {
             promptTokens: resolved.promptTokens,
             completionTokens: resolved.completionTokens,
+            contextTokens: resolved.contextTokens,
+            maxContextTokens: config.maxContextTokens,
             estimated: resolved.estimated,
             breakdown,
           },

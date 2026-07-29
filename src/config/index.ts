@@ -41,6 +41,18 @@ export const config = {
   // enumerations/comparisons; raise if answers get truncated. DeepSeek-V4 allows up to 384K.
   llmMaxOutputTokens: parseInt(process.env.LLM_MAX_OUTPUT_TOKENS ?? '32768', 10),
 
+  // ── Agent tool transcript ─────────────────────────────────────────────────
+  /**
+   * Fraction of the context window a step's prompt may occupy before the agent loop starts
+   * shedding its oldest tool results. Tool results are replayed in full below this line — an
+   * unconditional compression costs answer quality on multi-step enumerations, where the older
+   * results *are* the answer. With the default window this threshold is effectively never reached;
+   * it exists to survive pathological tool output, not to save tokens routinely.
+   */
+  toolContextBudgetRatio: parseFloat(process.env.TOOL_CONTEXT_BUDGET_RATIO ?? '0.75'),
+  /** Size an old tool result is shrunk to when shedding is unavoidable. */
+  toolShedResultTokens: parseInt(process.env.TOOL_SHED_RESULT_TOKENS ?? '600', 10),
+
   // ── Session memory ────────────────────────────────────────────────────────
   summaryIntervalTurns: parseInt(process.env.SUMMARY_INTERVAL_TURNS ?? '3', 10),
   summaryModel: process.env.SUMMARY_MODEL ?? process.env.LLM_MODEL ?? 'deepseek-v4-flash',
