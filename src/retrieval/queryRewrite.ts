@@ -50,19 +50,29 @@ const BILINGUAL_MAP: Record<string, string[]> = {
   '规格': ['specification'],
 };
 
+/**
+ * CN↔EN term expansion. Must only ever be given the user's own question — never a
+ * string with entity keys spliced in. A key like `gkw_m1.weapon` contains "weapon",
+ * which reverse-maps to 枪/步枪/冲锋枪/狙击/霰弹枪 and floods the query with
+ * high-frequency CJK terms that then dominate ranking over the actual entity.
+ */
 function expandWithSynonyms(query: string): string {
   const extras: string[] = [];
+  const lower = query.toLowerCase();
 
   for (const [cn, enTerms] of Object.entries(BILINGUAL_MAP)) {
     if (query.includes(cn)) {
       for (const term of enTerms) {
-        if (!query.toLowerCase().includes(term.toLowerCase())) {
+        if (!lower.includes(term.toLowerCase())) {
           extras.push(term);
         }
       }
     }
     for (const term of enTerms) {
-      if (query.toLowerCase().includes(term.toLowerCase()) && !query.includes(cn)) {
+      // Word-boundary match so a key suffix (".weapon") or a substring inside an
+      // identifier does not count as the user having written the English term.
+      const isolated = new RegExp(`(^|[^a-z0-9_])${escapeRegex(term.toLowerCase())}([^a-z0-9_]|$)`);
+      if (isolated.test(lower) && !query.includes(cn)) {
         extras.push(cn);
         break;
       }
@@ -74,13 +84,9 @@ function expandWithSynonyms(query: string): string {
   return `${query} ${uniqueExtras.join(' ')}`;
 }
 
-export function expandQuery(query: string): string {
-  return expandWithSynonyms(query);
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
-
-const ENTITY_KEY_PATTERN = /`([a-zA-Z0-9_]+\.(?:weapon|vehicle|projectile|call|carry_item|xml|character))`/g;
-const ENTITY_KEY_BOLD_PATTERN = /\*\*([a-zA-Z0-9_]+\.(?:weapon|vehicle|projectile|call|carry_item|xml|character))\*\*/g;
-const ENTITY_KEY_PLAIN_PATTERN = /\b([a-zA-Z0-9_]+\.(?:weapon|vehicle|projectile|call|carry_item|xml|character))\b/g;
 
 function extractEntityKeys(text: string): string[] {
   const keys: string[] = [];
@@ -123,6 +129,8 @@ function extractMentionedItemNames(text: string): string[] {
 
 export function buildSearchQuery(currentQuery: string, history: HistoryMessage[], summary?: SummaryContext): string {
   const parts: string[] = [];
+  // Expanded once, from the question alone — see expandWithSynonyms.
+  const expandedCurrent = expandWithSynonyms(currentQuery);
 
   if (summary) {
     if (summary.summary) {
@@ -134,7 +142,7 @@ export function buildSearchQuery(currentQuery: string, history: HistoryMessage[]
   }
 
   if (history.length === 0 && parts.length > 0) {
-    parts.push(currentQuery);
+    parts.push(expandedCurrent);
     const seen = new Set<string>();
     return parts.filter(p => {
       if (seen.has(p)) return false;
@@ -143,7 +151,7 @@ export function buildSearchQuery(currentQuery: string, history: HistoryMessage[]
     }).join(' ');
   }
 
-  if (history.length === 0) return currentQuery;
+  if (history.length === 0) return expandedCurrent;
 
   const recentUserQueries = history
     .filter(m => m.role === 'user')
@@ -182,7 +190,7 @@ export function buildSearchQuery(currentQuery: string, history: HistoryMessage[]
     }
   }
 
-  parts.push(currentQuery);
+  parts.push(expandedCurrent);
 
   const seen = new Set<string>();
   return parts.filter(p => {

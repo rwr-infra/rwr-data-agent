@@ -1,38 +1,47 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { Translations } from '../lib/i18n.js';
-  import type { TableOption } from '../lib/types.js';
+  import type { PackageOption } from '../lib/types.js';
   import type { Theme } from '../lib/theme.js';
+  import { authHeaders } from '../lib/api.js';
 
   interface Props {
     lang: string;
     tr: Translations;
-    selectedTable: string;
+    selectedMod: string;
     theme: Theme;
-    ontablechange: (table: string) => void;
+    onmodchange: (mod: string) => void;
     ontogglelang: () => void;
     ontoggletheme: () => void;
     ontogglemenu: () => void;
   }
-  let { lang, tr, selectedTable, theme, ontablechange, ontogglelang, ontoggletheme, ontogglemenu }: Props = $props();
+  let { lang, tr, selectedMod, theme, onmodchange, ontogglelang, ontoggletheme, ontogglemenu }: Props = $props();
 
-  let tables: TableOption[] = $state([]);
+  interface PackageInfo {
+    name: string;
+    displayName: string;
+    count: number;
+  }
+
+  let pkgList: PackageInfo[] = $state([]);
+
+  // '' means "search across every package". A single package needs no picker —
+  // everything already comes from it, so just show its name.
+  const packages: PackageOption[] = $derived(
+    pkgList.length === 1
+      ? [{ value: '', label: pkgList[0].displayName || pkgList[0].name }]
+      : [
+          { value: '', label: tr.allPackages },
+          ...pkgList.map((p) => ({ value: p.name, label: p.displayName || p.name })),
+        ],
+  );
 
   onMount(async () => {
     try {
-      const res = await fetch('/v1/tables');
+      const res = await fetch('/v1/packages', { headers: authHeaders() });
       if (!res.ok) return;
       const data = await res.json();
-      const def = data.default || 'rwr_documents';
-      const list: string[] = data.tables || [];
-      if (!list.length) {
-        tables = [{ value: '', label: def + ' ' + tr.defaultTag }];
-      } else {
-        tables = list.map((tbl: string) => ({
-          value: tbl === def ? '' : tbl,
-          label: tbl + (tbl === def ? ' ' + tr.defaultTag : ''),
-        }));
-      }
+      pkgList = data.packages || [];
     } catch {}
   });
 </script>
@@ -48,10 +57,11 @@
   <div class="order-3 w-full sm:order-2 sm:w-auto">
     <select
       class="select select-sm select-bordered w-full sm:w-auto text-xs sm:text-sm"
-      value={selectedTable}
-      onchange={(e) => ontablechange((e.target as HTMLSelectElement).value)}
+      value={selectedMod}
+      disabled={packages.length <= 1}
+      onchange={(e) => onmodchange((e.target as HTMLSelectElement).value)}
     >
-      {#each tables as opt}
+      {#each packages as opt}
         <option value={opt.value}>{opt.label}</option>
       {/each}
     </select>

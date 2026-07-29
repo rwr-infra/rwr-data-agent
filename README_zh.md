@@ -4,164 +4,106 @@
 
 > **⚠️ 早期阶段提示**：本项目处于早期开发阶段，版本可能不稳定，随时可能发生破坏性更新。
 
-基于 Node.js + TypeScript + Fastify 构建的 RWR 数据 RAG AI Agent，提供一次性智能问答与 OpenAI Compatible API。
+一个面向 *Running With Rifles* 游戏数据的 AI Agent，回答关于武器、载具、兵种、携带物品、呼叫支援以及 AngelScript 游戏模式的问题，对外提供 **OpenAI 兼容** 的 `/v1/chat/completions` 接口，并自带聊天前端。
+
+检索完全**在进程内、直接基于磁盘上的游戏文件**运行：MiniSearch 全文索引 + 实体关系图。不需要数据库、不需要 embedding 服务、不需要向量库。
 
 ## 技术栈
 
-- **Runtime**: Node.js 20+, TypeScript
-- **Web Framework**: Fastify
-- **Database**: PostgreSQL + pgvector
-- **ORM**: Drizzle ORM
-- **Embeddings**: SiliconFlow (`BAAI/bge-m3`, 1024 维)
-- **Reranker**: SiliconFlow (`BAAI/bge-reranker-v2-m3`)
-- **LLM**: OpenAI Compatible API (SiliconFlow / DeepSeek / 自建)
-
-## 项目结构
-
-```
-src/
-  config/          # 配置与环境变量
-  db/              # 数据库连接、schema、迁移
-  ingestion/       # 数据解析与入库 CLI 脚本
-  retrieval/       # RAG 检索逻辑
-  api/             # Fastify 路由、OpenAI Compatible 接口
-  types/           # 全局类型定义
-data/              # 本地数据文件（AS/XML）
-```
+- **Node.js + TypeScript**（ESM，strict）
+- **Fastify** — HTTP 服务
+- **MiniSearch** — 本地全文索引（支持中文分词）
+- **Vercel AI SDK** — LLM 流式输出与工具调用
+- **Svelte 5 + Vite + Tailwind 4 + daisyUI** — 聊天前端
+- **fast-xml-parser** — 游戏文件解析
 
 ## 快速开始
 
-### 1. 安装依赖
-
 ```bash
 npm install
-```
-
-### 2. 启动数据库（Docker Compose）
-
-项目使用 PostgreSQL + pgvector 作为向量数据库。如果你已有带 pgvector 的 PostgreSQL，可跳过此步。
-
-```bash
-docker compose up -d
-```
-
-默认会启动一个 PostgreSQL 17 + pgvector 容器，暴露端口 `5432`。数据通过 Docker Volume 持久化。
-
-### 3. 配置环境变量
-
-```bash
-cp .env.example .env
-# 编辑 .env，填写数据库和 API Key
-```
-
-必填变量：
-- `DATABASE_URL` — PostgreSQL 连接字符串（默认已配好 Docker Compose 连接）
-- `SILICONFLOW_API_KEY` — SiliconFlow API Key
-- `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` — 生成模型配置
-
-可选变量：
-- `DATABASE_TABLE` — 区分运行环境（默认：`rwr_documents`）
-- `EMBEDDING_DIMENSION` / `EMBEDDING_MODEL`
-- `RERANK_MODEL`
-- `INGEST_BATCH_SIZE` / `INGEST_CONCURRENCY`
-
-### 4. 初始化数据库
-
-```bash
-npm run db:migrate
-```
-
-该命令会自动创建配置的表、pgvector 扩展以及 HNSW/GIN 索引。
-
-### 5. 导入数据
-
-数据导入分为两步：**提取**（解析 XML/游戏文件 → 结构化 JSON）然后**嵌入**（JSON → 向量数据库）。你可以在两步之间审查和编辑提取出的 JSON。
-
-#### 第一步：提取为 JSON
-
-```bash
-npm run extract -- --source ./data --mod GFL_Castling
-```
-
-生成 `extracted-documents.json`，包含结构化文档：
-- `type`、`key`、`label` — 文档标识
-- `description` — 自然语言描述
-- `data` — 完整的解析/继承解析后 XML 结构（可校对继承链、嵌套元素、多状态物品）
-- `flat_attributes` — 扁平化键值对
-- `i18n` — 从翻译文件解析的本地化名称（如 `{"cn": {"GK-Adeline": "Adeline 艾德琳"}}`）
-
-选项：
-```bash
-npm run extract -- --source ./data --mod GFL_Castling --output ./my-data.json      # 自定义输出路径
-npm run extract -- --source ./data --mod GFL_Castling --languages ./path/to/languages  # 自定义语言目录
-```
-
-#### 第二步：嵌入到数据库
-
-```bash
-npm run embed -- --input ./extracted-documents.json
-```
-
-选项：
-```bash
-npm run embed -- --input ./extracted-documents.json --clear           # 清空该 mod 旧数据
-npm run embed -- --input ./extracted-documents.json --resume          # 跳过已入库文档
-npm run embed -- --input ./extracted-documents.json --filter-type weapon  # 仅嵌入武器
-npm run embed -- --input ./extracted-documents.json --limit 10        # 仅嵌入前 10 条（测试用）
-```
-
-#### 旧方式：一步导入
-
-`ingest` 命令仍然可用，合并提取和嵌入为一步：
-
-```bash
-npm run ingest -- --source ./data --mod GFL_Castling
-npm run ingest -- --source ./data --mod GFL_Castling --clear   # 清空旧数据
-npm run ingest -- --source ./data --mod GFL_Castling --resume  # 跳过已有
-```
-
-### 6. 启动 API 服务
-
-```bash
+cp .env.example .env      # 填写 LLM_API_KEY
 npm run dev
-# 或
-npm run build && npm start
 ```
 
-服务默认运行在 `http://localhost:3000`。
+就这些。首次启动时服务会自动发现 `DATA_DIR`（默认 `./data`）下的数据包，把索引构建到 `./output`，然后在 `http://localhost:3000` 提供服务。
+
+### 指定游戏数据目录
+
+`DATA_DIR` 既可以是**单个数据包**（目录下有 `package_config.xml`），也可以是**装着多个包的目录**：
+
+```bash
+DATA_DIR=./data       npm run dev   # 单包：GFL_Castling
+DATA_DIR=./ww2-data   npm run dev   # 5 个包：ww2_base、edelweiss、pacific…
+```
+
+包的发现规则：在根目录及其**直接子目录**中查找 `package_config.xml`。之所以不递归，是因为 `ww2_base/packages/<overlay>/` 这类子树属于 `ww2_base` 本身，不应被当成独立包。
+
+每条文档都会打上所属包名，请求时可以限定只检索某一个包。
+
+### 重建索引
+
+索引缺失、或源文件发生变化（文件数或最新 mtime 改变）时会自动重建。手动强制重建：
+
+```bash
+npm run build:index                          # 使用 DATA_DIR / OUTPUT_DIR
+npm run build:index -- --source ./ww2-data   # 显式指定源目录
+npm run build:index -- --only ww2_base,pacific
+```
+
+设置 `AUTO_BUILD_INDEX=false` 可关闭自动构建，改为只认手动命令。
 
 ## API 接口
 
 ### POST /v1/chat/completions
 
-OpenAI Compatible 聊天接口，支持 RAG 问答。
-
-**请求示例：**
+OpenAI 兼容的对话接口，内置检索。
 
 ```bash
 curl -X POST http://localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-v4-flash",
-    "messages": [{"role": "user", "content": "G36 的伤害是多少？"}],
+    "model": "rwr-agent",
+    "messages": [{"role": "user", "content": "class=3 的武器有哪些？"}],
     "stream": false
   }'
 ```
 
-**响应示例：**
+在 OpenAI schema 之外新增的字段：
+
+| 字段 | 说明 |
+|---|---|
+| `mod` | 限定只检索某一个数据包（取值见 `GET /v1/packages`） |
+| `response_format: {"type":"json_object"}` | 返回结构化的枚举/对比对象，而非自然语言 |
+
+请求头：`x-session-id` 用于开启跨请求的会话滚动摘要。
+
+> **注意**：外部传入的 `system` 消息会被丢弃 —— 服务端强制使用自己的系统提示词。
+
+### GET /v1/packages
+
+列出当前索引中的数据包。
 
 ```json
 {
-  "id": "chatcmpl-xxx",
-  "object": "chat.completion",
-  "created": 1714464000,
-  "model": "deepseek-v4-flash",
-  "choices": [{
-    "index": 0,
-    "message": { "role": "assistant", "content": "G36 的伤害是 35。" },
-    "finish_reason": "stop"
-  }],
-  "usage": { "prompt_tokens": 120, "completion_tokens": 15, "total_tokens": 135 }
+  "data_dir": "/path/to/data",
+  "built_at": "2026-07-27T09:56:57.335Z",
+  "packages": [
+    { "name": "ww2_base", "displayName": "WW2: Base", "count": 3144 },
+    { "name": "pacific",  "displayName": "WW2: Pacific Theater", "count": 128 }
+  ]
+}
+```
+
+### GET /v1/tools
+
+列出模型可调用的工具 —— 7 个内置工具 + 插件目录里加载成功的工具，加载失败的会带 `error` 字段。
+
+```json
+{
+  "builtin": ["getInheritanceChain", "findReferences", "…"],
+  "plugins": [{ "name": "lookupUpgrade", "file": "lookup-upgrade.js", "description": "…", "loadedAt": "…" }],
+  "toolsDir": "/app/tools.d",
+  "hotReload": true
 }
 ```
 
@@ -171,21 +113,44 @@ curl -X POST http://localhost:3000/v1/chat/completions \
 
 ### GET /health
 
-健康检查。
+返回索引状态，不再检查任何外部依赖。
 
-## Streaming
+```json
+{
+  "status": "ok",
+  "index": { "ready": true, "documents": 9861, "packages": ["GFL_Castling"], "builtAt": "…" }
+}
+```
 
-将请求中的 `stream` 设为 `true` 可启用 SSE 流式输出：
+### 流式输出
+
+设置 `stream: true`。响应是 **NDJSON（按行分隔的 JSON）**，不是 OpenAI 的 SSE。每行一个对象，用 `type` 区分：`text-delta`、`reasoning-delta`、`json-delta`、`finish`、`error`。
 
 ```bash
 curl -N http://localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "deepseek-v4-flash",
-    "messages": [{"role": "user", "content": "AK-47 的弹匣容量是多少？"}],
-    "stream": true
-  }'
+  -d '{"model":"rwr-agent","stream":true,"messages":[{"role":"user","content":"G36 的伤害是多少"}]}'
 ```
+
+## 架构
+
+```mermaid
+flowchart TD
+    Q["POST /v1/chat/completions"] --> META{"元问题？<br/>isMetaQuery"}
+    META -- 是 --> LLM
+    META -- 否 --> INTENT["意图分类 classifyQuery<br/>枚举 · 对比 · 具体查询"]
+    INTENT --> REWRITE["查询改写 buildSearchQuery<br/>历史对话 + 会话摘要 + 中英同义词扩展"]
+    REWRITE --> SEARCH["本地检索 localSearch<br/>MiniSearch + 实体图谱"]
+    SEARCH --> PROMPT["Prompt 构建 buildUserPrompt<br/>强制系统提示词 + 检索上下文"]
+    PROMPT --> LLM[["streamText — 有界工具循环"]]
+    LLM -- "工具调用" --> RT["toolRuntime<br/>重复防护 · 超时 · error+hint"]
+    RT --> TOOLS["8 个内置图谱工具<br/>+ tools.d 插件工具"]
+    TOOLS -- 结果 --> SHAPER["toolTranscript 整形<br/>默认全量重放，超预算才裁剪"]
+    SHAPER --> LLM
+    LLM --> OUT[["NDJSON：tool-step · text-delta · finish"]]
+```
+
+工具循环、上下文整形、流事件契约与索引构建的完整说明见 **[ARCHITECTURE.md](./ARCHITECTURE.md)**。
 
 ## 数据解析
 
@@ -193,144 +158,102 @@ curl -N http://localhost:3000/v1/chat/completions \
 
 | 扩展名 | 类型 | 解析器 |
 |--------|------|--------|
-| `.weapon`, `.projectile`, `.call`, `.character`, `.xml` | XML | 通用标签驱动解析器（含继承解析） |
-| `.as` | AngelScript | 关键字/值提取器 |
-| `.ai`, `.resources`, `.name`, `.text_lines` | 纯文本 | 回退文本分块 |
+| `.weapon`、`.projectile`、`.carry_item`、`.call`、`.character`、`.xml` 等 | XML | 标签驱动解析，含继承（`file=`）解析 |
+| `.as` | AngelScript | 符号扫描：类、函数（含多行签名与默认参数）、成员变量、`enum`/`namespace`/`funcdef`、`#include` |
+| `.ai`、`.resources`、`.name`、`.text_lines` | 纯文本 | 兜底文本处理 |
 
-### 数据管线
+`models/` 与 `maps/` 子树会被跳过。
 
-```
-XML/游戏文件 ──extract──▶ 结构化 JSON ──embed──▶ 向量数据库
-                   │                        │
-             （审查和编辑）           （分块 → 嵌入 → 存储）
-                   │
-             i18n 翻译解析
-           （语言目录下的翻译文件）
-```
+### AngelScript 与脚本检索
 
-提取出的 JSON 包含完整的解析 XML 结构（`data` 字段）、扁平化属性（`flat_attributes`）和解析后的本地化名称（`i18n`）。可编辑此文件修正解析问题后再嵌入。
+`asSymbols.ts` 是一个「注释与字符串置空后的逐行 + 括号计数扫描器」，不是完整语法解析器 —— 但足以覆盖真正影响召回的情况：多行签名、带默认值的参数、类成员、构造/析构、`enum` / `namespace` / `funcdef`。
 
-### StructuredDocument 结构
+每个 `.as` 文件生成**一条** `script_chunk` 文档。由于 `structuredDocToRWRDocument` 只把 `raw_text` 的前 500 字符放进可检索内容，符号摘要被写入 `description` 与 `flat_attributes`（`classes` / `functions` / `includes` / …，每项最多 120 个名字）—— 这两处会被完整拼进 content。因此「哪个脚本定义了 X」「哪些脚本 include 了 Y」可以直接被全文检索命中，而不必先让模型猜对文件名。
 
-```ts
-interface StructuredDocument {
-  type: DocumentType;
-  key: string;
-  label: string;
-  source_file: string;
-  mod_name: string;
-  description: string;       // 自然语言描述
-  raw_text: string;           // 原始文本表示
-  data: unknown;              // 完整解析后的 XML JSON 结构
-  flat_attributes: Record<string, unknown>;  // 扁平化属性
-  metadata: Record<string, unknown>;
-  i18n?: Record<string, Record<string, string>>;  // 本地化名称
+关于 tree-sitter：只有在需要调用图、跨文件符号解析或 `#include` 依赖图时才值得引入。目前 npm 上没有发布 AngelScript 语法（[Relrin/tree-sitter-angelscript](https://github.com/Relrin/tree-sitter-angelscript) 覆盖最全但需自行 clone 构建），采用它意味着自己编出 `.wasm` 并入库。迁移面只有一个函数：`extractScriptSymbols(source, fileBase)`。
+
+### 中文检索
+
+- 构建索引时，`resolveI18n()` 会**按包**读取该包自己的 `languages/` 目录，把译名写入索引的 `i18nNames` 字段。只索引 `cn` / `en`：其余 8 种语言的文件是 ISO-8859-1 编码，读出来是乱码，而且全部索引会稀释词频。
+- `tokenize()` 把连续的中日韩字符切成**单字 + 二元组**，让「伤害」「突击步枪」这类词无需分词词典就能命中。该切分只作用于查询和短字段（`key`/`name`/`i18nNames`/`type`），**不作用于 `content`** —— 否则游戏里那些超大的本地化文本块会淹没真正的结果。中文词条不做模糊匹配和前缀匹配。
+
+## 工具插件
+
+除了 7 个内置图谱工具，你可以把自己的工具放进 `./tools.d`（用 `TOOLS_DIR` 改路径）。启动时自动加载；在非生产环境下，改文件即生效，不用重启。
+
+插件是普通的 ESM **`.js`** 文件（不能是 `.ts` —— 生产跑的是编译产物，加载链上没有转译器），默认导出一个返回工具定义的工厂：
+
+```js
+/** @type {import('../types/tool-plugin.js').PluginFactory} */
+export default function register(host) {
+  return [{
+    name: 'findByFaction',
+    description: '列出属于某个阵营的武器。',
+    inputSchema: {
+      type: 'object',
+      properties: { faction: { type: 'string' } },
+      required: ['faction'],
+    },
+    async execute({ faction }) {
+      return host.search('weapon', { faction, type: 'weapon' }, 20);
+    },
+  }];
 }
 ```
 
-## RAG 流程
+`host` 提供索引路径、`search()` 以及全部图谱原语（`getNode`、`getInheritanceChain`、`readSource` 等），类型定义见 [types/tool-plugin.d.ts](./types/tool-plugin.d.ts)。schema 用 JSON Schema，插件因此不依赖服务端的校验库版本。
 
-1. 接收用户 Query
-2. **意图解析**（类型推断、class="N" 提取、枚举检测）
-3. **向量检索**（pgvector cosine distance + 元数据/内容过滤）
-4. **Rerank 重排序**（bge-reranker-v2-m3 交叉编码器）
-5. **构建 Prompt**（强制系统提示词 + 检索上下文）
-6. 调用 LLM 生成答案
+插件写坏了会被跳过并在 `GET /v1/tools` 里带上错误信息，其它工具不受影响；插件也无法覆盖内置工具的同名工具。
+
+`tools.d/lookup-upgrade.js` 是随仓库提供的可用样例（Castling 武器升级链）。
+
+> ⚠️ **插件在服务进程内运行，拥有与主进程相同的权限** —— 文件系统、网络、环境变量。只放你自己写过或审过的文件。这不是沙箱，插件目录**绝不能**接第三方上传。要开放上传必须换 `worker_threads` 隔离方案。
 
 ## 开发
 
 ```bash
-# 开发模式（热重载）
-npm run dev
-
-# 构建
-npm run build
-
-# 数据库初始化
-npm run db:migrate
-
-# 提取数据为 JSON
-npm run extract
-
-# 嵌入 JSON 到向量数据库
-npm run embed
-
-# 旧方式：一步导入
-npm run ingest
-
-# 格式化
-npm run format
-
-# 检查
-npm run lint
+npm run dev             # 后端，热重载
+npm run web:dev         # 前端开发服务器（:5173，反代到后端）
+npm run build           # tsc → dist/ 且 vite build → public/
+npm run build:index     # 重建索引
+npm run validate:index  # 图谱工具冒烟测试
+npm run eval            # 检索评测
+npm run format          # Prettier
+npx tsc --noEmit        # 类型检查
 ```
+
+> `npm run lint` 目前不可用：ESLint 10 要求 `eslint.config.js`，本仓库尚未提供。请用 `npx tsc --noEmit` 做检查。
 
 ## 部署
 
-### Docker（推荐）
-
-项目提供了基于 `node:24-slim` 的多阶段 `Dockerfile`。
+### Docker
 
 ```bash
-# 构建并启动 Postgres + 应用
-docker compose up -d
-
-# 初始化数据库（只需执行一次）
-docker compose run --rm app npm run db:migrate:prod
-
-# 提取数据（第一步）
-docker compose run --rm app npm run extract:prod -- --source /app/data --mod GFL_Castling
-
-# 嵌入到数据库（第二步）
-docker compose run --rm app npm run embed:prod -- --input /app/extracted-documents.json
-
-# 查看日志
-docker compose logs -f app
-
-# 停止
-docker compose down
+docker compose up -d --build
 ```
 
-### 手动构建 Docker 镜像
+以只读方式把 `./data` 挂到 `/app/data`、`./tools.d` 挂到 `/app/tools.d`，并把生成的索引持久化在 `./output`。配置从 `.env` 读取。
 
-```bash
-# 构建镜像
-docker build -t rwr-data-agent .
+### Vercel
 
-# 运行（需要外部 Postgres）
-docker run -d \
-  --name rwr-agent \
-  -p 3000:3000 \
-  --env-file .env \
-  -v $(pwd)/data:/app/data:ro \
-  rwr-data-agent
-```
+`vercel.json` 会把 `dist/`、`public/`、`output/`、`tools.d/` 打进 Serverless 函数。数据目录本身不会上传，因此索引必须在部署前构建好 —— 函数只负责加载。插件在每次冷启动加载一次，热重载关闭。
 
-### Docker 数据库管理
+## 配置
 
-```bash
-# 启动数据库
-docker compose up -d
+只有 `LLM_API_KEY` 是必填。完整列表见 [.env.example](./.env.example)，常用的几个：
 
-# 查看日志
-docker compose logs -f postgres
+| 变量 | 默认值 | 用途 |
+|---|---|---|
+| `LLM_API_KEY` | — | **必填**，OpenAI 兼容的 API Key |
+| `LLM_BASE_URL` | `https://api.siliconflow.cn/v1` | LLM 接口地址 |
+| `LLM_MODEL` | `deepseek-v4-flash` | 模型名 |
+| `DATA_DIR` | `./data` | RWR 数据根目录（单包或多包目录） |
+| `OUTPUT_DIR` | `./output` | 索引输出目录 |
+| `AUTO_BUILD_INDEX` | `true` | 启动时自动构建/刷新索引 |
+| `TOOLS_DIR` | `./tools.d` | 工具插件目录（可选） |
+| `TOOLS_HOT_RELOAD` | 非生产环境默认开 | 改插件文件后不重启即生效 |
+| `PORT` | `3000` | HTTP 端口 |
 
-# 停止数据库
-docker compose down
+## 许可证
 
-# 停止并清除数据卷
-docker compose down -v
-```
-
-## 注意事项
-
-- **强制系统提示词**：请求中的外部 `system` 消息会被忽略。服务端会注入内置的 RAG 系统提示词，防止 prompt injection 并确保行为一致。
-- **单轮问答**：不维护历史会话。
-- **数据导入分两步**：先 `extract` 提取为结构化 JSON（可审查编辑），再 `embed` 嵌入向量数据库。旧版 `ingest` 命令仍可用。
-- **多语言支持**：提取流程自动扫描 `languages/` 目录，将翻译文件中的本地化名称解析到 `i18n` 字段，嵌入时会包含中文名供中文查询命中。
-- **Embedding 维度**：默认 **1024**（`BAAI/bge-m3`），可通过 `EMBEDDING_DIMENSION` 调整。若切换模型导致维度变化，必须先 `docker compose down -v` 清空数据库后重新迁移。
-- **表名隔离**：使用 `DATABASE_TABLE` 可在不改代码的情况下区分 dev / staging / prod 环境。
-
-## 许可协议
-
-[MIT](LICENSE) © [rwr-infra](https://github.com/rwr-infra)
+见 [LICENSE](./LICENSE)。

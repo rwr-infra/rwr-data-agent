@@ -1,153 +1,105 @@
 # Running With Rifles AI Agent
 
-[中文](/README_zh.md)
+An AI agent that answers questions about *Running With Rifles* game data — weapons, vehicles, soldiers, carry items, calls and AngelScript game modes — over an **OpenAI-compatible** `/v1/chat/completions` API, with a built-in chat UI.
 
-> **⚠️ Early Stage Notice**: This project is in early development. Versions may be unstable and breaking changes can occur at any time.
+Retrieval runs entirely **in-process from the game files on disk**: a MiniSearch full-text index plus an entity graph. No database, no embedding service, no vector store.
 
-A RAG AI Agent for *Running With Rifles* game data, built with **Node.js + TypeScript + Fastify**.
-Provides single-turn Q&A through an **OpenAI Compatible API**.
+[中文文档](./README_zh.md)
 
 ## Stack
 
-- **Runtime**: Node.js 20+, TypeScript
-- **API Server**: Fastify
-- **Vector DB**: PostgreSQL + pgvector
-- **ORM**: Drizzle ORM
-- **Embeddings**: SiliconFlow (`BAAI/bge-m3`, 1024d)
-- **Reranker**: SiliconFlow (`BAAI/bge-reranker-v2-m3`)
-- **LLM**: OpenAI Compatible API (SiliconFlow / DeepSeek / self-hosted)
+- **Node.js + TypeScript** (ESM, strict)
+- **Fastify** — HTTP server
+- **MiniSearch** — local full-text index (CJK-aware tokenization)
+- **Vercel AI SDK** — LLM streaming + tool calling
+- **Svelte 5 + Vite + Tailwind 4 + daisyUI** — chat UI
+- **fast-xml-parser** — game file parsing
 
 ## Quick Start
 
-### 1. Install
-
 ```bash
 npm install
-```
-
-### 2. Start PostgreSQL + pgvector
-
-```bash
-docker compose up -d
-```
-
-If you already have a pgvector-enabled Postgres, skip this step.
-
-### 3. Configure
-
-```bash
-cp .env.example .env
-# Edit .env and fill in API keys
-```
-
-Required variables:
-- `DATABASE_URL`
-- `SILICONFLOW_API_KEY`
-- `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL`
-
-Optional:
-- `DATABASE_TABLE` — isolate environments (default: `rwr_documents`)
-- `EMBEDDING_DIMENSION` / `EMBEDDING_MODEL`
-- `RERANK_MODEL`
-- `INGEST_BATCH_SIZE` / `INGEST_CONCURRENCY`
-
-### 4. Initialize Database
-
-```bash
-npm run db:migrate
-```
-
-Creates the configured table, pgvector extension, HNSW and GIN indexes automatically.
-
-### 5. Ingest Data
-
-Data ingestion is a two-step process: **extract** (parse XML/game files → structured JSON) then **embed** (JSON → vector database). You can review and edit the extracted JSON between steps.
-
-#### Step 1: Extract to JSON
-
-```bash
-npm run extract -- --source ./data --mod GFL_Castling
-```
-
-This produces `extracted-documents.json` containing structured documents with:
-- `type`, `key`, `label` — document identity
-- `description` — natural language description
-- `data` — full parsed/resolved XML as JSON (verify inheritance, nested elements, multi-state items)
-- `flat_attributes` — flattened key-value pairs
-- `i18n` — localized names from translation files (e.g. `{"cn": {"GK-Adeline": "Adeline 艾德琳"}}`)
-
-Options:
-```bash
-npm run extract -- --source ./data --mod GFL_Castling --output ./my-data.json    # custom output path
-npm run extract -- --source ./data --mod GFL_Castling --languages ./path/to/languages  # custom language directory
-```
-
-#### Step 2: Embed into Database
-
-```bash
-npm run embed -- --input ./extracted-documents.json
-```
-
-Options:
-```bash
-npm run embed -- --input ./extracted-documents.json --clear           # wipe mod first
-npm run embed -- --input ./extracted-documents.json --resume          # skip existing
-npm run embed -- --input ./extracted-documents.json --filter-type weapon  # only weapons
-npm run embed -- --input ./extracted-documents.json --limit 10        # first 10 docs (testing)
-```
-
-#### Legacy: One-step Ingest
-
-The `ingest` command still works as a combined extract+embed step:
-
-```bash
-npm run ingest -- --source ./data --mod GFL_Castling
-npm run ingest -- --source ./data --mod GFL_Castling --clear
-npm run ingest -- --source ./data --mod GFL_Castling --resume
-```
-
-### 6. Start Server
-
-```bash
+cp .env.example .env      # fill in LLM_API_KEY
 npm run dev
-# or
-npm run build && npm start
 ```
 
-Default: `http://localhost:3000`
+That's it. On first boot the server discovers the packages under `DATA_DIR` (default `./data`), builds the indexes into `./output`, and starts serving on `http://localhost:3000`.
+
+### Pointing at your game data
+
+`DATA_DIR` can be either a **single package** (a directory containing `package_config.xml`) or a **directory of packages**:
+
+```bash
+DATA_DIR=./data       npm run dev   # single package: GFL_Castling
+DATA_DIR=./ww2-data   npm run dev   # 5 packages: ww2_base, edelweiss, pacific, …
+```
+
+Packages are discovered automatically by looking for `package_config.xml` in the root and its immediate subdirectories. Every document is tagged with its package name, and a request can be restricted to one package.
+
+### Rebuilding the index
+
+The index rebuilds automatically when it is missing or when the source files changed (file count or newest mtime). To force it:
+
+```bash
+npm run build:index                          # uses DATA_DIR / OUTPUT_DIR
+npm run build:index -- --source ./ww2-data   # explicit source
+npm run build:index -- --only ww2_base,pacific
+```
+
+Set `AUTO_BUILD_INDEX=false` to require the explicit command.
 
 ## API
 
 ### POST /v1/chat/completions
 
-OpenAI Compatible chat completions with built-in RAG.
-
-**Request:**
+OpenAI-compatible chat completions with built-in retrieval.
 
 ```bash
 curl -X POST http://localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-v4-flash",
+    "model": "rwr-agent",
     "messages": [{"role": "user", "content": "What weapons have class=3?"}],
     "stream": false
   }'
 ```
 
-**Response:**
+Extra fields beyond the OpenAI schema:
+
+| Field | Description |
+|---|---|
+| `mod` | Restrict retrieval to a single package (see `GET /v1/packages`) |
+| `response_format: {"type":"json_object"}` | Return a structured enumeration/comparison object instead of prose |
+
+Headers: `x-session-id` enables rolling conversation summaries across requests.
+
+> **Note:** external `system` messages are dropped — the server enforces its own system prompt.
+
+### GET /v1/packages
+
+Lists the packages present in the built index.
 
 ```json
 {
-  "id": "chatcmpl-xxx",
-  "object": "chat.completion",
-  "created": 1714464000,
-  "model": "deepseek-v4-flash",
-  "choices": [{
-    "index": 0,
-    "message": { "role": "assistant", "content": "The following weapons have class=3: ..." },
-    "finish_reason": "stop"
-  }],
-  "usage": { "prompt_tokens": 120, "completion_tokens": 15, "total_tokens": 135 }
+  "data_dir": "/path/to/data",
+  "built_at": "2026-07-27T09:56:57.335Z",
+  "packages": [
+    { "name": "ww2_base", "displayName": "WW2: Base", "count": 3144 },
+    { "name": "pacific",  "displayName": "WW2: Pacific Theater", "count": 128 }
+  ]
+}
+```
+
+### GET /v1/tools
+
+Lists the tools the model can call — seven built-ins plus anything loaded from the plugin directory, including per-file load errors.
+
+```json
+{
+  "builtin": ["getInheritanceChain", "findReferences", "…"],
+  "plugins": [{ "name": "lookupUpgrade", "file": "lookup-upgrade.js", "description": "…", "loadedAt": "…" }],
+  "toolsDir": "/app/tools.d",
+  "hotReload": true
 }
 ```
 
@@ -157,136 +109,131 @@ Returns available models.
 
 ### GET /health
 
-Health check.
+Reports index state — no external dependency is checked.
+
+```json
+{
+  "status": "ok",
+  "index": { "ready": true, "documents": 9861, "packages": ["GFL_Castling"], "builtAt": "…" }
+}
+```
 
 ### Streaming
 
-Set `stream: true` for SSE output:
+Set `stream: true`. The response is **newline-delimited JSON**, not OpenAI SSE. Each line is one object with a `type`: `text-delta`, `reasoning-delta`, `json-delta`, `finish`, `error`.
 
 ```bash
 curl -N http://localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "deepseek-v4-flash",
-    "messages": [{"role": "user", "content": "What is the G36 damage?"}],
-    "stream": true
-  }'
+  -d '{"model":"rwr-agent","stream":true,"messages":[{"role":"user","content":"G36 的伤害是多少"}]}'
 ```
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    Q["POST /v1/chat/completions"] --> META{"isMetaQuery?"}
+    META -- yes --> LLM
+    META -- no --> INTENT["classifyQuery<br/>enumeration · comparison · specific"]
+    INTENT --> REWRITE["buildSearchQuery<br/>history + session summary + CN↔EN synonyms"]
+    REWRITE --> SEARCH["localSearch<br/>MiniSearch + entity graph"]
+    SEARCH --> PROMPT["buildUserPrompt<br/>enforced system prompt + retrieved context"]
+    PROMPT --> LLM[["streamText — bounded tool loop"]]
+    LLM -- "tool call" --> RT["toolRuntime<br/>dedupe · deadline · error+hint"]
+    RT --> TOOLS["8 built-in graph tools<br/>+ tools.d plugins"]
+    TOOLS -- result --> SHAPER["toolTranscript shaper<br/>full replay unless over budget"]
+    SHAPER --> LLM
+    LLM --> OUT[["NDJSON: tool-step · text-delta · finish"]]
 ```
-User Query
-  |
-  v
-Intent Parsing  (type inference, class="N" extraction, enumeration detection)
-  |
-  v
-Vector Search   (pgvector cosine distance + metadata/content filters)
-  |
-  v
-Rerank          (bge-reranker-v2-m3 cross-encoder)
-  |
-  v
-Prompt Builder  (enforced system prompt + retrieved context)
-  |
-  v
-LLM Generation  (OpenAI Compatible API)
+
+The tool loop, the transcript shaper, the stream event contract and the index build are documented in
+**[ARCHITECTURE.md](./ARCHITECTURE.md)**.
+
+## Tool Plugins
+
+Beyond the seven built-in graph tools, you can drop your own tools into `./tools.d` (configurable via `TOOLS_DIR`). They are picked up at startup and, outside production, reloaded when the file changes — no restart.
+
+A plugin is a plain ESM **`.js`** file (not `.ts` — production runs compiled output with no transpiler) whose default export returns tool specs:
+
+```js
+/** @type {import('../types/tool-plugin.js').PluginFactory} */
+export default function register(host) {
+  return [{
+    name: 'findByFaction',
+    description: 'List weapons belonging to a faction.',
+    inputSchema: {
+      type: 'object',
+      properties: { faction: { type: 'string' } },
+      required: ['faction'],
+    },
+    async execute({ faction }) {
+      return host.search('weapon', { faction, type: 'weapon' }, 20);
+    },
+  }];
+}
 ```
+
+`host` exposes the index paths, `search()`, and the graph primitives (`getNode`, `getInheritanceChain`, `readSource`, …) — see [types/tool-plugin.d.ts](./types/tool-plugin.d.ts). Schemas are JSON Schema, so plugins carry no dependency on the server's validation library.
+
+A broken plugin is skipped with its error reported on `GET /v1/tools`; the rest keep working. A plugin cannot take over a built-in tool's name.
+
+`tools.d/lookup-upgrade.js` ships as a working example (Castling weapon upgrade chains).
+
+> ⚠️ **Plugins run inside the server process with its full privileges** — filesystem, network, environment. Only put files there that you wrote or reviewed. This is not a sandbox, and the plugin directory must never be wired to untrusted uploads.
 
 ## Supported File Types
 
 | Extension | Type | Parser |
 |-----------|------|--------|
-| `.weapon`, `.projectile`, `.call`, `.character`, `.xml` | XML | Generic tag-driven parser with inheritance resolution |
-| `.as` | AngelScript | Keyword/value extractor |
-| `.ai`, `.resources`, `.name`, `.text_lines` | Plain text | Fallback text chunking |
+| `.weapon`, `.projectile`, `.carry_item`, `.call`, `.character`, `.xml`, … | XML | Tag-driven parser with inheritance resolution |
+| `.as` | AngelScript | Symbol scanner — classes, functions (incl. multi-line signatures and default args), members, `enum`/`namespace`/`funcdef`, `#include` |
+| `.ai`, `.resources`, `.name`, `.text_lines` | Plain text | Fallback text |
 
-## Data Pipeline
-
-```
-XML/Game Files ──extract──▶ Structured JSON ──embed──▶ Vector Database
-                       │                          │
-                 (review & edit)            (chunk → embed → store)
-                       │
-                 i18n resolution
-                 (language/ dirs)
-```
-
-The extracted JSON contains the full parsed XML structure (`data` field), flattened attributes (`flat_attributes`), and resolved localized names (`i18n`). Edit this file to correct parsing issues before embedding.
+`models/` and `maps/` subtrees are skipped.
 
 ## Development
 
 ```bash
-npm run dev        # dev mode (hot reload)
-npm run build      # compile TypeScript
-npm run db:migrate # initialize database
-npm run extract    # extract game data → JSON
-npm run embed      # embed JSON → vector database
-npm run ingest     # legacy: extract + embed in one step
-npm run format     # Prettier
-npm run lint       # ESLint
+npm run dev             # backend, hot reload
+npm run web:dev         # frontend dev server (:5173, proxies to the backend)
+npm run build           # tsc → dist/ and vite build → public/
+npm run build:index     # rebuild the indexes
+npm run validate:index  # smoke-test the graph tools
+npm run eval            # retrieval eval harness
+npm run format          # Prettier
+npx tsc --noEmit        # typecheck
 ```
 
 ## Deployment
 
-### Docker (Recommended)
-
-A multi-stage `Dockerfile` is provided using `node:24-slim`.
+### Docker
 
 ```bash
-# Build and start both Postgres + App
-docker compose up -d
-
-# Initialize database (run once)
-docker compose run --rm app npm run db:migrate:prod
-
-# Extract data (Step 1)
-docker compose run --rm app npm run extract:prod -- --source /app/data --mod GFL_Castling
-
-# Embed into database (Step 2)
-docker compose run --rm app npm run embed:prod -- --input /app/extracted-documents.json
-
-# View logs
-docker compose logs -f app
-
-# Stop
-docker compose down
+docker compose up -d --build
 ```
 
-### Manual Docker Build
+Mounts `./data` and `./tools.d` read-only at `/app/data` and `/app/tools.d`, and persists the generated indexes in `./output`. Configuration comes from `.env`.
 
-```bash
-# Build image
-docker build -t rwr-data-agent .
+### Vercel
 
-# Run (requires external Postgres)
-docker run -d \
-  --name rwr-agent \
-  -p 3000:3000 \
-  --env-file .env \
-  -v $(pwd)/data:/app/data:ro \
-  rwr-data-agent
-```
+`vercel.json` bundles `dist/`, `public/`, `output/` and `tools.d/` into the serverless function. The data directory is not shipped, so the index must be built and committed/generated before deploy — the function only loads it. Plugins load once per cold start; hot reload is off.
 
-### Docker Database Management
+## Configuration
 
-```bash
-docker compose up -d        # start
-docker compose logs -f postgres   # logs
-docker compose down         # stop
-docker compose down -v      # stop and wipe data
-```
+`LLM_API_KEY` is the only required variable. See [.env.example](./.env.example) for the full list; the ones worth knowing:
 
-## Notes
-
-- **Enforced system prompt**: External `system` messages in the request are ignored. The server injects its own RAG system prompt to prevent prompt injection and ensure consistent behavior.
-- **Single-turn only**: No session history is maintained.
-- **Two-step ingestion**: `extract` produces a structured JSON (reviewable/editable), then `embed` stores it into the vector database. Legacy `ingest` command still works.
-- **i18n support**: The extract CLI automatically scans `languages/` directories and resolves localized names into the `i18n` field, so Chinese queries can match documents by their translated names.
-- **Embedding dimension**: Default 1024 (`BAAI/bge-m3`). If you switch to a model with a different dimension (e.g., 4096), set `EMBEDDING_DIMENSION` accordingly and recreate the database (`docker compose down -v && docker compose up -d`).
-- **Table isolation**: Use `DATABASE_TABLE` to separate dev / staging / prod environments without code changes.
+| Variable | Default | Purpose |
+|---|---|---|
+| `LLM_API_KEY` | — | **Required.** OpenAI-compatible API key |
+| `LLM_BASE_URL` | `https://api.siliconflow.cn/v1` | LLM endpoint |
+| `LLM_MODEL` | `deepseek-v4-flash` | Model name |
+| `DATA_DIR` | `./data` | RWR data root (single package or directory of packages) |
+| `OUTPUT_DIR` | `./output` | Where the generated indexes live |
+| `AUTO_BUILD_INDEX` | `true` | Build/refresh the index at startup |
+| `TOOLS_DIR` | `./tools.d` | Tool plugin directory (optional) |
+| `TOOLS_HOT_RELOAD` | on outside production | Reload changed plugins without a restart |
+| `PORT` | `3000` | HTTP port |
 
 ## License
 
-[MIT](LICENSE) © [rwr-infra](https://github.com/rwr-infra)
+See [LICENSE](./LICENSE).

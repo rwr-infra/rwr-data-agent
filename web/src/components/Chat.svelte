@@ -120,6 +120,24 @@
       <div class="flex flex-col items-start animate-fade-in" class:opacity-50={isDimmed(i)} class:transition-opacity={isDimmed(i)}>
         <div class="text-xs text-base-content/50">{item.text}</div>
       </div>
+    {:else if item.type === 'tool-trace'}
+      <div class="flex flex-col items-start animate-fade-in" class:opacity-50={isDimmed(i)} class:transition-opacity={isDimmed(i)}>
+        <details class="tool-trace group text-xs text-base-content/50">
+          <summary class="cursor-pointer select-none flex items-center gap-1 py-0.5">
+            <span class="tool-trace-arrow inline-block text-[0.65rem] leading-none transition-transform">▶</span>
+            <span class="group-open:hidden">{item.steps.length} tool call(s)</span>
+            <span class="hidden group-open:inline">Tool calls</span>
+          </summary>
+          <div class="flex flex-col gap-0.5 mt-0.5 pl-3 border-l border-base-300">
+            {#each item.steps as step}
+              <span class:text-error={step.ok === false}>
+                {step.icon} {step.text}
+                {#if step.durationMs != null}<span class="text-base-content/30">{step.durationMs}ms</span>{/if}
+              </span>
+            {/each}
+          </div>
+        </details>
+      </div>
     {/if}
 
     {#if pendingRecallId && item.id === pendingRecallId}
@@ -135,3 +153,15 @@
     <ThinkingIndicator {thinkingText} {searchingText} {generatingText} {elapsed} />
   {/if}
 </div>
+
+<style>
+  details.tool-trace > summary {
+    list-style: none;
+  }
+  details.tool-trace > summary::-webkit-details-marker {
+    display: none;
+  }
+  details.tool-trace[open] > summary .tool-trace-arrow {
+    transform: rotate(90deg);
+  }
+</style>

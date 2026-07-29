@@ -1,10 +1,34 @@
 import type { Message } from './types.js';
 
+const TOKEN_KEY = 'rwr-data-agent-token';
+
+/**
+ * API token for deployments that set `API_TOKEN` on the server.
+ *
+ * There is no settings UI: the operator opens the page once with `?token=…`, which is persisted and
+ * stripped from the address bar so it does not sit in history or get shared by copying the URL.
+ * Deployments without `API_TOKEN` never see any of this.
+ */
+export function captureTokenFromUrl(): void {
+  const url = new URL(window.location.href);
+  const token = url.searchParams.get('token');
+  if (!token) return;
+  localStorage.setItem(TOKEN_KEY, token);
+  url.searchParams.delete('token');
+  window.history.replaceState({}, '', url.toString());
+}
+
+/** Auth headers for `/v1/*`, empty when no token has been captured. */
+export function authHeaders(): Record<string, string> {
+  const token = localStorage.getItem(TOKEN_KEY);
+  return token ? { 'x-api-key': token } : {};
+}
+
 export interface ChatRequest {
   model: string;
   messages: Message[];
   stream: boolean;
-  table?: string;
+  mod?: string;
 }
 
 export interface StreamCallbacks {

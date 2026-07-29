@@ -1,16 +1,22 @@
 import type { FastifyInstance } from 'fastify';
-import { getPool } from '../../db/index.js';
+import { getIndexStatus } from '../../indexing/bootstrap.js';
+import { getIndexMeta } from '../../retrieval/localSearch.js';
 
+// eslint-disable-next-line @typescript-eslint/require-await -- Fastify plugin contract: register() awaits the returned promise, so `async` is the interface here.
 export async function healthRoutes(app: FastifyInstance) {
-  app.get('/health', async () => {
-    try {
-      const pool = await getPool();
-      const client = await pool.connect();
-      await client.query('SELECT 1');
-      client.release();
-      return { status: 'ok', database: 'connected' };
-    } catch {
-      return { status: 'error', database: 'disconnected' };
-    }
+  app.get('/health', () => {
+    const status = getIndexStatus();
+    const meta = getIndexMeta() ?? status.meta;
+
+    return {
+      status: status.ready ? 'ok' : 'degraded',
+      index: {
+        ready: status.ready,
+        documents: meta?.count ?? 0,
+        packages: meta?.packages.map((p) => p.name) ?? [],
+        builtAt: meta?.built_at ?? null,
+        ...(status.reason ? { reason: status.reason } : {}),
+      },
+    };
   });
 }

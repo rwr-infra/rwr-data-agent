@@ -5,7 +5,8 @@
   import type { Theme } from './lib/theme.js';
   import { getInitialTheme, toggleTheme } from './lib/theme.js';
   import type { Message, DisplayItem, Session, TokenBreakdown } from './lib/types.js';
-  import { stripMarkdown } from './lib/utils.js';
+  import { estimateTokens, stripMarkdown } from './lib/utils.js';
+  import { authHeaders, captureTokenFromUrl } from './lib/api.js';
   import * as sessionStore from './lib/sessionStore.js';
   import Header from './components/Header.svelte';
   import Chat from './components/Chat.svelte';
@@ -14,7 +15,7 @@
   import SessionDrawer from './components/SessionDrawer.svelte';
 
   const LOCAL_CACHE_KEY = 'rwr-data-agent-cache';
-  type LocalCache = { selectedTable?: string };
+  type LocalCache = { selectedMod?: string };
   function readCache(): LocalCache {
     try { return JSON.parse(localStorage.getItem(LOCAL_CACHE_KEY) || '{}'); } catch { return {}; }
   }
@@ -33,10 +34,12 @@
   let thinking = $state(false);
   let streaming = $state(false);
   let showWelcome = $state(true);
-  let selectedTable = $state(readCache().selectedTable ?? '');
+  let selectedMod = $state(readCache().selectedMod ?? '');
   let contextUsed = $state(0);
   let lastBreakdown = $state<TokenBreakdown | undefined>(undefined);
-  const MAX_CONTEXT = 500000;
+  // Fallback until the first `finish` event reports the server's own MAX_CONTEXT_TOKENS. Hardcoding
+  // it alone would put the gate and the bar's denominator out of step with the server config.
+  let maxContext = $state(500000);
   let pendingRecallId: string | null = $state(null);
   let prefillText = $state('');
   let toast = $state<{ message: string; visible: boolean }>({ message: '', visible: false });
@@ -72,7 +75,7 @@
       createdAt: sessions.find((s) => s.id === activeSessionId)?.createdAt ?? Date.now(),
       updatedAt: Date.now(),
       messages: plainMessages,
-      selectedTable: selectedTable || undefined,
+      selectedMod: selectedMod || undefined,
     };
     await sessionStore.saveSession(session);
     const idx = sessions.findIndex((s) => s.id === session.id);
@@ -100,7 +103,7 @@
       createdAt: Date.now(),
       updatedAt: Date.now(),
       messages: [],
-      selectedTable: selectedTable || undefined,
+      selectedMod: selectedMod || undefined,
     };
     await sessionStore.saveSession(emptySession);
     sessions = [emptySession, ...sessions];
@@ -118,9 +121,9 @@
     contextUsed = 0;
     lastBreakdown = undefined;
     showWelcome = history.length === 0;
-    if (session.selectedTable !== undefined) {
-      selectedTable = session.selectedTable;
-      writeCache({ selectedTable: session.selectedTable });
+    if (session.selectedMod !== undefined) {
+      selectedMod = session.selectedMod;
+      writeCache({ selectedMod: session.selectedMod });
     }
     drawerOpen = false;
   }
@@ -152,6 +155,8 @@
   });
 
   onMount(async () => {
+    // Before anything hits /v1: persist a ?token= if the operator supplied one.
+    captureTokenFromUrl();
     sessions = await sessionStore.getAllSessions();
     if (sessions.length > 0) {
       const latest = sessions[0];
@@ -160,8 +165,8 @@
       nextId = 0;
       displayItems = buildDisplayItems(history);
       showWelcome = history.length === 0;
-      if (latest.selectedTable !== undefined) {
-        selectedTable = latest.selectedTable;
+      if (latest.selectedMod !== undefined) {
+        selectedMod = latest.selectedMod;
       }
     } else {
       await newSession();
@@ -180,10 +185,6 @@
       window.removeEventListener('beforeunload', onBeforeUnload);
     };
   });
-
-  function estimateTokens(text: string): number {
-    return Math.ceil(text.length / 1.5);
-  }
 
   function estimateHistoryTokens(): number {
     return history.reduce((sum, m) => sum + estimateTokens(m.content), 0);
@@ -213,10 +214,10 @@
     drawerOpen = !drawerOpen;
   }
 
-  async function handleTableChange(table: string) {
+  async function handleModChange(mod: string) {
     await saveCurrentSession();
-    selectedTable = table;
-    writeCache({ selectedTable: table });
+    selectedMod = mod;
+    writeCache({ selectedMod: mod });
     history = [];
     contextUsed = 0;
     lastBreakdown = undefined;
@@ -229,7 +230,7 @@
       createdAt: Date.now(),
       updatedAt: Date.now(),
       messages: [],
-      selectedTable: table || undefined,
+      selectedMod: mod || undefined,
     };
     await sessionStore.saveSession(emptySession);
     sessions = [emptySession, ...sessions];
@@ -250,7 +251,7 @@
 
     if (!isRetry) {
       const checkBase = contextUsed > 0 ? contextUsed : estimateHistoryTokens();
-      if (checkBase + estimateTokens(text) >= MAX_CONTEXT) {
+      if (checkBase + estimateTokens(text) >= maxContext) {
         showWelcome = false;
         displayItems.push({ type: 'message', role: 'error', content: tr.ctxOver, id: uid() });
         displayItems = displayItems;
@@ -274,6 +275,7 @@
     let fullContent = '';
     let fullReasoning = '';
     let aiItemIdx = -1;
+    let currentTraceIdx = -1;
 
     try {
       const res = await fetch('/v1/chat/completions', {
@@ -281,11 +283,12 @@
         headers: {
           'Content-Type': 'application/json',
           ...(activeSessionId ? { 'x-session-id': activeSessionId } : {}),
+          ...authHeaders(),
         },
         body: JSON.stringify({
           model: 'rwr-agent',
           messages: history.slice(),
-          ...(selectedTable ? { table: selectedTable } : {}),
+          ...(selectedMod ? { mod: selectedMod } : {}),
         }),
       });
 
@@ -330,25 +333,45 @@
             } else if (event.type === 'text-delta') {
               const content = event.textDelta ?? '';
               if (content) {
-                if (firstChunkTime === 0) {
-                  firstChunkTime = performance.now();
+                if (aiItemIdx < 0) {
+                  if (firstChunkTime === 0) firstChunkTime = performance.now();
                   thinking = false;
                   streaming = true;
                   displayItems.push({ type: 'message', role: 'ai', content: '', id: uid() });
                   aiItemIdx = displayItems.length - 1;
                   displayItems = displayItems;
-                }
-                fullContent += content;
+                }                fullContent += content;
                 if (aiItemIdx >= 0) {
                   displayItems[aiItemIdx] = { ...displayItems[aiItemIdx], type: 'message', role: 'ai', content: fullContent, reasoning: fullReasoning || undefined };
                   displayItems = displayItems;
                 }
               }
+            } else if (event.type === 'tool-step') {
+              // `ok` is absent on the opening step and false when the tool returned an error \u2014 a
+              // failed call must still close its line, otherwise it reads as still running.
+              const failed = event.done && event.ok === false;
+              const icon = !event.done ? '\uD83D\uDD27' : failed ? '\u2715' : '\u2713';
+              const text = event.summary ?? event.toolName ?? 'tool';
+              const step = { icon, text, ok: event.done ? event.ok !== false : undefined, durationMs: event.durationMs };
+              if (currentTraceIdx >= 0 && displayItems[currentTraceIdx]?.type === 'tool-trace') {
+                displayItems[currentTraceIdx].steps.push(step);
+                displayItems = [...displayItems];
+              } else {
+                displayItems.push({ type: 'tool-trace', steps: [step], id: uid() });
+                currentTraceIdx = displayItems.length - 1;
+                displayItems = displayItems;
+              }
             } else if (event.type === 'finish') {
               const usage = event.usage;
               if (usage) {
-                const reportedTotal = (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0);
-                contextUsed = Math.max(contextUsed, reportedTotal, estimateHistoryTokens());
+                // `contextTokens` is what the *next* request will carry: the base prompt plus the
+                // conversation, with this turn's tool transcript excluded — the transcript is never
+                // sent again. It can legitimately shrink (fewer retrieved docs on the next turn), so
+                // it must not be clamped to a high-water mark: doing so would keep an overstated
+                // value forever and eventually trip the send gate below with room still left.
+                // promptTokens/completionTokens are cumulative *spend* across steps, not occupancy.
+                if (usage.maxContextTokens) maxContext = usage.maxContextTokens;
+                contextUsed = Math.max(usage.contextTokens ?? contextUsed, estimateHistoryTokens());
               }
               const totalTime = Math.round(performance.now() - t0);
               const ttfb = firstChunkTime > 0 ? Math.round(firstChunkTime - t0) : '-';
@@ -357,7 +380,13 @@
               const inTokens = usage?.promptTokens != null ? (est ? `~${usage.promptTokens}` : usage.promptTokens) : '-';
               const outTokens = usage?.completionTokens != null ? (est ? `~${usage.completionTokens}` : usage.completionTokens) : '-';
               if (usage?.breakdown) lastBreakdown = usage.breakdown;
-              displayItems.push({ type: 'meta', text: tr.metaFormat(ttfb, totalTime, inTokens, outTokens), id: uid() });
+              displayItems.push({ type: 'meta', text: tr.metaFormat(ttfb, totalTime, inTokens, outTokens, usage?.breakdown?.steps), id: uid() });
+              // Why the loop ended, when it was not a clean finish. The backend reports the reason,
+              // not the wording, so it can be shown in the user's language.
+              const stopNote = event.stopReason === 'step-limit' ? tr.stopStepLimit
+                : event.stopReason === 'output-limit' ? tr.stopOutputLimit
+                : null;
+              if (stopNote) displayItems.push({ type: 'meta', text: stopNote, id: uid() });
               displayItems = displayItems;
             }
           } catch {}
@@ -501,7 +530,7 @@
 </script>
 
 <div class="flex flex-col h-screen bg-base-100 text-base-content">
-  <Header {lang} {tr} {selectedTable} {theme} ontablechange={handleTableChange} ontogglelang={handleToggleLang} ontoggletheme={handleToggleTheme} ontogglemenu={handleToggleMenu} />
+  <Header {lang} {tr} {selectedMod} {theme} onmodchange={handleModChange} ontogglelang={handleToggleLang} ontoggletheme={handleToggleTheme} ontogglemenu={handleToggleMenu} />
   {#if showWelcome}
     <Welcome {tr} onask={handleAsk} />
   {:else}
@@ -527,7 +556,7 @@
     {tr}
     {loading}
     contextUsed={effectiveContextUsed}
-    maxContext={MAX_CONTEXT}
+    maxContext={maxContext}
     breakdown={lastBreakdown}
     onsend={sendMessage}
     oninputchange={handleInputChange}

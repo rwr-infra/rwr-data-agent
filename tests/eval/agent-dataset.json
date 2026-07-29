@@ -1,0 +1,93 @@
+[
+  {
+    "id": "agent-inheritance-g36",
+    "query": "gkw_g36.weapon 继承自哪个文件？列出完整继承链和每一层的源文件",
+    "category": "inheritance",
+    "expectedTools": [
+      "getInheritanceChain"
+    ],
+    "expectedKeys": [
+      "gkw_g36.weapon"
+    ],
+    "notes": "Must walk the graph rather than guess from the retrieved prose, and cite a file per layer",
+    "maxSteps": 8
+  },
+  {
+    "id": "agent-inheritance-english",
+    "query": "What does gkw_m4a1.weapon inherit from? Show the parent chain.",
+    "category": "inheritance",
+    "expectedTools": [
+      "getInheritanceChain"
+    ],
+    "expectedKeys": [
+      "gkw_m4a1.weapon"
+    ],
+    "notes": "Same as above in English — the inheritance intent must survive translation",
+    "maxSteps": 6
+  },
+  {
+    "id": "agent-source-locate",
+    "query": "gkw_g36.weapon 定义在哪个文件里？",
+    "category": "source",
+    "expectedTools": [],
+    "expectedKeys": [
+      "gkw_g36.weapon"
+    ],
+    "expectedFilePattern": "\\.weapon",
+    "notes": "Source location is in the retrieved metadata; a tool call is allowed but not required",
+    "maxSteps": 4
+  },
+  {
+    "id": "agent-source-read",
+    "query": "读取 gkw_g36.weapon 的源码，告诉我它声明了哪些属性",
+    "category": "source",
+    "expectedTools": [
+      "readSource"
+    ],
+    "expectedKeys": [
+      "gkw_g36.weapon"
+    ],
+    "notes": "An explicit request to read source must actually call readSource",
+    "maxSteps": 6
+  },
+  {
+    "id": "agent-references",
+    "query": "有哪些武器引用了 bullet.projectile？",
+    "category": "references",
+    "expectedTools": [
+      "findReferences"
+    ],
+    "expectedKeys": [],
+    "notes": "Reverse lookup is only answerable from the graph",
+    "maxSteps": 8
+  },
+  {
+    "id": "agent-script-symbols",
+    "query": "GFL_Castling 里的 AngelScript 脚本定义了哪些函数？",
+    "category": "script",
+    "expectedTools": [],
+    "expectedKeys": [],
+    "notes": "Deliberately has no step budget: asking for every function across every script file is an inherent fan-out (observed 54 getScriptSymbols calls in 8 steps), not a loop defect."
+  },
+  {
+    "id": "agent-absence-escalation",
+    "query": "激光剑的伤害是多少？",
+    "category": "absence",
+    "expectedTools": [
+      "searchDocs"
+    ],
+    "expectedKeys": [],
+    "expectNotFound": true,
+    "notes": "The item does not exist. The system prompt forbids claiming absence without searching, so searchDocs must be called before the answer admits it is missing.",
+    "maxSteps": 10
+  },
+  {
+    "id": "agent-no-duplicate-loop",
+    "query": "AK47 的伤害、射速和弹匣容量分别是多少？",
+    "category": "efficiency",
+    "expectedTools": [],
+    "expectedKeys": [],
+    "maxSteps": 12,
+    "notes": "Retrieval for ak47 is weak, so this exercises the escalation ladder. It must converge well inside the step limit and must not repeat an identical call."
+  }
+]

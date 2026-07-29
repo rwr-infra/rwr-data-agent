@@ -1,0 +1,60 @@
+# Per-package data mounts. Copy to `docker-compose.override.yml` — Compose loads that
+# name automatically, so `docker compose up -d` picks it up with no extra -f flags.
+#
+# Why one mount per package instead of mounting media/packages wholesale: steamcmd ships
+# 23 packages and indexing all of them costs far more than the handful anyone queries.
+# Mounting the subset directly needs no staging directory, no rsync copy of several GB,
+# and no symlink farm — a symlink inside /app/data points at a host path that does not
+# exist inside the container, so it would dangle.
+#
+# Set RWR_PACKAGES_DIR (and RWR_WORKSHOP_DIR, if you mount Workshop mods) in .env —
+# Compose reads that file for ${...} interpolation. See .env.example.
+#
+# The base file still mounts ./data at /app/data; these are nested on top of it. Keep
+# ./data empty on a server, or drop packages in it to have them indexed alongside these.
+#
+# Compose merges volumes by target, so the /app/data line below replaces the base file's.
+# It has to: Docker creates /app/data/<name> as a mountpoint before mounting, and the
+# base file's `:ro` makes that mkdir fail with "read-only file system". Only the mount
+# point itself becomes writable — every package below keeps its own `:ro`, and the app
+# never writes to DATA_DIR.
+#
+# The directory basename becomes the package's `mod_name` on every indexed document, so
+# the right-hand side of each line is the name you will query by.
+
+services:
+  app:
+    # Run the published image instead of building from source. The base file only
+    # declares `build:`, which would make Compose build locally whenever the image is
+    # absent; `pull_policy: always` makes it fetch from DockerHub instead. Drop both
+    # lines to go back to building from the working tree.
+    image: zhaozisong0/rwr-data-agent:${IMAGE_TAG:-latest}
+    pull_policy: always
+
+    volumes:
+      # Writable mount point — see the note above. Not a typo, and not `:ro`.
+      - ./data:/app/data
+
+      # ── Base game ───────────────────────────────────────────────────────────
+      - ${RWR_PACKAGES_DIR:?set RWR_PACKAGES_DIR in .env}/vanilla:/app/data/vanilla:ro
+      - ${RWR_PACKAGES_DIR}/invasion:/app/data/invasion:ro
+      - ${RWR_PACKAGES_DIR}/invasion_rotator:/app/data/invasion_rotator:ro
+
+      # ── WW2 ─────────────────────────────────────────────────────────────────
+      - ${RWR_PACKAGES_DIR}/ww2_base:/app/data/ww2_base:ro
+      - ${RWR_PACKAGES_DIR}/ww2_combined:/app/data/ww2_combined:ro
+      - ${RWR_PACKAGES_DIR}/ww2_invasion:/app/data/ww2_invasion:ro
+      - ${RWR_PACKAGES_DIR}/edelweiss:/app/data/edelweiss:ro
+      - ${RWR_PACKAGES_DIR}/pacific:/app/data/pacific:ro
+
+      # ── Seasonal asset overlays ─────────────────────────────────────────────
+      # No package_config.xml and no scripts/weapons/items — discoverPackages skips
+      # them, so they contribute nothing to the index. Mounted only to keep the set
+      # complete; drop these two lines if you would rather not carry dead mounts.
+      - ${RWR_PACKAGES_DIR}/vanilla.desert:/app/data/vanilla.desert:ro
+      - ${RWR_PACKAGES_DIR}/vanilla.winter:/app/data/vanilla.winter:ro
+
+      # ── Workshop mods ───────────────────────────────────────────────────────
+      # Workshop directories are numeric IDs. The mount target renames them to
+      # something queryable, since the basename is what becomes `mod_name`.
+      # - ${RWR_WORKSHOP_DIR:?set RWR_WORKSHOP_DIR in .env}/2606656554:/app/data/GFL_Castling:ro

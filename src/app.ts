@@ -6,8 +6,10 @@ import { fileURLToPath } from 'node:url';
 import { chatRoutes } from './api/routes/chat.js';
 import { modelsRoutes } from './api/routes/models.js';
 import { healthRoutes } from './api/routes/health.js';
-import { tablesRoutes } from './api/routes/tables.js';
+import { packagesRoutes } from './api/routes/packages.js';
+import { toolsRoutes } from './api/routes/tools.js';
 import { shutdownLangfuse } from './observability/langfuse.js';
+import { ensureIndexes } from './indexing/bootstrap.js';
 import { config } from './config/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -16,15 +18,41 @@ const isVercel = !!process.env.VERCEL;
 let indexHtml: string | null = null;
 
 export async function buildApp() {
+  // Build/load the local indexes before serving. Never throws — a failure leaves the
+  // server up and is reported through /health.
+  await ensureIndexes();
+
   const app = Fastify({
     logger: false,
     disableRequestLogging: true,
   });
 
-  await app.register(cors, { origin: true });
+  // `origin: true` reflects whatever Origin the caller sends — the historical default, kept so an
+  // existing LAN deployment does not break on upgrade. Set CORS_ORIGINS to lock it down.
+  await app.register(cors, { origin: config.corsOrigins.length > 0 ? config.corsOrigins : true });
+  if (config.corsOrigins.length > 0) {
+    console.log(`[server] CORS restricted to: ${config.corsOrigins.join(', ')}`);
+  }
+
+  // Optional bearer auth on the API surface. `/health` stays open for probes and the static UI stays
+  // open so the page can load and then present its own token.
+  if (config.apiToken) {
+    console.log('[server] API_TOKEN set — /v1/* requires Authorization: Bearer or x-api-key');
+    app.addHook('onRequest', (request, reply, done) => {
+      if (!request.url.startsWith('/v1/')) return done();
+      const header = request.headers.authorization;
+      const bearer = header?.startsWith('Bearer ') ? header.slice(7) : undefined;
+      const presented = bearer ?? (request.headers['x-api-key'] as string | undefined);
+      if (presented === config.apiToken) return done();
+      reply.status(401).send({ error: { message: 'Unauthorized', type: 'authentication_error' } });
+      return;
+    });
+  }
+
   await app.register(chatRoutes, { prefix: '/v1' });
   await app.register(modelsRoutes, { prefix: '/v1' });
-  await app.register(tablesRoutes, { prefix: '/v1' });
+  await app.register(packagesRoutes, { prefix: '/v1' });
+  await app.register(toolsRoutes, { prefix: '/v1' });
   await app.register(healthRoutes);
 
   if (!isVercel) {

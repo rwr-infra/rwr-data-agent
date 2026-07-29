@@ -13,7 +13,7 @@
   prose-p:text-base-content
   prose-a:text-primary
   prose-code:bg-base-300 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded
-  prose-pre:bg-base-300 prose-pre:border prose-pre:border-base-300
+  prose-pre:bg-base-300 prose-pre:text-base-content prose-pre:prose-code:bg-transparent prose-pre:prose-code:text-current prose-pre:border prose-pre:border-base-300
   prose-blockquote:border-l-primary prose-blockquote:text-base-content/60
   prose-th:bg-base-300 prose-td:border-base-300 prose-th:border-base-300
   prose-hr:border-base-300

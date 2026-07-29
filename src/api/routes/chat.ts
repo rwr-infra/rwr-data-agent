@@ -1,16 +1,29 @@
+import * as fsSync from 'fs';
 import type { FastifyInstance } from 'fastify';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
-import { streamText, streamObject } from 'ai';
+import { streamText, streamObject, stepCountIs } from 'ai';
 import { startObservation } from '@langfuse/tracing';
 import { config, validateConfig } from '../../config/index.js';
 import { flushLangfuse } from '../../observability/langfuse.js';
-import { search } from '../../retrieval/search.js';
+import { search as localSearch, configureSearch } from '../../retrieval/localSearch.js';
 import { SYSTEM_PROMPT, buildUserPrompt } from '../../retrieval/prompt.js';
 import { buildSearchQuery } from '../../retrieval/queryRewrite.js';
 import { buildLlmProviderOptions } from '../../llm/providerOptions.js';
-import { classifyQuery, isMetaQuery } from '../../retrieval/intent.js';
+import { classifyQuery, extractExactKey, isMetaQuery, retrievalTopK } from '../../retrieval/intent.js';
 import { EnumResultSchema, ComparisonResultSchema } from '../../types/schemas.js';
 import { getSummary, generateSummary, shouldGenerateSummary } from '../../memory/summarizer.js';
+import { getAgentTools as loadAgentTools } from '../../agent/toolDefs.js';
+import { createToolTranscriptShaper } from '../../agent/toolTranscript.js';
+import { isToolFailure, repairToolCall } from '../../agent/toolRuntime.js';
+import {
+  buildBreakdown,
+  estimateTokens,
+  measureToolCallTokens,
+  measureToolDefTokens,
+  measureTurn,
+  resolveUsage,
+} from '../tokenAccounting.js';
+import type { Tool } from 'ai';
 import type { ChatCompletionRequest, SearchResult } from '../../types/index.js';
 
 let provider: ReturnType<typeof createOpenAICompatible> | null = null;
@@ -22,74 +35,110 @@ function getProvider() {
       name: 'llm',
       apiKey: config.llmApiKey,
       baseURL: config.llmBaseUrl,
+      // DEBUG_HTTP dumps the last outgoing request body — the only reliable way to see
+      // what the provider converter actually produced when a backend rejects a message.
+      ...(process.env.DEBUG_HTTP
+        ? {
+            fetch: async (...args: Parameters<typeof fetch>) => {
+              try {
+                // The converter always produces a JSON string body; anything else
+                // (stream, Blob) has no useful on-disk form.
+                const body = args[1]?.body;
+                fsSync.writeFileSync('/tmp/rwr-wire.json', typeof body === 'string' ? body : '');
+              } catch {
+                // Debug-only dump; never let it break the actual request.
+              }
+              return fetch(...args);
+            },
+          }
+        : {}),
     });
   }
   return provider;
 }
 
-/** Char-based token estimate, matching the request-size guard divisor (chat.ts ~line 59).
- *  Used as a fallback when the upstream provider omits usage in streaming mode. */
-function estimateTokensFromChars(text: string): number {
-  return Math.ceil(text.length / 1.5);
+/**
+ * Built-in graph tools + runtime plugins. Returns null if the registry cannot be built
+ * at all (graceful fallback to pure RAG). Re-queried per request so a hot-reloaded
+ * plugin takes effect without a restart.
+ */
+async function getAgentTools(): Promise<Record<string, Tool> | null> {
+  try {
+    return await loadAgentTools();
+  } catch (err) {
+    console.warn(`[chat] Agent tools unavailable (${(err as Error).message}), falling back to pure RAG`);
+    return null;
+  }
 }
 
-/** Resolve token usage for the finish event. Many OpenAI-compatible backends omit (or return
- *  NaN/0) usage on streamed responses; in that case fall back to a char-based estimate from the
- *  real prompt (system + messages) and generated output, and flag the result as estimated so the
- *  UI can mark it (e.g. with a "~" prefix). */
-function resolveUsage(
-  usage: { inputTokens?: number; outputTokens?: number } | undefined,
-  promptText: string,
-  outputText: string,
-): { promptTokens: number; completionTokens: number; estimated: boolean } {
-  const valid = (n: number | undefined): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0;
-  const inReal = valid(usage?.inputTokens) ? usage!.inputTokens! : undefined;
-  const outReal = valid(usage?.outputTokens) ? usage!.outputTokens! : undefined;
-  return {
-    promptTokens: inReal ?? estimateTokensFromChars(promptText),
-    completionTokens: outReal ?? estimateTokensFromChars(outputText),
-    estimated: inReal === undefined || outReal === undefined,
-  };
+/**
+ * Read one field of a tool input as a display string. Tool inputs are model-produced
+ * JSON, so every field is `unknown` — anything non-scalar has no useful label form.
+ */
+function inputField(input: Record<string, unknown>, name: string): string {
+  const value = input[name];
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return '';
 }
 
-export interface TokenBreakdown {
-  systemPrompt: number;
-  context: number;
-  messages: number;
-  reasoning: number;
-  answer: number;
+/** Build a short human-readable summary of a tool call's input, shown to the UI. */
+function summarizeToolInput(toolName: string | undefined, input: unknown): string {
+  if (!toolName || !input || typeof input !== 'object') return '';
+  const inp = input as Record<string, unknown>;
+  const key = inputField(inp, 'key') || '?';
+  const file = inputField(inp, 'file') || '?';
+  switch (toolName) {
+    case 'searchDocs': {
+      const type = inputField(inp, 'type');
+      return `Search: ${inputField(inp, 'query') || '?'}${type ? ` [${type}]` : ''}`;
+    }
+    case 'getInheritanceChain':
+      return `Inheritance: ${key}`;
+    case 'findReferences':
+      return `References: ${key}`;
+    case 'getTransformChain':
+      return `Transform chain: ${key}`;
+    case 'readSource': {
+      const startLine = inputField(inp, 'startLine');
+      return `Read: ${file}${startLine ? ` (L${startLine}-${inputField(inp, 'endLine')})` : ''}`;
+    }
+    case 'listFiles': {
+      const type = inputField(inp, 'type');
+      return `List: ${inputField(inp, 'pattern') || '?'}${type ? ` [${type}]` : ''}`;
+    }
+    case 'getScriptSymbols':
+      return `Script symbols: ${file}`;
+    case 'getNode':
+      return `Lookup: ${key}`;
+    case 'lookupUpgrade':
+      return `Upgrade lookup: ${inputField(inp, 'query') || '?'}`;
+    default:
+      return toolName;
+  }
 }
 
-/** Break the input/output token totals down by component (system prompt, retrieved context,
- *  conversation messages; reasoning vs answer) using char-based estimates, then scale each group
- *  proportionally so the parts sum to the displayed In/Out totals. Lets the UI show "where the
- *  tokens went" even when the provider only reports aggregate usage. */
-function buildBreakdown(
-  chars: { system: number; context: number; messages: number; reasoning: number; answer: number },
-  inputTotal: number,
-  outputTotal: number,
-): TokenBreakdown {
-  const tok = (c: number) => Math.ceil(c / 1.5);
-  const sys = tok(chars.system);
-  const ctx = tok(chars.context);
-  const msg = tok(chars.messages);
-  const rea = tok(chars.reasoning);
-  const ans = tok(chars.answer);
-  const inSum = sys + ctx + msg;
-  const outSum = rea + ans;
-  const inScale = inSum > 0 ? inputTotal / inSum : 0;
-  const outScale = outSum > 0 ? outputTotal / outSum : 0;
-  const scale = (n: number, s: number) => Math.round(n * s);
-  return {
-    systemPrompt: scale(sys, inScale),
-    context: scale(ctx, inScale),
-    messages: scale(msg, inScale),
-    reasoning: scale(rea, outScale),
-    answer: scale(ans, outScale),
-  };
+/** Build a short summary of a tool result for the UI. */
+function summarizeToolResult(toolName: string | undefined, output: unknown): string {
+  if (!output || typeof output !== 'object') return '';
+  const out = output as Record<string, unknown>;
+  // Failures come back through the runtime envelope as ordinary results, so check them first —
+  // otherwise a `{error, hint}` payload would fall through and report "done".
+  if (typeof out.error === 'string') return out.error;
+  if (typeof out.total === 'number') return `${out.total} result(s)`;
+  if (Array.isArray(out.chain)) return `${out.chain.length} layer(s)`;
+  if (Array.isArray(out.parents)) return `${out.parents.length} parent(s)`;
+  if (Array.isArray(out.referencedBy)) return `${out.referencedBy.length} ref(s)`;
+  if (Array.isArray(out.symbols)) return `${out.symbols.length} symbol(s)`;
+  if (typeof out.totalLines === 'number') return `${out.totalLines} line(s)`;
+  return 'done';
 }
 
+// eslint-disable-next-line @typescript-eslint/require-await -- Fastify plugin contract: register() awaits the returned promise, so `async` is the interface here.
 export async function chatRoutes(app: FastifyInstance) {
+  // Point the local MiniSearch index at the configured path (loaded lazily / by bootstrap).
+  configureSearch(config.searchIndexPath);
+
   app.post('/chat/completions', async (request, reply) => {
     const startTime = Date.now();
     const body = request.body as ChatCompletionRequest;
@@ -117,8 +166,10 @@ export async function chatRoutes(app: FastifyInstance) {
     const truncatedQuery = query.length > 80 ? query.slice(0, 80) + '…' : query;
     console.log(`[chat] Query: "${truncatedQuery}"`);
 
-    const totalChars = messages.reduce((sum, m) => sum + m.content.length, 0);
-    const estimatedTokens = Math.ceil(totalChars / 1.5);
+    // First guard: reject absurd input before spending any work on it. This only sees the incoming
+    // messages — the system prompt and the retrieved context are added later, so a second guard runs
+    // once the real prompt size is known (search for "Second guard" below).
+    const estimatedTokens = messages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
     const effectiveLimit = Math.floor(config.maxContextTokens * 0.7);
     if (estimatedTokens > effectiveLimit) {
       console.log(`[chat] 400 - Request too large: ~${estimatedTokens} tokens > ${effectiveLimit}`);
@@ -130,10 +181,12 @@ export async function chatRoutes(app: FastifyInstance) {
     const sessionId = (request.headers['x-session-id'] as string) || undefined;
     const memorySessionId = sessionId ?? 'default';
     const queryCategory = classifyQuery(query);
+    // A question that is essentially one entity key needs neither query rewriting nor broad retrieval.
+    const exactKey = extractExactKey(query);
 
     const chainObs = startObservation('chat-completions', {
       input: { query, messages: nonSystemMessages },
-      metadata: { queryCategory },
+      metadata: { queryCategory, exactKey },
     }, { asType: 'chain' });
 
     if (sessionId) {
@@ -152,37 +205,43 @@ export async function chatRoutes(app: FastifyInstance) {
         console.log(`[chat] Meta query detected, skipping search`);
         results = [];
       } else {
+        const topK = retrievalTopK(queryCategory, exactKey !== null);
         const searchObs = chainObs.startObservation('search-pipeline', {
-          input: { query, topK: 60 },
+          input: { query, topK, exactKey },
         }, { asType: 'span' });
 
-        const historyForSearch = nonSystemMessages.slice(0, -1).map((m) => ({
-          role: m.role as 'user' | 'assistant',
-          content: m.content,
-        }));
+        let enrichedQuery: string;
+        if (exactKey !== null) {
+          // The query is essentially one key, so it is already unambiguous. Rewriting would fold in
+          // history and synonyms that can only pull the search away from the key the user named.
+          enrichedQuery = exactKey;
+          console.log(`[chat] Exact key detected: ${exactKey} — skipping query rewrite`);
+        } else {
+          const historyForSearch = nonSystemMessages.slice(0, -1).map((m) => ({
+            role: m.role as 'user' | 'assistant',
+            content: m.content,
+          }));
 
-        let summary = getSummary(memorySessionId);
-        if (shouldGenerateSummary(memorySessionId, nonSystemMessages.length)) {
-          generateSummary(memorySessionId, nonSystemMessages).catch(() => {});
+          const summary = getSummary(memorySessionId);
+          if (shouldGenerateSummary(memorySessionId, nonSystemMessages.length)) {
+            generateSummary(memorySessionId, nonSystemMessages).catch(() => {});
+          }
+
+          enrichedQuery = buildSearchQuery(query, historyForSearch, summary);
+          if (enrichedQuery !== query) {
+            console.log(`[chat] Query enriched: "${truncatedQuery}" → "${enrichedQuery.length > 120 ? enrichedQuery.slice(0, 120) + '…' : enrichedQuery}"`);
+          }
         }
 
-        const enrichedQuery = buildSearchQuery(query, historyForSearch, summary);
-        if (enrichedQuery !== query) {
-          console.log(`[chat] Query enriched: "${truncatedQuery}" → "${enrichedQuery.length > 120 ? enrichedQuery.slice(0, 120) + '…' : enrichedQuery}"`);
-        }
-        // Enumeration needs broad coverage (its dedicated path skips rerank); detail/comparison
-        // queries stay focused. A4.
-        const topK = queryCategory === 'enumeration' ? 150 : 60;
-        results = await search(query, {}, topK, body.table, enrichedQuery);
-        console.log(`[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (topK=${topK}, table=${body.table ?? config.databaseTable})`);
+        const filters = body.mod ? { mod_name: body.mod } : {};
+        results = await localSearch(query, filters, topK, enrichedQuery);
+        console.log(
+          `[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (topK=${topK}, intent=${queryCategory}${body.mod ? `, mod=${body.mod}` : ''})`,
+        );
 
-        searchPath = 'hybrid';
-        // Low confidence when the top result's rerank score is weak; fall back to the
-        // count heuristic when rerank didn't run (score absent, e.g. enumeration path). A5.
-        const topScore = results[0]?.score;
-        isLowConfidence =
-          results.length > 0 &&
-          (topScore !== undefined ? topScore < config.lowConfidenceThreshold : results.length < 3);
+        searchPath = 'local-index';
+        // Low confidence heuristic: fewer than 3 results indicates a weak match.
+        isLowConfidence = results.length > 0 && results.length < 3;
 
         searchObs.update({
           output: {
@@ -204,7 +263,10 @@ export async function chatRoutes(app: FastifyInstance) {
 
     chainObs.update({ metadata: { queryCategory, searchResults: results.length, searchPath, isLowConfidence } });
 
-    const ragUserPrompt = buildUserPrompt(query, results, { lowConfidence: isLowConfidence });
+    const ragUserPrompt = buildUserPrompt(query, results, {
+      lowConfidence: isLowConfidence,
+      budgetTokens: config.contextBudgetTokens,
+    });
 
     const historyMessages = nonSystemMessages.slice(0, -1).map((m) => ({
       role: m.role as 'user' | 'assistant',
@@ -218,7 +280,7 @@ export async function chatRoutes(app: FastifyInstance) {
 
     const llmMessages = [
       ...historyMessages.map((m) => ({
-        role: m.role as 'user' | 'assistant',
+        role: m.role,
         content: m.content,
       })),
       { role: 'user' as const, content: ragUserPrompt },
@@ -228,20 +290,39 @@ export async function chatRoutes(app: FastifyInstance) {
       config.llmMaxOutputTokens,
     );
 
-    // Real prompt sent to the model (system + messages), used to estimate input tokens when the
-    // provider omits usage. Includes the RAG context the frontend can't see, so it is far more
-    // accurate than a client-side estimate.
-    const promptText = SYSTEM_PROMPT + '\n' + llmMessages.map((m) => m.content).join('\n');
-
-    // Char counts per input component for the token breakdown. The RAG user prompt wraps the
-    // retrieved docs + instructions around the question, so "context" is that prompt minus the
-    // raw question, and "messages" is the conversation history plus the question itself.
-    const historyChars = historyMessages.reduce((sum, m) => sum + m.content.length, 0);
-    const inputChars = {
-      system: SYSTEM_PROMPT.length,
-      context: Math.max(ragUserPrompt.length - query.length, 0),
-      messages: historyChars + query.length,
+    // Per-component token estimates for the breakdown, and the fallback input total when the
+    // provider omits usage. Measured server-side, so they include the RAG context the frontend
+    // can't see. The RAG user prompt wraps the retrieved docs + instructions around the question,
+    // so "context" is that prompt minus the raw question, and "messages" is the conversation
+    // history plus the question itself.
+    const queryTokens = estimateTokens(query);
+    const inputTokens = {
+      system: estimateTokens(SYSTEM_PROMPT),
+      context: Math.max(estimateTokens(ragUserPrompt) - queryTokens, 0),
+      messages: historyMessages.reduce((sum, m) => sum + estimateTokens(m.content), 0) + queryTokens,
     };
+
+    // Second guard: now that the retrieved context exists, check what will actually be sent. The
+    // first guard cannot see this — a 150-document enumeration adds far more than the user typed, so
+    // a request that passed there can still fail to fit. Prompt plus reserved output must leave room
+    // in the window. Tool definitions (~1K) are not counted; they are noise at this scale.
+    const promptTokens = inputTokens.system + inputTokens.context + inputTokens.messages;
+    if (promptTokens + maxTokens > config.maxContextTokens) {
+      console.log(
+        `[chat] 400 - Prompt too large: ~${promptTokens} prompt + ${maxTokens} reserved output > ${config.maxContextTokens}`,
+      );
+      chainObs.update({ level: 'ERROR', statusMessage: 'Prompt exceeds context window' });
+      chainObs.end();
+      return reply.status(400).send({
+        error: {
+          message:
+            `Prompt too large: ~${promptTokens} tokens of system prompt + retrieved context + conversation, ` +
+            `plus ${maxTokens} reserved for the answer, exceed the ${config.maxContextTokens} token context window. ` +
+            `Ask a narrower question, or lower LLM_MAX_OUTPUT_TOKENS.`,
+          type: 'invalid_request_error',
+        },
+      });
+    }
 
     const genObs = chainObs.startObservation('llm-generation', {
       input: { messages: llmMessages, system: SYSTEM_PROMPT },
@@ -289,19 +370,27 @@ export async function chatRoutes(app: FastifyInstance) {
           (reply.raw as unknown as { flush?: () => void }).flush?.();
         }
 
-        const usage = await result.usage;
+        const [usage, finishReason] = await Promise.all([result.usage, result.finishReason]);
         const answerText = JSON.stringify(lastObject ?? {});
-        const resolved = resolveUsage(usage, promptText, answerText);
-        const breakdown = buildBreakdown(
-          { ...inputChars, reasoning: 0, answer: answerText.length },
-          resolved.promptTokens,
-          resolved.completionTokens,
-        );
+        // Structured mode has no tool loop: a single step, no tool definitions in the prompt, so the
+        // only way it stops early is running out of output tokens.
+        if (finishReason === 'length') {
+          console.warn(`[chat] Structured output truncated at maxOutputTokens=${maxTokens}`);
+        }
+        const basis = measureTurn({ ...inputTokens, toolDefs: 0, reasoning: 0, answer: estimateTokens(answerText) }, {
+          replay: [],
+          toolCallTokens: 0,
+        });
+        const resolved = resolveUsage(usage, usage, basis);
+        const breakdown = buildBreakdown(basis, resolved);
         const finishData = JSON.stringify({
           type: 'finish',
+          stopReason: finishReason === 'length' ? 'output-limit' : 'completed',
           usage: {
             promptTokens: resolved.promptTokens,
             completionTokens: resolved.completionTokens,
+            contextTokens: resolved.contextTokens,
+            maxContextTokens: config.maxContextTokens,
             estimated: resolved.estimated,
             breakdown,
           },
@@ -309,20 +398,57 @@ export async function chatRoutes(app: FastifyInstance) {
         reply.raw.write(finishData + '\n');
         (reply.raw as unknown as { flush?: () => void }).flush?.();
       } else {
+        const tools = await getAgentTools();
+        const toolDefTokens = measureToolDefTokens(tools);
+        // Tool results are replayed in full; the shaper only sheds them if a step's prompt would
+        // otherwise overflow the window. The system prompt, tool definitions and the output
+        // reservation ride alongside `messages`, so they come off the budget first.
+        const shaper = createToolTranscriptShaper({
+          budgetTokens:
+            Math.floor(config.maxContextTokens * config.toolContextBudgetRatio) -
+            inputTokens.system -
+            toolDefTokens -
+            maxTokens,
+          shedTargetTokens: config.toolShedResultTokens,
+        });
+        // Tool execution time, reported by the SDK and keyed by tool call, so the UI can show it
+        // without the timing ever entering the model's context.
+        const toolDurations = new Map<string, number>();
         const result = streamText({
           model: getProvider().chatModel(config.llmModel),
           system: SYSTEM_PROMPT,
           messages: llmMessages,
           maxOutputTokens: maxTokens,
+          ...(tools
+            ? {
+                tools,
+                stopWhen: stepCountIs(100),
+                prepareStep: ({ messages }) => shaper.prepare(messages as Record<string, unknown>[]) as never,
+                experimental_onToolCallFinish: ({ toolCall, durationMs }) => {
+                  // The SDK reports fractional milliseconds; the UI only ever shows whole ones.
+                  toolDurations.set(toolCall.toolCallId, Math.round(durationMs));
+                },
+                // Models carry coding-agent priors and invent `grep` / `cat` / `ls`. Remap the
+                // unambiguous ones instead of spending a step on NoSuchToolError.
+                experimental_repairToolCall: repairToolCall,
+              }
+            : {}),
           providerOptions: buildLlmProviderOptions(),
-          onFinish: ({ text, usage }) => {
+          onFinish: ({ text, totalUsage }) => {
             const outputText = text.slice(0, 500);
+            // `totalUsage`, not `usage`: the latter reports only the tool loop's final step.
             genObs.update({
               output: outputText,
               usageDetails: {
-                inputTokens: usage?.inputTokens ?? 0,
-                outputTokens: usage?.outputTokens ?? 0,
-                totalTokens: (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0),
+                inputTokens: totalUsage?.inputTokens ?? 0,
+                outputTokens: totalUsage?.outputTokens ?? 0,
+                totalTokens: (totalUsage?.inputTokens ?? 0) + (totalUsage?.outputTokens ?? 0),
+                ...(totalUsage?.outputTokenDetails?.reasoningTokens
+                  ? { reasoningTokens: totalUsage.outputTokenDetails.reasoningTokens }
+                  : {}),
+                ...(totalUsage?.inputTokenDetails?.cacheReadTokens
+                  ? { cacheReadInputTokens: totalUsage.inputTokenDetails.cacheReadTokens }
+                  : {}),
               },
             });
             chainObs.otelSpan.setAttribute('langfuse.trace.output', outputText);
@@ -334,8 +460,33 @@ export async function chatRoutes(app: FastifyInstance) {
         // breakdown) when the provider omits usage.
         let reasoningText = '';
         let answerText = '';
+        let toolCallCount = 0;
+        let toolFailureCount = 0;
+        // Execution time per tool call, filled by `experimental_onToolCallFinish` above. Measuring
+        // the gap between the `tool-call` and `tool-result` stream parts instead would report the
+        // flush interval, not the work — the SDK can emit both back to back once a tool has already
+        // finished, which showed up as 0ms for calls that actually took tens of ms.
+        const durationOf = (id: string | undefined): number | undefined => {
+          if (!id) return undefined;
+          const ms = toolDurations.get(id);
+          toolDurations.delete(id);
+          return ms;
+        };
         for await (const part of result.fullStream) {
-          const p = part as { type: string; text?: string; textDelta?: string; delta?: string; error?: unknown };
+          const p = part as {
+            type: string;
+            text?: string;
+            textDelta?: string;
+            delta?: string;
+            error?: unknown;
+            toolName?: string;
+            toolCallId?: string;
+            input?: unknown;
+            output?: unknown;
+          };
+          if (process.env.DEBUG_AGENT === '1') {
+            console.log(`[agent-stream] type=${p.type} toolName=${p.toolName ?? ''} hasText=${!!(p.text ?? p.textDelta ?? p.delta)}`);
+          }
           if (p.type === 'reasoning-delta' || p.type === 'reasoning') {
             const delta = p.text ?? p.textDelta ?? p.delta ?? '';
             if (delta) {
@@ -350,23 +501,101 @@ export async function chatRoutes(app: FastifyInstance) {
               reply.raw.write(JSON.stringify({ type: 'text-delta', textDelta: delta }) + '\n');
               (reply.raw as unknown as { flush?: () => void }).flush?.();
             }
+          } else if (p.type === 'tool-call') {
+            toolCallCount++;
+            const summary = summarizeToolInput(p.toolName, p.input);
+            reply.raw.write(JSON.stringify({ type: 'tool-step', toolName: p.toolName, summary }) + '\n');
+            (reply.raw as unknown as { flush?: () => void }).flush?.();
+          } else if (p.type === 'tool-result') {
+            // The runtime envelope turns thrown tools into ordinary results carrying `error`, so
+            // success has to be read off the output shape rather than the stream part type.
+            const failed = isToolFailure(p.output);
+            if (failed) toolFailureCount++;
+            reply.raw.write(
+              JSON.stringify({
+                type: 'tool-step',
+                toolName: p.toolName,
+                done: true,
+                ok: !failed,
+                durationMs: durationOf(p.toolCallId),
+                summary: summarizeToolResult(p.toolName, p.output),
+              }) + '\n',
+            );
+            (reply.raw as unknown as { flush?: () => void }).flush?.();
+          } else if (p.type === 'tool-error') {
+            // Failures that never reach `execute` — schema validation, unknown tool name. The model
+            // still receives them as tool results, so this must close the UI's trace line and must
+            // NOT throw: only a stream-level `error` may end the response.
+            toolFailureCount++;
+            const message = p.error instanceof Error ? p.error.message : String(p.error);
+            console.warn(`[chat] tool-error ${p.toolName ?? '?'} — ${message}`);
+            reply.raw.write(
+              JSON.stringify({
+                type: 'tool-step',
+                toolName: p.toolName,
+                done: true,
+                ok: false,
+                durationMs: durationOf(p.toolCallId),
+                // The SDK's message appends the full tool inventory, which is useful to the model but
+                // just noise in a one-line trace entry.
+                summary: message.split('. Available tools:')[0],
+              }) + '\n',
+            );
+            (reply.raw as unknown as { flush?: () => void }).flush?.();
           } else if (p.type === 'error') {
             throw p.error;
           }
         }
 
-        const usage = await result.usage;
-        const resolved = resolveUsage(usage, promptText, reasoningText + answerText);
-        const breakdown = buildBreakdown(
-          { ...inputChars, reasoning: reasoningText.length, answer: answerText.length },
-          resolved.promptTokens,
-          resolved.completionTokens,
+        const finishReason = await result.finishReason;
+        if (toolCallCount > 0) {
+          console.log(
+            `[chat] Agent used ${toolCallCount} tool call(s)` +
+              (toolFailureCount > 0 ? ` (${toolFailureCount} failed)` : '') +
+              ` | finishReason=${finishReason} | answerLen=${answerText.length}`,
+          );
+        }
+
+        // Why the loop ended, reported as a field on `finish` rather than as an `error` event: the
+        // UI owns the wording (it is fully localized) and `error` stays reserved for a stream that
+        // actually broke. `output-limit` was previously invisible — the answer just stopped.
+        let stopReason: 'completed' | 'step-limit' | 'output-limit' = 'completed';
+        if (finishReason === 'tool-calls' && answerText.trim().length === 0) {
+          stopReason = 'step-limit';
+          console.warn('[chat] Agent step limit reached without a final answer');
+          chainObs.update({ level: 'ERROR', statusMessage: 'Agent step limit reached' });
+        } else if (finishReason === 'length') {
+          stopReason = 'output-limit';
+          console.warn(`[chat] Output truncated at maxOutputTokens=${maxTokens}`);
+          chainObs.update({ level: 'WARNING', statusMessage: 'Output token limit reached' });
+        }
+
+        // `totalUsage` sums every step of the tool loop; `usage` is the last step alone, which is
+        // what still occupies the context window.
+        const [totalUsage, lastStepUsage, stepResults] = await Promise.all([
+          result.totalUsage,
+          result.usage,
+          result.steps,
+        ]);
+        const basis = measureTurn(
+          {
+            ...inputTokens,
+            toolDefs: toolDefTokens,
+            reasoning: estimateTokens(reasoningText),
+            answer: estimateTokens(answerText),
+          },
+          { replay: shaper.replay, toolCallTokens: measureToolCallTokens(stepResults) },
         );
+        const resolved = resolveUsage(totalUsage, lastStepUsage, basis);
+        const breakdown = buildBreakdown(basis, resolved);
         const finishData = JSON.stringify({
           type: 'finish',
+          stopReason,
           usage: {
             promptTokens: resolved.promptTokens,
             completionTokens: resolved.completionTokens,
+            contextTokens: resolved.contextTokens,
+            maxContextTokens: config.maxContextTokens,
             estimated: resolved.estimated,
             breakdown,
           },

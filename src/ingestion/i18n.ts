@@ -1,7 +1,8 @@
 import { XMLParser } from 'fast-xml-parser';
 import * as fs from 'fs/promises';
-import * as fsSync from 'fs';
 import * as path from 'path';
+import type { Dirent } from 'fs';
+import { walkFiles } from './walk.js';
 
 const parser = new XMLParser({
   ignoreAttributes: false,
@@ -19,8 +20,16 @@ export interface LanguageData {
   translations: TranslationMap;
 }
 
-const TRANSLATION_ROOTS = new Set(['translation', 'translations', 'ui', 'intro', 'journal']);
-const FILE_REFS = new Set(['translation', 'file']);
+/** Narrow an XML node to an indexable object, or undefined if it is a leaf. */
+function asNode(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined;
+}
+
+/** fast-xml-parser types `parse()` as `any`; narrow it once at the boundary. */
+function parseXml(content: string): Record<string, unknown> {
+  const parsed: unknown = parser.parse(content);
+  return asNode(parsed) ?? {};
+}
 
 function extractTextsFromParsed(parsed: unknown, translations: TranslationMap): void {
   if (typeof parsed !== 'object' || parsed === null) return;
@@ -31,8 +40,11 @@ function extractTextsFromParsed(parsed: unknown, translations: TranslationMap): 
 
     const textNodes = findTextNodes(rootVal);
     for (const t of textNodes) {
-      if (t['@_key'] && t['@_text'] !== undefined) {
-        translations[t['@_key'] as string] = String(t['@_text']);
+      // parseAttributeValue is off, so both attributes arrive as strings.
+      const key = t['@_key'];
+      const text = t['@_text'];
+      if (typeof key === 'string' && key && typeof text === 'string') {
+        translations[key] = text;
       }
     }
   }
@@ -58,29 +70,21 @@ function findTextNodes(val: unknown): Record<string, unknown>[] {
 }
 
 async function collectTranslationFiles(dir: string): Promise<string[]> {
-  const entries = await fs.readdir(dir, { withFileTypes: true, recursive: true });
-  const files: string[] = [];
-  for (const entry of entries) {
-    if (!entry.isFile()) continue;
-    if (!entry.name.toLowerCase().endsWith('.xml')) continue;
-    const fullPath = path.join(entry.parentPath ?? dir, entry.name);
-    files.push(fullPath);
-  }
-  return files;
+  return walkFiles(dir, { keepFile: (name) => name.toLowerCase().endsWith('.xml') });
 }
 
 async function loadTranslationFile(filePath: string, translations: TranslationMap): Promise<void> {
   const content = await fs.readFile(filePath, 'utf-8');
-  const parsed = parser.parse(content);
+  const parsed = parseXml(content);
 
   const fileRefs: string[] = [];
-  if (parsed.translations?.translation) {
-    const refs = Array.isArray(parsed.translations.translation)
-      ? parsed.translations.translation
-      : [parsed.translations.translation];
+  const translationNodes = asNode(parsed['translations'])?.['translation'];
+  if (translationNodes) {
+    const refs = Array.isArray(translationNodes) ? translationNodes : [translationNodes];
     for (const ref of refs) {
-      if (typeof ref === 'object' && ref?.['@_file']) {
-        fileRefs.push(ref['@_file'] as string);
+      const refFile = asNode(ref)?.['@_file'];
+      if (typeof refFile === 'string' && refFile) {
+        fileRefs.push(refFile);
       }
     }
   }
@@ -118,20 +122,25 @@ export async function loadLanguageData(languagesDir: string, language: string): 
 }
 
 export async function loadAllLanguages(languagesDir: string): Promise<LanguageData[]> {
-  let entries: fsSync.Dirent[];
+  let entries: Dirent[];
   try {
-    entries = fsSync.readdirSync(languagesDir, { withFileTypes: true });
+    entries = await fs.readdir(languagesDir, { withFileTypes: true });
   } catch {
     return [];
   }
 
   const languages: LanguageData[] = [];
   for (const entry of entries) {
-    if (entry.isDirectory()) {
-      const langData = await loadLanguageData(languagesDir, entry.name);
-      if (Object.keys(langData.translations).length > 0) {
-        languages.push(langData);
-      }
+    // A symlinked `languages/<lang>` reports isDirectory() === false; stat() follows it.
+    const isDir = entry.isSymbolicLink()
+      ? ((await fs.stat(path.join(languagesDir, entry.name)).catch(() => null))?.isDirectory() ??
+        false)
+      : entry.isDirectory();
+    if (!isDir) continue;
+
+    const langData = await loadLanguageData(languagesDir, entry.name);
+    if (Object.keys(langData.translations).length > 0) {
+      languages.push(langData);
     }
   }
 
@@ -170,7 +179,6 @@ function extractNameKeys(
 ): string[] {
   const keys: string[] = [];
   const attrs = doc.flat_attributes;
-  const data = doc.data as Record<string, unknown> | null;
 
   const specName = attrs['specification.name'] ?? attrs['name'];
   if (typeof specName === 'string' && specName) {

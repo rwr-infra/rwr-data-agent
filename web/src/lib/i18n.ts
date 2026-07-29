@@ -30,15 +30,25 @@ export interface Translations {
   bdInput: string;
   bdOutput: string;
   bdSystem: string;
+  bdToolDefs: string;
   bdContext: string;
   bdMessages: string;
+  bdToolResults: string;
+  bdCacheRead: string;
   bdReasoning: string;
+  bdToolCalls: string;
   bdAnswer: string;
-  defaultTag: string;
+  bdSteps: (n: number) => string;
+  bdStepsHint: (n: number) => string;
+  ctxLabel: string;
+  ctxHint: string;
+  stopStepLimit: string;
+  stopOutputLimit: string;
+  allPackages: string;
   ctxOver: string;
   reqFailed: string;
   netError: string;
-  metaFormat: (ttfb: string | number, total: number, inp: string | number, out: string | number) => string;
+  metaFormat: (ttfb: string | number, total: number, inp: string | number, out: string | number, steps?: number) => string;
   langLabel: string;
   retry: string;
   copyText: string;
@@ -76,16 +86,30 @@ const i18n: Record<Lang, Translations> = {
     bdInput: '输入',
     bdOutput: '输出',
     bdSystem: '系统提示',
+    bdToolDefs: '工具定义',
     bdContext: '检索上下文',
     bdMessages: '对话消息',
+    bdToolResults: '工具结果',
+    bdCacheRead: '缓存命中',
     bdReasoning: '思考',
+    bdToolCalls: '工具调用',
     bdAnswer: '回答',
-    defaultTag: '(默认)',
+    bdSteps: (n) => `${n} 步 LLM 调用`,
+    bdStepsHint: (n) => `工具循环共 ${n} 步，固定部分每步重发一次`,
+    ctxLabel: '上下文',
+    ctxHint: '下一次请求要携带的输入量。工具调用记录不跨轮，不计入。',
+    stopStepLimit: '⚠ 工具调用已达步数上限，模型未产出最终答案。请缩小问题范围或换用更具体的关键词重试。',
+    stopOutputLimit: '⚠ 回答已达输出 token 上限被截断。可提高 LLM_MAX_OUTPUT_TOKENS，或把问题拆成几次提问。',
+    allPackages: '全部数据包',
     ctxOver: '上下文已达上限，请刷新页面开始新对话',
     reqFailed: '请求失败: ',
     netError: '网络错误: ',
-    metaFormat: (ttfb, total, inp, out) =>
-      `TTFB ${formatMs(ttfb)} · 总耗时 ${formatMs(total)} · 输入 ${inp} tokens · 输出 ${out} tokens`,
+    // A tool loop re-sends the prompt every step, so In/Out are cumulative spend across the turn —
+    // labelled "累计" there to distinguish them from the context bar, which shows window occupancy.
+    metaFormat: (ttfb, total, inp, out, steps) =>
+      `TTFB ${formatMs(ttfb)} · 总耗时 ${formatMs(total)} · ${steps && steps > 1 ? '累计输入' : '输入'} ${inp} tokens · ` +
+      `${steps && steps > 1 ? '累计输出' : '输出'} ${out} tokens` +
+      (steps && steps > 1 ? ` · ${steps} 步` : ''),
     langLabel: 'EN',
     retry: '重试',
     copyText: '复制文本',
@@ -121,16 +145,28 @@ const i18n: Record<Lang, Translations> = {
     bdInput: 'Input',
     bdOutput: 'Output',
     bdSystem: 'System prompt',
+    bdToolDefs: 'Tool definitions',
     bdContext: 'Context',
     bdMessages: 'Messages',
+    bdToolResults: 'Tool results',
+    bdCacheRead: 'Cache read',
     bdReasoning: 'Reasoning',
+    bdToolCalls: 'Tool calls',
     bdAnswer: 'Answer',
-    defaultTag: '(Default)',
+    bdSteps: (n) => `${n} LLM step${n === 1 ? '' : 's'}`,
+    bdStepsHint: (n) => `Tool loop ran ${n} steps; the fixed parts are re-sent on each`,
+    ctxLabel: 'Context',
+    ctxHint: 'Input the next request will carry. Tool call records do not survive the turn and are excluded.',
+    stopStepLimit: '⚠ Hit the tool-call step limit without producing a final answer. Narrow the question or retry with more specific terms.',
+    stopOutputLimit: '⚠ Answer was cut off at the output token limit. Raise LLM_MAX_OUTPUT_TOKENS, or split the question into several turns.',
+    allPackages: 'All packages',
     ctxOver: 'Context limit reached, please refresh to start a new conversation',
     reqFailed: 'Request failed: ',
     netError: 'Network error: ',
-    metaFormat: (ttfb, total, inp, out) =>
-      `TTFB ${formatMs(ttfb)} · Total ${formatMs(total)} · In ${inp} tokens · Out ${out} tokens`,
+    metaFormat: (ttfb, total, inp, out, steps) =>
+      `TTFB ${formatMs(ttfb)} · Total ${formatMs(total)} · ${steps && steps > 1 ? 'In (all steps)' : 'In'} ${inp} tokens · ` +
+      `${steps && steps > 1 ? 'Out (all steps)' : 'Out'} ${out} tokens` +
+      (steps && steps > 1 ? ` · ${steps} steps` : ''),
     langLabel: '中文',
     retry: 'Retry',
     copyText: 'Copy text',

@@ -1,0 +1,11 @@
+# Prettier does not read .gitignore either — keep this in sync with it.
+node_modules/
+dist/
+public/
+output/
+data/
+vanilla-data/
+ww2-data/
+
+# Own toolchain, not covered by the root Prettier config.
+web/

@@ -2,31 +2,17 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { parseXmlFile } from './xmlParser.js';
 import { parseAngelScriptFile } from './asParser.js';
+import { walkFiles } from './walk.js';
 import type { StructuredDocument } from '../types/index.js';
 
 export const SUPPORTED_EXTS = new Set(['.xml', '.as', '.call', '.character', '.ai', '.resources', '.models', '.name', '.text_lines', '.weapon', '.projectile', '.carry_item', '.base_weapon', '.animation_base', '.base', '.base_carry_item']);
 export const EXCLUDED_DIRS = new Set(['models', 'maps']);
 
 export async function collectFiles(dir: string): Promise<string[]> {
-  const entries = await fs.readdir(dir, { withFileTypes: true, recursive: true });
-  const files: string[] = [];
-  for (const entry of entries) {
-    if (!entry.isFile()) continue;
-
-    const fullPath = path.join(entry.parentPath ?? dir, entry.name);
-    const relativePath = path.relative(dir, fullPath);
-    const pathParts = relativePath.split(path.sep);
-
-    if (pathParts.some((part) => EXCLUDED_DIRS.has(part.toLowerCase()))) {
-      continue;
-    }
-
-    const ext = path.extname(entry.name).toLowerCase();
-    if (SUPPORTED_EXTS.has(ext)) {
-      files.push(fullPath);
-    }
-  }
-  return files;
+  return walkFiles(dir, {
+    excludeDirs: EXCLUDED_DIRS,
+    keepFile: (name) => SUPPORTED_EXTS.has(path.extname(name).toLowerCase()),
+  });
 }
 
 export async function parseFile(filePath: string, modName: string): Promise<StructuredDocument[]> {

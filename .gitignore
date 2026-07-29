@@ -23,3 +23,9 @@ docs/
 .cursor/
 .claude/
 .local/
+
+# Generated build artifacts (graph index, extracted docs)
+output/
+
+# Deployment-specific data mounts — see docker-compose.override.yml.example
+docker-compose.override.yml

@@ -1,23 +1,4 @@
 services:
-  postgres:
-    image: pgvector/pgvector:pg17
-    container_name: rwr-agent-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: rwr_agent
-      POSTGRES_PASSWORD: rwr_agent_secret
-      POSTGRES_DB: rwr_agent
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U rwr_agent -d rwr_agent"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
   app:
     build:
       context: .
@@ -28,15 +9,17 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql://rwr_agent:rwr_agent_secret@postgres:5432/rwr_agent
+      DATA_DIR: /app/data
+      OUTPUT_DIR: /app/output
+      TOOLS_DIR: /app/tools.d
     ports:
-      - "3000:3000"
-    depends_on:
-      postgres:
-        condition: service_healthy
+      # Follow PORT from .env — the app binds it inside the container, so a fixed
+      # 3000:3000 mapping silently breaks whenever .env sets anything else.
+      - "${PORT:-3000}:${PORT:-3000}"
     volumes:
-      # Mount data directory for on-demand ingestion
+      # RWR data root — a single package directory or a directory of packages.
       - ./data:/app/data:ro
-
-volumes:
-  postgres_data:
+      # Generated indexes, persisted so restarts skip the rebuild.
+      - ./output:/app/output
+      # Agent tool plugins. Read-only: they execute in-process with full privileges.
+      - ./tools.d:/app/tools.d:ro
