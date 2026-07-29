@@ -1,4 +1,6 @@
-node_modules
+# Bare `node_modules` only matches the root entry — web/node_modules would
+# otherwise ride along and drop host-arch native binaries into the builder.
+**/node_modules
 dist
 .git
 .gitignore
