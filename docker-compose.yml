@@ -13,7 +13,9 @@ services:
       OUTPUT_DIR: /app/output
       TOOLS_DIR: /app/tools.d
     ports:
-      - "3000:3000"
+      # Follow PORT from .env — the app binds it inside the container, so a fixed
+      # 3000:3000 mapping silently breaks whenever .env sets anything else.
+      - "${PORT:-3000}:${PORT:-3000}"
     volumes:
       # RWR data root — a single package directory or a directory of packages.
       - ./data:/app/data:ro
