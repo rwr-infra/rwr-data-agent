@@ -1,8 +1,24 @@
 import 'dotenv/config';
+import * as os from 'os';
 import * as path from 'path';
 
 const dataDir = path.resolve(process.env.DATA_DIR ?? './data');
 const outputDir = path.resolve(process.env.OUTPUT_DIR ?? './output');
+
+/**
+ * How many files the index build parses at once.
+ *
+ * XML parsing is synchronous CPU work, so extra concurrency buys no throughput past the
+ * core count — it only keeps that many file contents *and* their parse trees alive at the
+ * same time, which is exactly the peak the build has to survive on a small box. Default
+ * is the core count clamped to [2, 4]; a 2-vCPU host lands on 2.
+ */
+const indexConcurrency = (() => {
+  const raw = parseInt(process.env.INDEX_CONCURRENCY ?? '', 10);
+  if (Number.isFinite(raw) && raw > 0) return raw;
+  const cores = typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length;
+  return Math.max(2, Math.min(4, cores || 2));
+})();
 
 export const config = {
   // ── LLM (the only required external service) ──────────────────────────────
@@ -21,18 +37,20 @@ export const config = {
     : path.join(outputDir, 'search-index.json'),
   /** Build/refresh the index at startup when it is missing or stale. */
   autoBuildIndex: process.env.AUTO_BUILD_INDEX !== 'false',
+  /** Files parsed concurrently by the index build. See the comment on `indexConcurrency`. */
+  indexConcurrency,
 
   // ── Agent tool plugins ────────────────────────────────────────────────────
   /** Directory of runtime tool plugins (plain ESM .js). Optional — skipped if absent. */
   toolsDir: path.resolve(process.env.TOOLS_DIR ?? './tools.d'),
   /**
-   * Watch the plugin directory and reload on change. Off in production and on Vercel,
-   * where the filesystem is read-only and a watcher buys nothing.
+   * Watch the plugin directory and reload on change. Off in production, where each reload
+   * leaks the previous ESM module and a watcher buys nothing.
    */
   toolsHotReload:
     process.env.TOOLS_HOT_RELOAD !== undefined
       ? process.env.TOOLS_HOT_RELOAD === 'true'
-      : process.env.NODE_ENV !== 'production' && !process.env.VERCEL,
+      : process.env.NODE_ENV !== 'production',
 
   // ── Server ────────────────────────────────────────────────────────────────
   port: parseInt(process.env.PORT ?? '3000', 10),

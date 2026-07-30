@@ -158,16 +158,20 @@ export default function register(host) {
    */
   function getIndex() {
     indexPromise ??= (async () => {
+      // Applicability is decided before the cache is read: the cached artifact is Castling's,
+      // and serving it to a request scoped to another package is exactly the cross-package
+      // answer the scope exists to prevent.
+      let roots = await findCastlingRoots(host.config.dataDir);
+      if (host.scope) roots = roots.filter((dir) => path.basename(dir) === host.scope);
+      if (roots.length === 0) return null;
+
       const cachePath = path.join(host.config.outputDir, 'upgrade-index.json');
       try {
         const cached = JSON.parse(await fs.readFile(cachePath, 'utf-8'));
-        if (cached.version === INDEX_VERSION) return cached;
+        if (cached.version === INDEX_VERSION && cached.source_dir === roots[0]) return cached;
       } catch {
         /* no usable cache — build below */
       }
-
-      const roots = await findCastlingRoots(host.config.dataDir);
-      if (roots.length === 0) return null;
 
       const index = await buildIndex(roots[0]);
       host.log(`upgrade index: ${index.mappings.length} mappings from ${roots[0]}`);
@@ -209,7 +213,9 @@ export default function register(host) {
           return {
             query,
             found: false,
-            reason: 'No package with languages/cn/GFL_alltext.xml under DATA_DIR — this tool only covers Castling-style mods.',
+            reason: host.scope
+              ? `Package "${host.scope}" is not a Castling-style mod (no languages/cn/GFL_alltext.xml) — this tool has nothing for it. Do not answer from another package.`
+              : 'No package with languages/cn/GFL_alltext.xml under DATA_DIR — this tool only covers Castling-style mods.',
           };
         }
 

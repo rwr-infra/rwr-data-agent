@@ -234,10 +234,6 @@ docker compose up -d --build
 
 以只读方式把 `./data` 挂到 `/app/data`、`./tools.d` 挂到 `/app/tools.d`，并把生成的索引持久化在 `./output`。配置从 `.env` 读取。
 
-### Vercel
-
-`vercel.json` 会把 `dist/`、`public/`、`output/`、`tools.d/` 打进 Serverless 函数。数据目录本身不会上传，因此索引必须在部署前构建好 —— 函数只负责加载。插件在每次冷启动加载一次，热重载关闭。
-
 ## 配置
 
 只有 `LLM_API_KEY` 是必填。完整列表见 [.env.example](./.env.example)，常用的几个：

@@ -19,6 +19,19 @@ export interface GraphEdge {
   to: string;
   rel: EdgeRel;
   context?: string;
+  /**
+   * Package that owns the *referring* file. `from`/`to` are bare keys and 1300+ keys are
+   * defined in more than one package, so without this an edge cannot be attributed and a
+   * scoped traversal would merge every package that happens to share the key.
+   * Optional so a graph built before version 3 still loads (unscoped, old behaviour).
+   */
+  mod?: string;
+  /**
+   * Package of the file the reference actually resolved to at build time. `to` is a bare key
+   * and a base file like `base_valuable.carry_item` exists in several packages, so without
+   * this a traversal has to guess which one the edge meant.
+   */
+  toMod?: string;
 }
 
 export type ScriptSymbolKind =
@@ -39,6 +52,11 @@ export interface ScriptSymbol {
   line: number;
   /** Enclosing class/namespace, when the symbol is a member. */
   parent?: string;
+  /**
+   * Owning package. `file` is a basename, so two packages shipping the same script name
+   * collide without it. Stamped by the graph build; absent on the on-demand parse path.
+   */
+  mod?: string;
 }
 
 export interface GraphPackage {

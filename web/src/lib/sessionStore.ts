@@ -1,4 +1,4 @@
-import { createStore, get, set, del, entries } from 'idb-keyval';
+import { createStore, get, set, del, clear, entries } from 'idb-keyval';
 import type { Message, Session } from './types.js';
 
 const DB_NAME = 'rwr-data-agent';
@@ -93,4 +93,36 @@ export async function deleteSession(id: string): Promise<void> {
     memoryFallback = true;
     memStore.delete(id);
   }
+}
+
+/** Empty the store in place. Works with this tab's connection still open, unlike deleteDatabase(). */
+export async function clearAllSessions(): Promise<void> {
+  memStore.clear();
+  if (memoryFallback) return;
+  const s = getStore();
+  if (!s) return;
+  try {
+    await clear(s);
+  } catch (e) {
+    console.warn('[sessionStore] clear() failed:', e);
+  }
+}
+
+/**
+ * Drop the whole database, not just its records — the last resort when the store itself is what is
+ * broken. `blocked` resolves too: this tab holds an open connection, so the delete only completes
+ * after the reload that follows, and clearAllSessions() has already emptied the records.
+ */
+export function deleteDatabase(): Promise<void> {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.deleteDatabase(DB_NAME);
+      req.onsuccess = () => resolve();
+      req.onerror = () => resolve();
+      req.onblocked = () => resolve();
+    } catch (e) {
+      console.warn('[sessionStore] deleteDatabase() failed:', e);
+      resolve();
+    }
+  });
 }

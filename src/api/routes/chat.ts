@@ -6,7 +6,7 @@ import { startObservation } from '@langfuse/tracing';
 import { config, validateConfig } from '../../config/index.js';
 import { flushLangfuse } from '../../observability/langfuse.js';
 import { search as localSearch, configureSearch } from '../../retrieval/localSearch.js';
-import { SYSTEM_PROMPT, buildUserPrompt } from '../../retrieval/prompt.js';
+import { buildSystemPrompt, buildUserPrompt } from '../../retrieval/prompt.js';
 import { buildSearchQuery } from '../../retrieval/queryRewrite.js';
 import { buildLlmProviderOptions } from '../../llm/providerOptions.js';
 import { classifyQuery, extractExactKey, isMetaQuery, retrievalTopK } from '../../retrieval/intent.js';
@@ -62,9 +62,9 @@ function getProvider() {
  * at all (graceful fallback to pure RAG). Re-queried per request so a hot-reloaded
  * plugin takes effect without a restart.
  */
-async function getAgentTools(): Promise<Record<string, Tool> | null> {
+async function getAgentTools(scope?: string): Promise<Record<string, Tool> | null> {
   try {
-    return await loadAgentTools();
+    return await loadAgentTools(scope);
   } catch (err) {
     console.warn(`[chat] Agent tools unavailable (${(err as Error).message}), falling back to pure RAG`);
     return null;
@@ -119,7 +119,7 @@ function summarizeToolInput(toolName: string | undefined, input: unknown): strin
 }
 
 /** Build a short summary of a tool result for the UI. */
-function summarizeToolResult(toolName: string | undefined, output: unknown): string {
+function summarizeToolResult(_toolName: string | undefined, output: unknown): string {
   if (!output || typeof output !== 'object') return '';
   const out = output as Record<string, unknown>;
   // Failures come back through the runtime envelope as ordinary results, so check them first —
@@ -178,6 +178,11 @@ export async function chatRoutes(app: FastifyInstance) {
       });
     }
 
+    // The selected package scopes the whole turn: retrieval, every tool the agent can call, and
+    // the system prompt. Anything less and the tool loop happily answers from a package the user
+    // did not pick — 1300+ keys exist in more than one.
+    const packageScope = typeof body.mod === 'string' && body.mod.trim() ? body.mod.trim() : undefined;
+
     const sessionId = (request.headers['x-session-id'] as string) || undefined;
     const memorySessionId = sessionId ?? 'default';
     const queryCategory = classifyQuery(query);
@@ -233,10 +238,10 @@ export async function chatRoutes(app: FastifyInstance) {
           }
         }
 
-        const filters = body.mod ? { mod_name: body.mod } : {};
+        const filters = packageScope ? { mod_name: packageScope } : {};
         results = await localSearch(query, filters, topK, enrichedQuery);
         console.log(
-          `[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (topK=${topK}, intent=${queryCategory}${body.mod ? `, mod=${body.mod}` : ''})`,
+          `[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (topK=${topK}, intent=${queryCategory}${packageScope ? `, mod=${packageScope}` : ''})`,
         );
 
         searchPath = 'local-index';
@@ -266,7 +271,9 @@ export async function chatRoutes(app: FastifyInstance) {
     const ragUserPrompt = buildUserPrompt(query, results, {
       lowConfidence: isLowConfidence,
       budgetTokens: config.contextBudgetTokens,
+      mod: packageScope,
     });
+    const systemPrompt = buildSystemPrompt(packageScope);
 
     const historyMessages = nonSystemMessages.slice(0, -1).map((m) => ({
       role: m.role as 'user' | 'assistant',
@@ -297,7 +304,7 @@ export async function chatRoutes(app: FastifyInstance) {
     // history plus the question itself.
     const queryTokens = estimateTokens(query);
     const inputTokens = {
-      system: estimateTokens(SYSTEM_PROMPT),
+      system: estimateTokens(systemPrompt),
       context: Math.max(estimateTokens(ragUserPrompt) - queryTokens, 0),
       messages: historyMessages.reduce((sum, m) => sum + estimateTokens(m.content), 0) + queryTokens,
     };
@@ -325,7 +332,7 @@ export async function chatRoutes(app: FastifyInstance) {
     }
 
     const genObs = chainObs.startObservation('llm-generation', {
-      input: { messages: llmMessages, system: SYSTEM_PROMPT },
+      input: { messages: llmMessages, system: systemPrompt },
       model: config.llmModel,
       modelParameters: { maxTokens },
     }, { asType: 'generation' });
@@ -343,7 +350,7 @@ export async function chatRoutes(app: FastifyInstance) {
         const schema = queryCategory === 'enumeration' ? EnumResultSchema : ComparisonResultSchema;
         const result = streamObject({
           model: getProvider().chatModel(config.llmModel),
-          system: SYSTEM_PROMPT,
+          system: systemPrompt,
           messages: llmMessages,
           maxOutputTokens: maxTokens,
           providerOptions: buildLlmProviderOptions(),
@@ -398,7 +405,7 @@ export async function chatRoutes(app: FastifyInstance) {
         reply.raw.write(finishData + '\n');
         (reply.raw as unknown as { flush?: () => void }).flush?.();
       } else {
-        const tools = await getAgentTools();
+        const tools = await getAgentTools(packageScope);
         const toolDefTokens = measureToolDefTokens(tools);
         // Tool results are replayed in full; the shaper only sheds them if a step's prompt would
         // otherwise overflow the window. The system prompt, tool definitions and the output
@@ -416,7 +423,7 @@ export async function chatRoutes(app: FastifyInstance) {
         const toolDurations = new Map<string, number>();
         const result = streamText({
           model: getProvider().chatModel(config.llmModel),
-          system: SYSTEM_PROMPT,
+          system: systemPrompt,
           messages: llmMessages,
           maxOutputTokens: maxTokens,
           ...(tools

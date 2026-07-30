@@ -1,11 +1,14 @@
 import MiniSearch, { type Options } from 'minisearch';
+import { createReadStream, createWriteStream, type WriteStream } from 'fs';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { once } from 'events';
+import * as readline from 'readline';
+import { finished } from 'stream/promises';
 import pLimit from 'p-limit';
-import { collectFiles, parseFile } from '../ingestion/shared.js';
+import { collectFiles } from '../ingestion/shared.js';
 import { structuredDocToRWRDocument } from '../ingestion/xmlParser.js';
-import { loadAllLanguages, resolveI18n } from '../ingestion/i18n.js';
-import { discoverPackages, type DataPackage } from '../ingestion/packages.js';
+import { discoverPackages } from '../ingestion/packages.js';
 import type { StructuredDocument, SearchResult, SearchFilters, DocumentType } from '../types/index.js';
 
 export interface IndexEntry {
@@ -90,7 +93,13 @@ const SEARCH_OPTIONS = {
   boost: SEARCH_BOOST,
 };
 
-export const INDEX_VERSION = 2;
+// 3: graph edges and script symbols carry their owning package (`mod`), which is what makes
+// package-scoped tool calls possible. Bumped here because the search index version is the only
+// staleness signal `ensureIndexes()` checks, and a rebuild regenerates both files.
+// 4: on-disk layout split into a small `search-index.json` header and a `search-index.ndjson`
+// body of one entry per line, so neither the build nor the boot ever holds the whole index as a
+// single JSON string.
+export const INDEX_VERSION = 4;
 
 export interface PackageSummary {
   name: string;
@@ -103,18 +112,25 @@ export interface IndexFingerprint {
   maxMtimeMs: number;
 }
 
-export interface IndexFile {
+/**
+ * The header file. Entries live beside it, one JSON object per line, in the file returned by
+ * `indexBodyPath` — so reading the header costs one small read instead of parsing the whole
+ * index, and neither writing nor loading it ever materialises the index as a single string.
+ */
+export interface IndexMeta {
   version: number;
   built_at: string;
   data_dir: string;
   packages: PackageSummary[];
   fingerprint: IndexFingerprint;
   count: number;
-  entries: IndexEntry[];
 }
 
-/** Everything about the loaded index except the entries themselves. */
-export type IndexMeta = Omit<IndexFile, 'entries'>;
+/** Entry-per-line body that belongs to a given header file. */
+export function indexBodyPath(metaPath: string): string {
+  const p = path.resolve(metaPath);
+  return p.endsWith('.json') ? `${p.slice(0, -'.json'.length)}.ndjson` : `${p}.ndjson`;
+}
 
 let indexCache: MiniSearch<IndexEntry> | null = null;
 let metaCache: IndexMeta | null = null;
@@ -156,7 +172,7 @@ function flattenI18n(i18n: StructuredDocument['i18n']): string {
   return [...seen].join(' ');
 }
 
-async function fingerprintFiles(files: string[]): Promise<IndexFingerprint> {
+export async function fingerprintFiles(files: string[]): Promise<IndexFingerprint> {
   const limit = pLimit(32);
   let maxMtimeMs = 0;
   await Promise.all(
@@ -170,154 +186,221 @@ async function fingerprintFiles(files: string[]): Promise<IndexFingerprint> {
   return { files: files.length, maxMtimeMs: Math.round(maxMtimeMs) };
 }
 
-/** Cheap staleness probe over the data root — same shape as the fingerprint stored in the index. */
-export async function computeDataFingerprint(dataDir: string): Promise<IndexFingerprint> {
+/**
+ * Cheap staleness probe over the data root — same shape as the fingerprint stored in the index.
+ *
+ * Returns the walked file list alongside it so the build that follows a stale verdict does not
+ * have to walk the tree again. `walkFiles` is deterministic, so reusing the list is equivalent
+ * to re-walking; on a network-backed data volume the re-walk is thousands of round trips.
+ */
+export async function computeDataFingerprint(
+  dataDir: string,
+): Promise<{ fingerprint: IndexFingerprint; filesByPackage: Map<string, string[]> }> {
   const packages = await discoverPackages(dataDir);
+  const filesByPackage = new Map<string, string[]>();
   const all: string[] = [];
   for (const pkg of packages) {
-    all.push(...(await collectFiles(pkg.dir)));
+    const files = await collectFiles(pkg.dir);
+    filesByPackage.set(pkg.name, files);
+    all.push(...files);
   }
-  return fingerprintFiles(all);
+  return { fingerprint: await fingerprintFiles(all), filesByPackage };
 }
 
-async function buildPackageEntries(root: string, pkg: DataPackage): Promise<IndexEntry[]> {
-  const files = await collectFiles(pkg.dir);
-  const langData = await loadAllLanguages(path.join(pkg.dir, 'languages'));
-  const limit = pLimit(8);
-  const docs: StructuredDocument[] = [];
-
-  await Promise.all(
-    files.map((file) =>
-      limit(async () => {
-        try {
-          const parsed = await parseFile(file, pkg.name);
-          docs.push(...parsed);
-        } catch {
-          // A single unparseable game file must not abort the package index build.
-        }
-      }),
-    ),
-  );
-
-  if (langData.length > 0) {
-    for (const doc of docs) {
-      const i18n = resolveI18n(doc, langData);
-      if (i18n) doc.i18n = i18n;
-    }
-  }
-
-  return docs.map((doc, i) => {
-    const rwr = structuredDocToRWRDocument(doc);
-    const absFile = rwr.metadata.file_path ?? doc.source_file;
-    return {
-      id: `${pkg.name}:${doc.type}:${doc.key}:${i}`,
-      key: doc.key,
-      type: doc.type,
-      name: (doc.metadata.name as string) ?? doc.key,
-      content: rwr.content,
-      i18nNames: flattenI18n(doc.i18n),
-      // Relative to the data root, so it carries the package prefix and stays
-      // resolvable against a single dataRoot in the agent's readSource tool.
-      file: absFile ? path.relative(root, path.resolve(root, absFile)).replace(/\\/g, '/') : '',
-      faction: (rwr.metadata.faction as string) ?? '',
-      weaponClass: (rwr.metadata.weapon_class as string) ?? '',
-      mod: pkg.name,
-    };
-  });
+/**
+ * Turn one structured document into an index entry.
+ *
+ * `seq` only has to be unique within the package — it is the tail of the entry id, and the
+ * build assigns it as a running counter so entries can be written out and dropped file by
+ * file instead of collected into one array first.
+ */
+export function entryFromDoc(root: string, pkgName: string, doc: StructuredDocument, seq: number): IndexEntry {
+  const rwr = structuredDocToRWRDocument(doc);
+  const absFile = rwr.metadata.file_path ?? doc.source_file;
+  return {
+    id: `${pkgName}:${doc.type}:${doc.key}:${seq}`,
+    key: doc.key,
+    type: doc.type,
+    name: (doc.metadata.name as string) ?? doc.key,
+    content: rwr.content,
+    i18nNames: flattenI18n(doc.i18n),
+    // Relative to the data root, so it carries the package prefix and stays
+    // resolvable against a single dataRoot in the agent's readSource tool.
+    file: absFile ? path.relative(root, path.resolve(root, absFile)).replace(/\\/g, '/') : '',
+    faction: (rwr.metadata.faction as string) ?? '',
+    weaponClass: (rwr.metadata.weapon_class as string) ?? '',
+    mod: pkgName,
+  };
 }
 
-export interface BuildResult {
-  index: MiniSearch<IndexEntry>;
-  entries: IndexEntry[];
-  packages: PackageSummary[];
-  fingerprint: IndexFingerprint;
-  count: number;
+/** Flush threshold for the writer's line buffer — bounds the string it holds at any moment. */
+const WRITE_FLUSH_BYTES = 1 << 20;
+
+export interface IndexWriter {
+  /** Append one entry. Applies backpressure, so memory stays flat however large the index gets. */
+  add(entry: IndexEntry): Promise<void>;
+  /** Close the body and write the header. Returns how many entries were written. */
+  finish(meta: { dataDir: string; packages: PackageSummary[]; fingerprint: IndexFingerprint }): Promise<number>;
+  /** Discard a partial build without touching the existing index. */
+  abort(): Promise<void>;
 }
 
-/** Build a MiniSearch index over every package found under `dataDir`. */
-export async function buildSearchIndex(dataDir: string, packages?: DataPackage[]): Promise<BuildResult> {
-  const root = path.resolve(dataDir);
-  const pkgs = packages ?? (await discoverPackages(root));
+/**
+ * Streaming writer for the on-disk index.
+ *
+ * The previous implementation collected every entry in memory and handed the lot to
+ * `JSON.stringify` — a second full copy of the index as one string, on top of the array, at
+ * the exact moment the build was already at its peak. Here each entry is serialized, appended
+ * to a bounded buffer and forgotten.
+ *
+ * Body first, header second: a crash in between leaves the *old* header in place, whose
+ * fingerprint no longer matches the data, so the next boot rebuilds instead of loading a body
+ * that does not match its header.
+ */
+export function createIndexWriter(metaPath: string): IndexWriter {
+  const outMeta = path.resolve(metaPath);
+  const outBody = indexBodyPath(outMeta);
+  const tmpBody = `${outBody}.tmp`;
 
-  const entries: IndexEntry[] = [];
-  const summaries: PackageSummary[] = [];
-  const allFiles: string[] = [];
+  // The *promise* is memoized, not the stream. `add` is called concurrently by the build, and
+  // memoizing only the resolved stream let every caller that arrived before the first `mkdir`
+  // resolved open its own `WriteStream` on the same path — each starting at offset 0, silently
+  // shredding the other's lines.
+  let opening: Promise<WriteStream> | null = null;
+  let buffer = '';
+  let count = 0;
 
-  for (const pkg of pkgs) {
-    const pkgEntries = await buildPackageEntries(root, pkg);
-    entries.push(...pkgEntries);
-    summaries.push({ name: pkg.name, displayName: pkg.displayName, count: pkgEntries.length });
-    allFiles.push(...(await collectFiles(pkg.dir)));
+  function open(): Promise<WriteStream> {
+    opening ??= (async () => {
+      await fs.mkdir(path.dirname(outMeta), { recursive: true });
+      return createWriteStream(tmpBody, { encoding: 'utf-8' });
+    })();
+    return opening;
   }
 
-  const index = new MiniSearch<IndexEntry>(MINI_SEARCH_OPTIONS);
-  index.addAll(entries);
+  async function flush(s: WriteStream): Promise<void> {
+    if (!buffer) return;
+    const chunk = buffer;
+    buffer = '';
+    if (!s.write(chunk)) await once(s, 'drain');
+  }
 
   return {
-    index,
-    entries,
-    packages: summaries,
-    fingerprint: await fingerprintFiles(allFiles),
-    count: entries.length,
+    async add(entry) {
+      const s = await open();
+      buffer += `${JSON.stringify(entry)}\n`;
+      count++;
+      if (buffer.length >= WRITE_FLUSH_BYTES) await flush(s);
+    },
+
+    async finish({ dataDir, packages, fingerprint }) {
+      const s = await open();
+      await flush(s);
+      s.end();
+      await finished(s);
+      await fs.rename(tmpBody, outBody);
+
+      const meta: IndexMeta = {
+        version: INDEX_VERSION,
+        built_at: new Date().toISOString(),
+        data_dir: path.resolve(dataDir),
+        packages,
+        fingerprint,
+        count,
+      };
+      const tmpMeta = `${outMeta}.tmp`;
+      await fs.writeFile(tmpMeta, JSON.stringify(meta), 'utf-8');
+      await fs.rename(tmpMeta, outMeta);
+      return count;
+    },
+
+    async abort() {
+      buffer = '';
+      if (opening) {
+        const s = await opening.catch(() => null);
+        opening = null;
+        s?.destroy();
+      }
+      await fs.rm(tmpBody, { force: true });
+    },
   };
 }
 
-/** Persist the index to JSON for fast startup reload. */
-export async function saveSearchIndex(
-  result: Pick<BuildResult, 'entries' | 'packages' | 'fingerprint' | 'count'>,
-  dataDir: string,
-  outputPath: string,
-): Promise<void> {
-  const outPath = path.resolve(outputPath);
-  await fs.mkdir(path.dirname(outPath), { recursive: true });
-  const data: IndexFile = {
-    version: INDEX_VERSION,
-    built_at: new Date().toISOString(),
-    data_dir: path.resolve(dataDir),
-    packages: result.packages,
-    fingerprint: result.fingerprint,
-    count: result.count,
-    entries: result.entries,
-  };
-  await fs.writeFile(outPath, JSON.stringify(data), 'utf-8');
-}
+/** A header is small by construction; anything larger is not one (e.g. a pre-v4 index file). */
+const META_READ_LIMIT = 1 << 20;
 
-/** Read only the header of a persisted index (entries are dropped after parsing). */
+/**
+ * Read the index header.
+ *
+ * This runs on every boot, before anything is known about staleness, so it reads a bounded
+ * prefix rather than the file: a pre-v4 `search-index.json` held the entries inline, and
+ * parsing 46 MB of them just to look at `version` was pure startup cost. A truncated read of
+ * such a file fails to parse and reports "no index", which is the right answer — the version
+ * check would have forced a rebuild anyway.
+ */
 export async function readIndexMeta(searchIndexPath = indexPath): Promise<IndexMeta | null> {
+  let handle;
   try {
-    const raw = await fs.readFile(path.resolve(searchIndexPath), 'utf-8');
-    const { entries: _entries, ...meta } = JSON.parse(raw) as IndexFile;
-    return meta;
+    handle = await fs.open(path.resolve(searchIndexPath), 'r');
   } catch {
     return null;
   }
+  try {
+    const buf = Buffer.allocUnsafe(META_READ_LIMIT);
+    const { bytesRead } = await handle.read(buf, 0, META_READ_LIMIT, 0);
+    const meta = JSON.parse(buf.subarray(0, bytesRead).toString('utf-8')) as IndexMeta;
+    return typeof meta.version === 'number' && Array.isArray(meta.packages) ? meta : null;
+  } catch {
+    return null;
+  } finally {
+    await handle.close();
+  }
 }
 
-/** Load the search index into memory (process-lifetime singleton). */
+/**
+ * Load the search index into memory (process-lifetime singleton).
+ *
+ * Entries are streamed line by line and added one at a time: the boot never holds the whole
+ * body as a string, nor a parsed array of every entry on top of the index built from it.
+ */
 async function loadIndex(): Promise<MiniSearch<IndexEntry>> {
   if (indexCache) return indexCache;
 
-  let data: IndexFile;
-  try {
-    const raw = await fs.readFile(indexPath, 'utf-8');
-    data = JSON.parse(raw) as IndexFile;
-  } catch {
+  const meta = await readIndexMeta(indexPath);
+  if (!meta) {
     throw new Error(`Search index not found at ${indexPath}. Run "npm run build:index" first.`);
   }
-
-  if (data.version !== INDEX_VERSION) {
+  if (meta.version !== INDEX_VERSION) {
     throw new Error(
-      `Search index at ${indexPath} is version ${data.version}, expected ${INDEX_VERSION}. Run "npm run build:index" to rebuild.`,
+      `Search index at ${indexPath} is version ${meta.version}, expected ${INDEX_VERSION}. Run "npm run build:index" to rebuild.`,
     );
   }
 
+  const bodyPath = indexBodyPath(indexPath);
   const index = new MiniSearch<IndexEntry>(MINI_SEARCH_OPTIONS);
-  index.addAll(data.entries);
+  let loaded = 0;
+  try {
+    const lines = readline.createInterface({
+      input: createReadStream(bodyPath, { encoding: 'utf-8' }),
+      crlfDelay: Infinity,
+    });
+    for await (const line of lines) {
+      if (!line) continue;
+      index.add(JSON.parse(line) as IndexEntry);
+      loaded++;
+    }
+  } catch (err) {
+    throw new Error(`Search index body unreadable at ${bodyPath}: ${(err as Error).message}`, { cause: err });
+  }
+
+  if (loaded !== meta.count) {
+    console.warn(`[localSearch] Index body has ${loaded} entries, header says ${meta.count} — rebuild recommended.`);
+  }
+
   indexCache = index;
-  const { entries: _entries, ...meta } = data;
   metaCache = meta;
   console.log(
-    `[localSearch] Loaded ${data.count} documents from ${data.packages.length} package(s): ${data.packages
+    `[localSearch] Loaded ${loaded} documents from ${meta.packages.length} package(s): ${meta.packages
       .map((p) => p.name)
       .join(', ')}`,
   );

@@ -1,6 +1,6 @@
 import type { Message } from './types.js';
 
-const TOKEN_KEY = 'rwr-data-agent-token';
+export const TOKEN_KEY = 'rwr-data-agent-token';
 
 /**
  * API token for deployments that set `API_TOKEN` on the server.

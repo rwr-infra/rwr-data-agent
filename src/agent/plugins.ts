@@ -31,7 +31,14 @@ export interface ToolHost {
     graphPath: string;
     searchIndexPath: string;
   };
-  /** Full-text search over the local index. */
+  /**
+   * Package the request selected, or undefined when unscoped. `search` and `graph` are already
+   * bound to it — a plugin only needs this to word its own output, or to skip work when the
+   * selected package is not the one it covers.
+   */
+  scope?: string;
+  /** Full-text search over the local index. Filtered to `scope` unless the caller overrides
+   *  `mod_name` explicitly. */
   search: typeof search;
   /** The same graph primitives the built-in tools are built from. */
   graph: {
@@ -69,7 +76,12 @@ export interface PluginEntry {
 
 const TOOL_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 
-export function createToolHost(): ToolHost {
+/**
+ * `scope` is the package the request selected. Binding it here rather than asking plugin
+ * authors to honour it means a plugin written before package scoping existed becomes scoped
+ * for free — and a careless one cannot leak another package's data into a scoped answer.
+ */
+export function createToolHost(scope?: string): ToolHost {
   return {
     config: {
       dataDir: config.dataDir,
@@ -77,15 +89,20 @@ export function createToolHost(): ToolHost {
       graphPath: config.graphPath,
       searchIndexPath: config.searchIndexPath,
     },
-    search,
+    scope,
+    search: (query, filters = {}, topK, searchQuery, offset) => {
+      const scopedFilters = { ...filters };
+      if (scope && scopedFilters.mod_name === undefined) scopedFilters.mod_name = scope;
+      return search(query, scopedFilters, topK, searchQuery, offset);
+    },
     graph: {
-      getInheritanceChain,
-      findReferences,
-      getTransformChain,
-      readSource,
-      listFiles,
-      getScriptSymbols,
-      getNode,
+      getInheritanceChain: (key, mod) => getInheritanceChain(key, mod ?? scope),
+      findReferences: (key, mod) => findReferences(key, mod ?? scope),
+      getTransformChain: (key, mod) => getTransformChain(key, mod ?? scope),
+      readSource: (file, startLine, endLine, mod) => readSource(file, startLine, endLine, mod ?? scope),
+      listFiles: (pattern, type, limit, mod) => listFiles(pattern, type, limit, mod ?? scope),
+      getScriptSymbols: (file, mod) => getScriptSymbols(file, mod ?? scope),
+      getNode: (key, mod) => getNode(key, mod ?? scope),
     },
     log: (message: string) => console.log(`[plugin] ${message}`),
   };

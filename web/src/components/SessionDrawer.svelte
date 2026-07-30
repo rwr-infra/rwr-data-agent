@@ -10,15 +10,17 @@
     onselect: (id: string) => void;
     onnew: () => void;
     ondelete: (id: string) => void;
+    onreset: () => void;
     onclose: () => void;
   }
 
-  let { open, sessions, activeSessionId, tr, onselect, onnew, ondelete, onclose }: Props = $props();
+  let { open, sessions, activeSessionId, tr, onselect, onnew, ondelete, onreset, onclose }: Props = $props();
 
   let searchQuery = $state('');
   let touchStartX = $state(0);
   let longPressTimer: ReturnType<typeof setTimeout> | null = null;
   let showDeleteId: string | null = $state(null);
+  let confirmingReset = $state(false);
 
   let filtered = $derived(
     searchQuery.trim()
@@ -28,6 +30,15 @@
         })
       : sessions,
   );
+
+  // The panel is behind an `{#if open}`, not a component boundary, so an armed confirm would still be
+  // armed the next time the drawer opens.
+  $effect(() => {
+    if (!open) {
+      confirmingReset = false;
+      showDeleteId = null;
+    }
+  });
 
   function relativeTime(ts: number): string {
     const diff = Date.now() - ts;
@@ -82,6 +93,11 @@
   function handleSelect(id: string) {
     showDeleteId = null;
     onselect(id);
+  }
+
+  function handleResetConfirm() {
+    confirmingReset = false;
+    onreset();
   }
 </script>
 
@@ -167,8 +183,27 @@
       {/if}
     </div>
 
-    <div class="px-3 py-2 border-t border-base-300 text-xs text-base-content/40">
-      {sessions.length} {tr.sessions.toLowerCase()}
+    {#if confirmingReset}
+      <div class="px-3 pt-2 text-xs leading-snug text-error border-t border-base-300">{tr.resetConfirm}</div>
+    {/if}
+
+    <div class="px-3 py-2 flex items-center justify-between gap-2 {confirmingReset ? '' : 'border-t border-base-300'}">
+      <span class="text-xs text-base-content/40 shrink-0">{sessions.length} {tr.sessions.toLowerCase()}</span>
+      {#if confirmingReset}
+        <div class="flex gap-1 shrink-0">
+          <button class="btn btn-xs btn-error" onclick={handleResetConfirm}>{tr.resetConfirmBtn}</button>
+          <button class="btn btn-xs btn-ghost" onclick={() => { confirmingReset = false; }}>{tr.recallCancelBtn}</button>
+        </div>
+      {:else}
+        <button
+          class="btn btn-xs btn-ghost gap-1 text-base-content/50 hover:text-error"
+          onclick={() => { confirmingReset = true; }}
+          title={tr.resetHint}
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 4 3 10 9 10"/></svg>
+          {tr.resetAll}
+        </button>
+      {/if}
     </div>
   </div>
 {/if}

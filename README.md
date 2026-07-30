@@ -214,10 +214,6 @@ docker compose up -d --build
 
 Mounts `./data` and `./tools.d` read-only at `/app/data` and `/app/tools.d`, and persists the generated indexes in `./output`. Configuration comes from `.env`.
 
-### Vercel
-
-`vercel.json` bundles `dist/`, `public/`, `output/` and `tools.d/` into the serverless function. The data directory is not shipped, so the index must be built and committed/generated before deploy — the function only loads it. Plugins load once per cold start; hot reload is off.
-
 ## Configuration
 
 `LLM_API_KEY` is the only required variable. See [.env.example](./.env.example) for the full list; the ones worth knowing:

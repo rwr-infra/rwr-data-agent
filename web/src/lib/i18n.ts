@@ -66,6 +66,10 @@ export interface Translations {
   searchSessions: string;
   noSessions: string;
   untitledSession: string;
+  resetAll: string;
+  resetHint: string;
+  resetConfirm: string;
+  resetConfirmBtn: string;
 }
 
 const i18n: Record<Lang, Translations> = {
@@ -127,6 +131,10 @@ const i18n: Record<Lang, Translations> = {
     searchSessions: '搜索会话...',
     noSessions: '暂无会话',
     untitledSession: '未命名会话',
+    resetAll: '一键重置',
+    resetHint: '清空浏览器本地存储，修复历史会话打不开的问题',
+    resetConfirm: '清空全部本地数据（会话记录、数据包选择、语言与主题偏好）并刷新页面？不可撤销。API Token 会保留。',
+    resetConfirmBtn: '确认重置',
   },
   en: {
     htmlLang: 'en',
@@ -184,6 +192,10 @@ const i18n: Record<Lang, Translations> = {
     searchSessions: 'Search sessions...',
     noSessions: 'No sessions yet',
     untitledSession: 'Untitled session',
+    resetAll: 'Reset all',
+    resetHint: 'Clear browser local storage to fix sessions that will not open',
+    resetConfirm: 'Clear all local data (sessions, package choice, language & theme) and reload? This cannot be undone. The API token is kept.',
+    resetConfirmBtn: 'Confirm reset',
   },
 };
 

@@ -24,18 +24,29 @@ export function initGraphTools(): void {
   configured = true;
 }
 
-export function buildBuiltinTools() {
+/**
+ * `scope` is the package the request selected (`body.mod`). It is applied inside every tool
+ * rather than exposed as a model-settable argument — the model must not be able to widen it,
+ * and a tool that can only see one package cannot drift into another mid-answer.
+ */
+export function buildBuiltinTools(scope?: string) {
   initGraphTools();
+
+  const scoped = (description: string): string =>
+    scope
+      ? `${description}\n\nSCOPE: restricted to package "${scope}" (the user's selection). ` +
+        `Other packages are excluded and there is no argument that widens this — do not try.`
+      : description;
 
   return {
     searchDocs: tool({
-      description:
+      description: scoped(
         'Full-text search over the game data index (the same index the pre-fetched context ' +
         'came from). Matches Keys, English/Chinese localized names, and document content. ' +
         'USE THIS FIRST whenever the pre-fetched context does not contain the item the user ' +
         'asked about — retry with the bare item name, a Key fragment, an alias, or the ' +
         'English/Chinese equivalent. Never tell the user an item does not exist without ' +
-        'having searched for it here.',
+        'having searched for it here.'),
       inputSchema: z.object({
         query: z
           .string()
@@ -46,62 +57,65 @@ export function buildBuiltinTools() {
           .describe('Optional node type filter (weapon, carry_item, projectile, call, character, script_chunk, …)'),
         limit: z.number().optional().describe('Max results, 1-30 (default 10)'),
       }),
-      execute: async ({ query, type, limit }) => searchDocs(query, type, limit ?? 10),
+      execute: async ({ query, type, limit }) => searchDocs(query, type, limit ?? 10, scope),
     }),
 
     getInheritanceChain: tool({
-      description:
+      description: scoped(
         'Trace the full inheritance chain of an entity (weapon, carry_item, etc.). ' +
         'Returns parent chain (what this entity inherits from via file= attribute) ' +
         'and children (what inherits from this entity). Use when the user asks about ' +
-        'inheritance, base files, parent templates, or "inherits from".',
+        'inheritance, base files, parent templates, or "inherits from". Each layer reports ' +
+        'its own `mod`: a parent may physically live in another package, and that is where ' +
+        'the inherited value comes from — cite the package when it differs.'),
       inputSchema: z.object({
         key: z.string().describe('The entity key (e.g., "m4a1.weapon", "K309.carry_item")'),
       }),
-      execute: async ({ key }) => getInheritanceChain(key),
+      execute: async ({ key }) => getInheritanceChain(key, scope),
     }),
 
     findReferences: tool({
-      description:
+      description: scoped(
         'Find all entities that reference a given entity (reverse lookup). ' +
         'Shows who points TO this entity via extends, fires, transforms_to, etc. ' +
-        'Use to answer "who uses this projectile", "which weapons reference this base".',
+        'Use to answer "who uses this projectile", "which weapons reference this base".'),
       inputSchema: z.object({
         key: z.string().describe('The entity key to find references for'),
       }),
-      execute: async ({ key }) => findReferences(key),
+      execute: async ({ key }) => findReferences(key, scope),
     }),
 
     getTransformChain: tool({
-      description:
+      description: scoped(
         'Trace the degradation/consumption chain of a carry item (e.g., armor layers). ' +
         'Items with transform_on_consume transform into another item when consumed. ' +
-        'Use to answer "how many armor layers does X have" or trace armor degradation.',
+        'Use to answer "how many armor layers does X have" or trace armor degradation.'),
       inputSchema: z.object({
         key: z.string().describe('The carry item key (e.g., "K309.carry_item")'),
       }),
-      execute: async ({ key }) => getTransformChain(key),
+      execute: async ({ key }) => getTransformChain(key, scope),
     }),
 
     readSource: tool({
-      description:
+      description: scoped(
         'Read the raw source file content. Use to inspect exact XML attributes, ' +
         'verify data, or read AngelScript source code. ' +
-        'Supports optional line range for large files.',
+        'Supports optional line range for large files. The result reports the owning `mod`, ' +
+        'and flags `outOfScope` when the file belongs to another package.'),
       inputSchema: z.object({
         file: z.string().describe('Relative file path (e.g., "weapons/m4a1.weapon")'),
         startLine: z.number().optional().describe('Start line (1-indexed)'),
         endLine: z.number().optional().describe('End line (1-indexed)'),
       }),
       execute: async ({ file, startLine, endLine }) =>
-        readSource(file, startLine, endLine),
+        readSource(file, startLine, endLine, scope),
     }),
 
     listFiles: tool({
-      description:
+      description: scoped(
         'List indexed files matching a glob pattern. Use to find files by name ' +
         'when you do not know the exact key. Supports optional type filter. ' +
-        'Patterns use * as wildcard (e.g., "*m4*", "*.weapon").',
+        'Patterns use * as wildcard (e.g., "*m4*", "*.weapon").'),
       inputSchema: z.object({
         pattern: z.string().describe('Glob pattern (e.g., "*m4*", "*.call")'),
         type: z
@@ -109,29 +123,29 @@ export function buildBuiltinTools() {
           .optional()
           .describe('Filter by node type (weapon, carry_item, projectile, call, etc.)'),
       }),
-      execute: async ({ pattern, type }) => listFiles(pattern, type, 30),
+      execute: async ({ pattern, type }) => listFiles(pattern, type, 30, scope),
     }),
 
     getScriptSymbols: tool({
-      description:
+      description: scoped(
         'Get parsed AngelScript (.as) function/class/include signatures with line numbers. ' +
         'Use to answer questions about game scripts, custom game modes, hooks, or mod logic. ' +
-        'Much better than reading the full script file for "what functions exist".',
+        'Much better than reading the full script file for "what functions exist".'),
       inputSchema: z.object({
         file: z.string().describe('Relative .as file path (e.g., "scripts/start_1.as")'),
       }),
-      execute: async ({ file }) => getScriptSymbols(file),
+      execute: async ({ file }) => getScriptSymbols(file, scope),
     }),
 
     getNode: tool({
-      description:
+      description: scoped(
         'Look up a single entity by its key. Returns basic info (type, file path, mod). ' +
         'Use to resolve a key to its source file before calling readSource, ' +
-        'or to verify an entity exists.',
+        'or to verify an entity exists.'),
       inputSchema: z.object({
         key: z.string().describe('The entity key to look up'),
       }),
-      execute: async ({ key }) => getNode(key),
+      execute: async ({ key }) => getNode(key, scope),
     }),
 
   };
@@ -141,7 +155,12 @@ export function buildBuiltinTools() {
 // Tool registry: built-ins + runtime plugins
 // ---------------------------------------------------------------------------
 
-let registry: Record<string, Tool> | null = null;
+/**
+ * One registry per package scope, keyed by scope name (`''` = unscoped). Cached rather than
+ * rebuilt per request because `measureToolDefTokens` keys its cache on the registry object's
+ * identity — a fresh object every request would re-measure every tool definition each time.
+ */
+const registries = new Map<string, Record<string, Tool>>();
 let pluginEntries: PluginEntry[] = [];
 let builtinNames: string[] = [];
 let dirty = true;
@@ -175,18 +194,27 @@ function watchPluginDir(): void {
   }
 }
 
-/** Built-in tools plus every successfully loaded plugin. Rebuilds when marked dirty. */
-export async function getAgentTools(): Promise<Record<string, Tool>> {
-  if (registry && !dirty) return registry;
+/**
+ * Built-in tools plus every successfully loaded plugin. Rebuilds when marked dirty.
+ *
+ * `scope` is the request's selected package: the returned tools — plugins included, through the
+ * host — only ever see that package.
+ */
+export async function getAgentTools(scope?: string): Promise<Record<string, Tool>> {
+  if (dirty) registries.clear();
+  const cacheKey = scope ?? '';
+  const cached = registries.get(cacheKey);
+  if (cached && !dirty) return cached;
 
-  const builtin = buildBuiltinTools() as unknown as Record<string, Tool>;
+  const builtin = buildBuiltinTools(scope) as unknown as Record<string, Tool>;
   builtinNames = Object.keys(builtin);
 
-  const { tools: plugins, entries } = await loadToolPlugins(createToolHost(), builtinNames);
+  const { tools: plugins, entries } = await loadToolPlugins(createToolHost(scope), builtinNames);
   pluginEntries = entries;
   // One envelope over built-ins and plugins alike: duplicate guard, deadline, `{error, hint}` on
   // failure. Wrapped here rather than per request so the token-accounting cache keeps its key.
-  registry = instrumentTools({ ...builtin, ...plugins });
+  const registry = instrumentTools({ ...builtin, ...plugins });
+  registries.set(cacheKey, registry);
   dirty = false;
 
   const ok = entries.filter((e) => !e.error);

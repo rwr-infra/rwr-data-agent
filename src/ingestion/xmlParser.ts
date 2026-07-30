@@ -12,6 +12,20 @@ const parser = new XMLParser({
   alwaysCreateTextNode: false,
 });
 
+/**
+ * Drop the inheritance/include caches.
+ *
+ * Both hold *parsed trees* of every parent and every included call file, keyed by absolute
+ * path, and nothing ever evicted them — during a full build that is a second copy of a
+ * large slice of the data set pinned for the lifetime of the process. Resolution is always
+ * relative to the referring file's own directory, so a package's parents are never reused
+ * by the next package: the build clears them at each package boundary.
+ */
+export function clearParseCaches(): void {
+  parentFileCache.clear();
+  callIncludeCache.clear();
+}
+
 /** Narrow an XML node to an indexable object, or undefined if it is a leaf. */
 function asNode(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined;
@@ -22,7 +36,7 @@ function asNode(value: unknown): Record<string, unknown> | undefined {
  * into every call site. Narrow it once, here — the parse result is always a
  * plain object tree, and the rest of this file already treats nodes as unknown.
  */
-function parseXml(content: string): Record<string, unknown> {
+export function parseXml(content: string): Record<string, unknown> {
   const parsed: unknown = parser.parse(content);
   return asNode(parsed) ?? {};
 }
@@ -738,9 +752,11 @@ export function structuredDocToRWRDocument(doc: StructuredDocument): RWRDocument
 // ---------------------------------------------------------------------------
 // Call files (<calls><call>...</call></calls>)
 // ---------------------------------------------------------------------------
-export async function parseCallFile(filePath: string, modName: string): Promise<StructuredDocument[]> {
-  const content = await fs.readFile(filePath, 'utf-8');
-  const parsed = parseXml(content);
+async function parseCallTree(
+  parsed: Record<string, unknown>,
+  filePath: string,
+  modName: string,
+): Promise<StructuredDocument[]> {
   const rawCalls = ensureArray(asNode(parsed['calls'])?.['call']);
   const sourceDir = path.dirname(filePath);
   const calls = await expandCallIncludes(rawCalls, sourceDir);
@@ -761,9 +777,11 @@ export async function parseCallFile(filePath: string, modName: string): Promise<
 // ---------------------------------------------------------------------------
 // Faction XML files that contain <soldier> definitions
 // ---------------------------------------------------------------------------
-export async function parseFactionXml(filePath: string, modName: string): Promise<StructuredDocument[]> {
-  const content = await fs.readFile(filePath, 'utf-8');
-  const parsed = parseXml(content);
+function parseFactionTree(
+  parsed: Record<string, unknown>,
+  filePath: string,
+  modName: string,
+): StructuredDocument[] {
   const docs: StructuredDocument[] = [];
 
   const factionAttrs = asNode(parsed['faction']);
@@ -810,9 +828,11 @@ export async function parseFactionXml(filePath: string, modName: string): Promis
 // ---------------------------------------------------------------------------
 // Character files
 // ---------------------------------------------------------------------------
-export async function parseCharacterFile(filePath: string, modName: string): Promise<StructuredDocument[]> {
-  const content = await fs.readFile(filePath, 'utf-8');
-  const parsed = parseXml(content);
+function parseCharacterTree(
+  parsed: Record<string, unknown>,
+  filePath: string,
+  modName: string,
+): StructuredDocument[] {
   const flatAttrs = flattenAttributes(parsed);
   const description = describeCharacter(flatAttrs);
   const raw = extractText(parsed, 0);
@@ -823,9 +843,11 @@ export async function parseCharacterFile(filePath: string, modName: string): Pro
 // ---------------------------------------------------------------------------
 // Carry item files (<carry_items><carry_item>...</carry_item></carry_items>)
 // ---------------------------------------------------------------------------
-export async function parseCarryItemFile(filePath: string, modName: string): Promise<StructuredDocument[]> {
-  const content = await fs.readFile(filePath, 'utf-8');
-  const parsed = parseXml(content);
+async function parseCarryItemTree(
+  parsed: Record<string, unknown>,
+  filePath: string,
+  modName: string,
+): Promise<StructuredDocument[]> {
   const carryItems = ensureArray(asNode(parsed['carry_items'])?.['carry_item']);
   const sourceDir = path.dirname(filePath);
 
@@ -848,26 +870,36 @@ export async function parseCarryItemFile(filePath: string, modName: string): Pro
 // ---------------------------------------------------------------------------
 // Generic XML dispatcher
 // ---------------------------------------------------------------------------
-export async function parseXmlFile(filePath: string, modName: string): Promise<StructuredDocument[]> {
+/**
+ * Dispatch an already-parsed XML tree to the right document extractor.
+ *
+ * Tree-in, not path-in, and the same for every sub-type branch below. The index build walks
+ * each file for graph edges *and* for search documents, and it used to read and
+ * `parser.parse()` the file separately for each — the single most expensive duplicated work in
+ * the build. Worse, dispatching by root element then re-read and re-parsed the file a *third*
+ * time inside the per-type entry points. One parse now feeds all of it; keep it that way.
+ */
+export async function parseXmlTree(
+  parsed: Record<string, unknown>,
+  filePath: string,
+  modName: string,
+): Promise<StructuredDocument[]> {
   const ext = path.extname(filePath).toLowerCase();
 
   if (ext === '.call') {
-    return parseCallFile(filePath, modName);
+    return parseCallTree(parsed, filePath, modName);
   }
 
   if (ext === '.character') {
-    return parseCharacterFile(filePath, modName);
+    return parseCharacterTree(parsed, filePath, modName);
   }
 
-  const content = await fs.readFile(filePath, 'utf-8');
-  const parsed = parseXml(content);
-
   if (asNode(parsed['calls'])?.['call']) {
-    return parseCallFile(filePath, modName);
+    return parseCallTree(parsed, filePath, modName);
   }
 
   if (parsed['faction'] || parsed['factions']) {
-    return parseFactionXml(filePath, modName);
+    return parseFactionTree(parsed, filePath, modName);
   }
 
   if (parsed['soldier']) {
@@ -902,7 +934,7 @@ export async function parseXmlFile(filePath: string, modName: string): Promise<S
   }
 
   if (asNode(parsed['carry_items'])?.['carry_item']) {
-    return parseCarryItemFile(filePath, modName);
+    return parseCarryItemTree(parsed, filePath, modName);
   }
 
   if (parsed['carry_item']) {
