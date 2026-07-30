@@ -26,13 +26,13 @@ export const config = {
   /** Directory of runtime tool plugins (plain ESM .js). Optional — skipped if absent. */
   toolsDir: path.resolve(process.env.TOOLS_DIR ?? './tools.d'),
   /**
-   * Watch the plugin directory and reload on change. Off in production and on Vercel,
-   * where the filesystem is read-only and a watcher buys nothing.
+   * Watch the plugin directory and reload on change. Off in production, where each reload
+   * leaks the previous ESM module and a watcher buys nothing.
    */
   toolsHotReload:
     process.env.TOOLS_HOT_RELOAD !== undefined
       ? process.env.TOOLS_HOT_RELOAD === 'true'
-      : process.env.NODE_ENV !== 'production' && !process.env.VERCEL,
+      : process.env.NODE_ENV !== 'production',
 
   // ── Server ────────────────────────────────────────────────────────────────
   port: parseInt(process.env.PORT ?? '3000', 10),

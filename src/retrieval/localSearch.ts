@@ -90,7 +90,10 @@ const SEARCH_OPTIONS = {
   boost: SEARCH_BOOST,
 };
 
-export const INDEX_VERSION = 2;
+// 3: graph edges and script symbols carry their owning package (`mod`), which is what makes
+// package-scoped tool calls possible. Bumped here because the search index version is the only
+// staleness signal `ensureIndexes()` checks, and a rebuild regenerates both files.
+export const INDEX_VERSION = 3;
 
 export interface PackageSummary {
   name: string;

@@ -64,17 +64,6 @@ export async function ensureIndexes(): Promise<IndexStatus> {
 
   const meta = await readIndexMeta(config.searchIndexPath);
 
-  // Serverless: the data directory is not bundled, so only ever load what was shipped.
-  if (process.env.VERCEL) {
-    if (!meta) {
-      status = { ready: false, rebuilt: false, reason: 'index missing (not bundled)' };
-      console.warn('[index] No search index found in the deployment bundle.');
-      return status;
-    }
-    status = { ready: true, rebuilt: false, meta: (await warmSearchIndex()) ?? meta };
-    return status;
-  }
-
   let reason: string | null = null;
   if (config.autoBuildIndex) {
     if (!(await dirExists(config.dataDir))) {

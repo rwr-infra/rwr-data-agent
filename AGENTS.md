@@ -60,6 +60,42 @@ Each document's `mod` is the package directory name. A request narrows retrieval
 
 > This replaced the old `DATABASE_TABLE` / `body.table` / `GET /v1/tables` scheme. There is no `table` concept anywhere in the codebase now.
 
+### `body.mod` scopes the whole turn, not just retrieval
+
+`body.mod` used to filter only the pre-fetch. The tool loop then ran unscoped, so the agent routinely answered a Castling question out of vanilla — **1351 keys are defined in more than one package** (`gas_tank.vehicle`, `base_valuable.carry_item`, `tracker`, …), and `findNode` returned whichever came first in the node array.
+
+The scope now threads through everything (`packageScope` in `chat.ts`):
+
+| Layer | How it is scoped |
+|---|---|
+| Pre-fetch | `mod_name` filter, as before |
+| Built-in tools | `getAgentTools(scope)` → `buildBuiltinTools(scope)` closes the package over every `execute` |
+| Plugin tools | `createToolHost(scope)` binds `host.search` and every `host.graph.*`, so a plugin is scoped without knowing it exists |
+| System prompt | `buildSystemPrompt(mod)` appends the Package Scope section |
+| User prompt | `buildUserPrompt(…, { mod })` marks the context and the absence instruction |
+
+**The scope is not a tool argument.** It is closed over, so the model cannot widen it — that is the point. Do not add a `mod` parameter to a tool's `inputSchema`.
+
+Because the registry is now per scope, `getAgentTools` caches a `Map<scope, registry>` rather than one object. Keep it cached: `measureToolDefTokens` keys on the registry's object identity, so a fresh registry per request would re-measure every tool definition.
+
+**What a scoped tool returns.** Filtering silently would make the model report a truncated list as complete, so every tool says what it withheld: `scope`, plus `otherPackageHits` (searchDocs), `omittedFromOtherPackages` (listFiles / findReferences), `otherPackages` (getNode), `outOfScope` (readSource). These are counts, never content — the prompt tells the model to offer a package switch instead of answering from them.
+
+**Two deliberate crossings**, because scoping them would produce wrong answers rather than narrow ones:
+- `getInheritanceChain` follows a parent into another package (a mod extending a vanilla base is where the effective value lives). Every layer carries its own `mod` and the walk continues with *that* layer's edges.
+- `readSource` reads any path under the data root, flagging `outOfScope`. Every path the model has came from an already-scoped tool result.
+
+### Graph edges carry their package (graph version 3)
+
+`from`/`to` are bare keys, so a scoped traversal needs the edge itself attributed:
+
+- `GraphEdge.mod` — package of the **referring** file. Also part of the edge dedup identity: two packages defining the same `key -> base` relationship are two edges, and collapsing them handed one package's relationship to the other.
+- `GraphEdge.toMod` — package the `file=` reference **resolved to** at build time. Without it, an `extends` pointing at `base_valuable.carry_item` cannot say which of the packages defining that key it meant. Absent when the reference resolved to no file at all (~40% of edges) — `resolveEdgeTarget` then reports `ambiguousIn: [...]` instead of guessing, and the chain stops there.
+- `ScriptSymbol.mod` — `ScriptSymbol.file` is a basename, so two mods shipping `ItemDropEvent.as` are otherwise the same symbol set.
+
+Both fields are optional and an absent `mod` disables filtering, so a graph written before version 3 loads and behaves like the old unscoped build instead of returning nothing. `INDEX_VERSION` (search index) was bumped to 3 to force the rebuild — it is the only staleness signal `ensureIndexes()` checks, and a rebuild regenerates the graph too.
+
+Calling any tool without `mod` keeps the old global behaviour, which is what `validate.ts`, the CLI and the eval harness use.
+
 ## Index Lifecycle (src/indexing/)
 
 `buildIndexes()` (`build.ts`) — discover packages → `buildGraph()` → write `graph.json` + `script-symbols.json` → `buildSearchIndex()` → write `search-index.json`. Used by both the CLI and startup.
@@ -70,7 +106,7 @@ Each document's `mod` is the package directory name. A request narrows retrieval
 - `data_dir` in the header ≠ current `DATA_DIR`,
 - the data fingerprint (file count, max mtime) moved.
 
-Then it warms the index into memory. It **never throws** — failures become a console warning and are reported by `GET /health`. On Vercel it skips building entirely (the data dir is not bundled) and only loads what shipped.
+Then it warms the index into memory. It **never throws** — failures become a console warning and are reported by `GET /health`.
 
 `AUTO_BUILD_INDEX=false` disables auto-rebuild; the CLI then becomes mandatory.
 
@@ -115,6 +151,8 @@ Node `file` paths are relative to the **data root** (not the package dir), so on
 - `getScriptSymbols(file)` — AngelScript signatures
 - `getNode(key)` — basic entity lookup
 
+Every one of them takes an optional trailing `mod` (the request's selected package) — see [`body.mod` scopes the whole turn](#bodymod-scopes-the-whole-turn-not-just-retrieval).
+
 Wrapped as AI SDK `tool()` definitions in `toolDefs.ts` and passed to `streamText({ tools, stopWhen: stepCountIs(100) })`. Tool-call/result events stream to the frontend as `tool-step` NDJSON lines.
 
 ### Tool execution envelope (src/agent/toolRuntime.ts)
@@ -154,10 +192,10 @@ export default function register(host) {
 ```
 
 - **JSON Schema, not zod** — specs are wrapped with `dynamicTool()` + `jsonSchema()`, so plugin files carry no dependency on the host's zod version. `types/tool-plugin.d.ts` gives JSDoc-based autocompletion.
-- **`host`** (`createToolHost()`) injects `config` paths, `search()`, and the raw graph primitives — a plugin never imports internal modules.
+- **`host`** (`createToolHost(scope)`) injects `config` paths, `search()`, and the raw graph primitives — a plugin never imports internal modules. `search` and `graph.*` are **pre-bound to the request's package**, so a plugin written before package scoping existed is scoped for free; `host.scope` is there for wording output or skipping work, not for opting out.
 - **Failure is isolated.** A load-time throw or an execute-time throw is logged, recorded on the `/v1/tools` entry, and skipped; other tools are unaffected. An execute error is returned to the model as `{ error }` rather than breaking the stream.
 - **No shadowing.** A plugin whose `name` matches a built-in is rejected, so an external file cannot hijack core behaviour.
-- **Hot reload** (`TOOLS_HOT_RELOAD`, defaults on outside production / off on Vercel): `fs.watch` + 300ms debounce sets a dirty flag; the reload itself happens when the next request asks for tools, so an in-flight stream is never swapped. It works via `import(url + '?v=<mtime>')` — the ESM module cache cannot be purged, so each reload leaks the previous module. That is why it defaults off in production.
+- **Hot reload** (`TOOLS_HOT_RELOAD`, defaults on outside production): `fs.watch` + 300ms debounce sets a dirty flag; the reload itself happens when the next request asks for tools, so an in-flight stream is never swapped. It works via `import(url + '?v=<mtime>')` — the ESM module cache cannot be purged, so each reload leaks the previous module. That is why it defaults off in production.
 - **`GET /v1/tools`** reports `{ builtin, plugins[], toolsDir, hotReload }` with per-file errors. Hot reload without this is undebuggable.
 
 ⚠️ **Trust model.** Plugins are `import()`ed into the server process and run with its full privileges — filesystem, network, `process.env`. This is fine for files an operator placed themselves. It is **not** a sandbox: never wire plugin loading to untrusted uploads. That would require `worker_threads` isolation, which this loader deliberately does not implement.
@@ -199,8 +237,8 @@ Diagrams for the request pipeline, the tool loop, the stream contract and the in
 ### Entry Points
 - `src/app.ts` — `buildApp()`: `await ensureIndexes()`, CORS, `/v1/*`, `/health`, static serving.
 - `src/api/server.ts` — local entry (`app.listen`).
-- `src/index.ts` / `api/index.ts` — Vercel serverless entry (no `listen`).
-- Static serving splits on `process.env.VERCEL`: locally `@fastify/static` over `public/` with an SPA fallback; on Vercel `public/index.html` is read manually.
+- `src/index.ts` — programmatic entry, exports a built app without calling `listen` (`main` in `package.json`).
+- Static serving: `@fastify/static` over `public/` with an SPA fallback to `index.html`.
 
 ### Routes
 | Route | Purpose |
@@ -256,7 +294,7 @@ Svelte 5 + Vite + Tailwind 4 + daisyUI in `web/`, building into `public/` — tr
 | `GRAPH_PATH` / `SEARCH_INDEX_PATH` | `<OUTPUT_DIR>/…` | Individual overrides |
 | `AUTO_BUILD_INDEX` | `true` | |
 | `TOOLS_DIR` | `./tools.d` | Runtime tool plugins; skipped if absent |
-| `TOOLS_HOT_RELOAD` | on outside prod, off on Vercel | Watch `TOOLS_DIR` and reload on the next request |
+| `TOOLS_HOT_RELOAD` | on outside prod | Watch `TOOLS_DIR` and reload on the next request |
 | `PORT` | `3000` | |
 | `MAX_CONTEXT_TOKENS` | `500000` | Also reported to the UI on `finish`, so the usage bar follows it |
 | `LLM_MAX_OUTPUT_TOKENS` | `32768` | Reasoning + answer share this budget |
@@ -284,9 +322,6 @@ Svelte 5 + Vite + Tailwind 4 + daisyUI in `web/`, building into `public/` — tr
 ```
 
 Workshop packages live at `steamapps/workshop/content/270150/<itemid>/<pkgname>/`. `discoverPackages()` only looks at the root and its immediate children, so link the `<pkgname>` level — pointing at `<itemid>` finds nothing.
-
-### Vercel
-`vercel.json` bundles `dist/**`, `public/**`, `output/**`, `tools.d/**` into the function. The data directory is not uploaded, so the index must exist before deploy — `ensureIndexes()` will only load, never build, when `VERCEL` is set. Plugins load once per cold start; hot reload is off.
 
 ## Testing
 

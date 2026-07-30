@@ -46,18 +46,29 @@ export interface SearchResult {
   source?: string;
 }
 
+/**
+ * Graph primitives. Every `mod` argument defaults to `host.scope`, so leaving it off is the
+ * right call — pass one only to look at a package other than the user's selection.
+ */
 export interface ToolHostGraph {
-  getInheritanceChain(key: string): Promise<unknown>;
-  findReferences(key: string): Promise<unknown>;
-  getTransformChain(key: string): Promise<unknown>;
-  readSource(file: string, startLine?: number, endLine?: number): Promise<unknown>;
-  listFiles(pattern: string, type?: string, limit?: number): Promise<unknown>;
-  getScriptSymbols(file: string): Promise<unknown>;
-  getNode(key: string): Promise<unknown>;
+  getInheritanceChain(key: string, mod?: string): Promise<unknown>;
+  findReferences(key: string, mod?: string): Promise<unknown>;
+  getTransformChain(key: string, mod?: string): Promise<unknown>;
+  readSource(file: string, startLine?: number, endLine?: number, mod?: string): Promise<unknown>;
+  listFiles(pattern: string, type?: string, limit?: number, mod?: string): Promise<unknown>;
+  getScriptSymbols(file: string, mod?: string): Promise<unknown>;
+  getNode(key: string, mod?: string): Promise<unknown>;
 }
 
 export interface ToolHost {
   config: ToolHostConfig;
+  /**
+   * Package the request selected, or undefined when unscoped. `search` and `graph` are already
+   * bound to it — read this to word your output or to skip work when the selected package is
+   * not the one your tool covers.
+   */
+  scope?: string;
+  /** Full-text search, filtered to `scope` unless `filters.mod_name` is set explicitly. */
   search(query: string, filters?: SearchFilters, topK?: number, searchQuery?: string, offset?: number): Promise<SearchResult[]>;
   graph: ToolHostGraph;
   log(message: string): void;

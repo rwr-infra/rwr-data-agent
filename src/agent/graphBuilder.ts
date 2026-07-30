@@ -251,8 +251,11 @@ export async function buildGraph(
   const pkgDirs = pkgs
     .map((p) => ({ dir: path.resolve(p.dir), name: p.name }))
     .sort((a, b) => b.dir.length - a.dir.length);
-  const packageRootOf = (file: string): string =>
-    pkgDirs.find((p) => file === p.dir || file.startsWith(p.dir + path.sep))?.dir ?? root;
+  const packageEntryOf = (file: string) =>
+    pkgDirs.find((p) => file === p.dir || file.startsWith(p.dir + path.sep));
+  const packageRootOf = (file: string): string => packageEntryOf(file)?.dir ?? root;
+  /** Owning package of a file, by the same longest-prefix rule the node walk uses. */
+  const packageNameOf = (file: string): string => packageEntryOf(file)?.name ?? '';
 
   for (const pkg of pkgs) {
     const pkgFiles = await collectFiles(pkg.dir);
@@ -284,36 +287,47 @@ export async function buildGraph(
   const seenEdges = new Set<string>();
   for (const re of ctx.edges) {
     let resolvedTo = re.targetRef;
+    let toMod: string | undefined;
 
     if (re.targetFile) {
       const resolvedPath = await resolveFilePath(re.targetFile, re.fromFile, root, packageRootOf);
       if (resolvedPath) {
         const nodeKeys = fileToNodeKeys.get(resolvedPath);
         resolvedTo = nodeKeys?.[0] ?? re.targetFile;
+        // Keep which package the reference landed in — the key alone is ambiguous for base
+        // files that several packages define.
+        toMod = packageNameOf(resolvedPath);
       } else {
         resolvedTo = re.targetFile;
       }
     }
 
-    const edgeId = `${re.from}|${resolvedTo}|${re.rel}`;
+    // The package is part of the identity: two packages that both define `ak47.weapon ->
+    // base.weapon` are two distinct edges, and collapsing them would hand one package's
+    // relationship to the other.
+    const mod = packageNameOf(re.fromFile);
+    const edgeId = `${re.from}|${resolvedTo}|${re.rel}|${mod}|${toMod ?? ''}`;
     if (seenEdges.has(edgeId)) continue;
     seenEdges.add(edgeId);
 
-    edges.push({ from: re.from, to: resolvedTo, rel: re.rel, context: re.context });
+    edges.push({ from: re.from, to: resolvedTo, rel: re.rel, context: re.context, mod, toMod });
   }
 
   const scriptFiles = files.filter((f) => path.extname(f).toLowerCase() === '.as');
   const symbols: ScriptSymbol[] = [];
   for (const f of scriptFiles) {
     try {
-      symbols.push(...await extractScriptSymbolsFromFile(f));
+      // `ScriptSymbol.file` is a basename, so the package has to be stamped here — two mods
+      // shipping `ItemDropEvent.as` are otherwise indistinguishable at lookup time.
+      const mod = packageNameOf(f);
+      for (const s of await extractScriptSymbolsFromFile(f)) symbols.push({ ...s, mod });
     } catch {
       // An unreadable or unparseable script must not abort the whole graph build.
     }
   }
 
   const graph: RwrGraph = {
-    version: 2,
+    version: 3,
     packages: pkgs.map((p) => ({ name: p.name, displayName: p.displayName })),
     source_dir: root,
     built_at: new Date().toISOString(),

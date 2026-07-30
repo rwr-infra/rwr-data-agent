@@ -17,8 +17,8 @@
     "lint": "eslint . --max-warnings 0",
     "lint:fix": "eslint . --fix",
     "typecheck": "tsc --noEmit",
-    "format": "prettier --write \"{src,api,types,tools.d}/**/*.{ts,js}\"",
-    "format:check": "prettier --check \"{src,api,types,tools.d}/**/*.{ts,js}\"",
+    "format": "prettier --write \"{src,types,tools.d}/**/*.{ts,js}\"",
+    "format:check": "prettier --check \"{src,types,tools.d}/**/*.{ts,js}\"",
     "eval": "node --import tsx src/eval/run.ts",
     "eval:agent": "node --import tsx src/eval/agent.ts"
   },

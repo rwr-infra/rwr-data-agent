@@ -98,6 +98,33 @@ When asked to compare items (e.g., "A vs B", "which is better"):
 - List each item's relevant attributes side by side.
 - Highlight differences; avoid subjective judgments unless explicitly asked.`;
 
+/**
+ * Appended when the request selected a package. The tools are already scoped, so this section
+ * is not what enforces the boundary — it is what stops the model from *narrating* around it:
+ * reporting a withheld count as an answer, or "helpfully" naming the other package's item as if
+ * it satisfied the question.
+ */
+function packageScopeSection(mod: string): string {
+  return `
+
+### Package Scope (HARD CONSTRAINT — overrides every other instruction below)
+The user selected the package **${mod}**. Every tool is already restricted to it; there is no argument that widens the scope and no way for you to query another package.
+
+1. Answer **only** from ${mod} data. Never present an entity from another package as the answer, not even as a "similar item" or a "reference".
+2. Tool results may carry \`scope\`, \`otherPackageHits\`, \`omittedFromOtherPackages\`, \`otherPackages\` or \`outOfScope\`. Those are counts of what was deliberately withheld — they are **not** results. Do not list, name, guess or describe what is behind them.
+3. When the item is genuinely absent from ${mod}, say so plainly: "package ${mod} 中没有找到 …". If a field says it exists in another package, you may say *that it exists there* and offer to switch — never answer from it.
+4. Do not spend tool calls trying to reach around the scope (wildcard globs, base-file guesses, other-package Keys). They return nothing and waste the budget.
+5. One legitimate crossing: an inheritance parent that physically lives in another package. Those layers are labelled with their own \`mod\`. Use them to explain an inherited value, and always name the package the layer came from.`;
+}
+
+/**
+ * The system prompt for a request. Pass the selected package to append the scope constraint —
+ * the same string must be used for both the LLM call and the token accounting.
+ */
+export function buildSystemPrompt(mod?: string): string {
+  return mod ? SYSTEM_PROMPT + packageScopeSection(mod) : SYSTEM_PROMPT;
+}
+
 const MAX_RESULT_CHARS = 2000;
 
 /**
@@ -123,9 +150,16 @@ function summaryLine(r: SearchResult): string {
 export function buildUserPrompt(
   query: string,
   results: SearchResult[],
-  options?: { lowConfidence?: boolean; budgetTokens?: number },
+  options?: { lowConfidence?: boolean; budgetTokens?: number; mod?: string },
 ): string {
   const contextParts: string[] = [];
+
+  if (options?.mod) {
+    contextParts.push(
+      `[Package: ${options.mod}] Retrieval was restricted to this package, and so is every tool. ` +
+        'Absence here means absence in this package — say that, do not look elsewhere.',
+    );
+  }
 
   if (options?.lowConfidence && results.length > 0) {
     contextParts.push('[Low Confidence] The following documents were retrieved but may not closely match the query.');
@@ -168,6 +202,12 @@ export function buildUserPrompt(
       ? 'The retrieved context has low confidence. Check Key fields, Localized Names, and document content — and call `searchDocs` with a better query (bare item name, Key fragment, other language) before drawing any conclusion. Do not answer "not found" without at least 2 failed tool calls.'
       : `Answer the question using the context documents above. If the queried item is not in these documents, do NOT conclude it is missing — call \`searchDocs\` with the item name and variants, then \`listFiles\` with a glob, before saying anything about absence. Check Key fields (partial/abbreviated names), Localized Names, and document content for the queried term.`;
 
+  // The escalation above is about trying harder, not about looking wider — spelled out here
+  // because "search again with variants" is otherwise an easy excuse to leave the package.
+  const scopeInstruction = options?.mod
+    ? `\n\nEvery search stays inside package ${options.mod}. If the escalation comes back empty, the answer is that the item is not in ${options.mod} — do not substitute an entity from another package.`
+    : '';
+
   return `### Context
 ${context}
 
@@ -175,5 +215,5 @@ ${context}
 ${query}
 
 ### Instructions
-${instruction}`;
+${instruction}${scopeInstruction}`;
 }
