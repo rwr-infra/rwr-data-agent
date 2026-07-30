@@ -35,6 +35,19 @@ function describe(base: string, s: ReturnType<typeof summarizeSymbols>): string 
 
 export async function parseAngelScriptFile(filePath: string, modName: string): Promise<StructuredDocument[]> {
   const content = await fs.readFile(filePath, 'utf-8');
+  return parseAngelScriptContent(content, filePath, modName);
+}
+
+/**
+ * Same as `parseAngelScriptFile`, over content already in memory. The index build reads
+ * each `.as` file once and derives both the search document and the graph's script symbols
+ * from that single read.
+ */
+export function parseAngelScriptContent(
+  content: string,
+  filePath: string,
+  modName: string,
+): StructuredDocument[] {
   const base = path.basename(filePath, '.as');
   const symbols = extractScriptSymbols(content, path.basename(filePath));
   const summary = summarizeSymbols(symbols);

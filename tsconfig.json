@@ -7,6 +7,11 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "strict": true,
+    // The IDE surfaces unused locals/parameters as hints whether or not these are set, so
+    // without them `npm run typecheck` stays green while the editor shows warnings nobody can
+    // act on from CI. Both honour the `_` prefix, same as the ESLint no-unused-vars config.
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,

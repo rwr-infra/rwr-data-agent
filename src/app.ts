@@ -7,13 +7,15 @@ import { healthRoutes } from './api/routes/health.js';
 import { packagesRoutes } from './api/routes/packages.js';
 import { toolsRoutes } from './api/routes/tools.js';
 import { shutdownLangfuse } from './observability/langfuse.js';
-import { ensureIndexes } from './indexing/bootstrap.js';
+import { getIndexStatus, startIndexes } from './indexing/bootstrap.js';
 import { config } from './config/index.js';
 
 export async function buildApp() {
-  // Build/load the local indexes before serving. Never throws — a failure leaves the
-  // server up and is reported through /health.
-  await ensureIndexes();
+  // Kick off the index build/load *without* waiting for it. A cold rebuild is minutes of CPU
+  // on a small host, and awaiting it here kept the port closed for that whole time — health
+  // probes failed and the process looked hung. `/health` reports `building` until it is warm.
+  // Never throws — a failure leaves the server up and is reported through /health.
+  void startIndexes();
 
   const app = Fastify({
     logger: false,
@@ -42,6 +44,23 @@ export async function buildApp() {
     });
   }
 
+  // Retrieval is the only surface that needs the index. Answering from an empty index would
+  // look like "the game has no such weapon", so say plainly that it is not ready yet.
+  app.addHook('onRequest', (request, reply, done) => {
+    if (!request.url.startsWith('/v1/chat')) return done();
+    const index = getIndexStatus();
+    if (index.ready) return done();
+    reply.status(503).header('retry-after', '30').send({
+      error: {
+        message: index.building
+          ? 'Index is still building — retry in a moment.'
+          : (index.reason ?? 'Index not ready'),
+        type: 'index_unavailable',
+      },
+    });
+    return;
+  });
+
   await app.register(chatRoutes, { prefix: '/v1' });
   await app.register(modelsRoutes, { prefix: '/v1' });
   await app.register(packagesRoutes, { prefix: '/v1' });
@@ -63,7 +82,7 @@ export async function buildApp() {
     console.log('@fastify/static not available, skipping static file serving');
   }
 
-  app.setErrorHandler((error: Error, request, reply) => {
+  app.setErrorHandler((error: Error, _request, reply) => {
     console.error('Request error:', error.message);
     reply.status(500).send({
       error: { message: error.message, type: 'internal_error' },

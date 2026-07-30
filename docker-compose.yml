@@ -12,10 +12,18 @@ services:
       DATA_DIR: /app/data
       OUTPUT_DIR: /app/output
       TOOLS_DIR: /app/tools.d
+      # Cap the heap below the container limit. Left to itself V8 sizes the old space from the
+      # *host's* RAM, so on a 2 GB box a full index build climbs until it is thrashing GC and
+      # taking the whole machine with it. An explicit ceiling makes it collect instead.
+      NODE_OPTIONS: ${NODE_OPTIONS:---max-old-space-size=768}
     ports:
       # Follow PORT from .env — the app binds it inside the container, so a fixed
       # 3000:3000 mapping silently breaks whenever .env sets anything else.
       - "${PORT:-3000}:${PORT:-3000}"
+    # Resource ceilings, so an index build cannot starve the host it shares. Raise them if the
+    # data root is much larger than a stock install plus a few mods.
+    mem_limit: ${MEM_LIMIT:-1g}
+    cpus: ${CPUS:-1.5}
     volumes:
       # RWR data root — a single package directory or a directory of packages.
       - ./data:/app/data:ro

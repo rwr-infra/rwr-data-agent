@@ -14,6 +14,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildApp } from '../app.js';
+import { whenIndexesReady } from '../indexing/bootstrap.js';
 import { config } from '../config/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -201,6 +202,9 @@ async function main(): Promise<void> {
 
   console.log(c(`\nAgent loop eval — ${cases.length} case(s), real LLM calls\n`, 'bold'));
   const app = await buildApp();
+  // `buildApp` no longer waits for the index — the server prioritises opening its port. An eval
+  // run wants the opposite, so wait here before issuing the first query.
+  await whenIndexesReady();
   let passed = 0;
   const rows: string[] = [];
 

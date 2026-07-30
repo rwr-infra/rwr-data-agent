@@ -1,20 +1,10 @@
-import { XMLParser } from 'fast-xml-parser';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { collectFiles } from '../ingestion/shared.js';
-import { discoverPackages, type DataPackage } from '../ingestion/packages.js';
-import { extractScriptSymbols } from '../ingestion/asSymbols.js';
 import pLimit from 'p-limit';
+import { extractScriptSymbols } from '../ingestion/asSymbols.js';
+import { config } from '../config/index.js';
+import type { DataPackage } from '../ingestion/packages.js';
 import type { GraphNode, GraphEdge, EdgeRel, ScriptSymbol, RwrGraph } from './types.js';
-
-const parser = new XMLParser({
-  ignoreAttributes: false,
-  attributeNamePrefix: '@_',
-  textNodeName: '#text',
-  parseAttributeValue: false,
-  trimValues: true,
-  alwaysCreateTextNode: false,
-});
 
 const EXT_TYPE_MAP: Record<string, string> = {
   '.weapon': 'weapon',
@@ -68,6 +58,18 @@ interface BuildCtx {
   edges: RawEdge[];
   sourceDir: string;
   modName: string;
+  /** `key|file` of every node already pushed — dedup happens on insert, not in a second pass. */
+  seenNodes: Set<string>;
+  /** First node key seen per absolute file path — the only thing edge resolution reads. */
+  firstKeyOfFile: Map<string, string>;
+}
+
+function pushNode(ctx: BuildCtx, node: GraphNode, absFile: string): void {
+  const id = `${node.key}|${node.file}`;
+  if (ctx.seenNodes.has(id)) return;
+  ctx.seenNodes.add(id);
+  ctx.nodes.push(node);
+  if (!ctx.firstKeyOfFile.has(absFile)) ctx.firstKeyOfFile.set(absFile, node.key);
 }
 
 function walk(obj: unknown, filePath: string, ctx: BuildCtx, rootElement: string | undefined, isRoot: boolean): void {
@@ -100,13 +102,17 @@ function walk(obj: unknown, filePath: string, ctx: BuildCtx, rootElement: string
     const nodeType = rootElement && ROOT_ELEMENT_MAP[rootElement]
       ? ROOT_ELEMENT_MAP[rootElement]
       : EXT_TYPE_MAP[path.extname(filePath).toLowerCase()] ?? 'unknown';
-    ctx.nodes.push({
-      key: currentKey,
-      type: nodeType,
-      file: path.relative(ctx.sourceDir, filePath).replace(/\\/g, '/'),
-      name: typeof attrs['@_name'] === 'string' ? attrs['@_name'] : undefined,
-      mod: ctx.modName,
-    });
+    pushNode(
+      ctx,
+      {
+        key: currentKey,
+        type: nodeType,
+        file: path.relative(ctx.sourceDir, filePath).replace(/\\/g, '/'),
+        name: typeof attrs['@_name'] === 'string' ? attrs['@_name'] : undefined,
+        mod: ctx.modName,
+      },
+      filePath,
+    );
 
     if (typeof attrs['@_file'] === 'string' && attrs['@_file'].trim()) {
       ctx.edges.push({ from: currentKey, fromFile: filePath, targetRef: attrs['@_file'], targetFile: attrs['@_file'], rel: 'extends' });
@@ -165,64 +171,6 @@ function walk(obj: unknown, filePath: string, ctx: BuildCtx, rootElement: string
   }
 }
 
-async function buildFileNodes(filePath: string, ctx: BuildCtx): Promise<void> {
-  const ext = path.extname(filePath).toLowerCase();
-
-  if (['.as', '.ai', '.resources', '.models', '.name', '.text_lines'].includes(ext)) {
-    ctx.nodes.push({
-      key: path.basename(filePath),
-      type: EXT_TYPE_MAP[ext] ?? 'resource',
-      file: path.relative(ctx.sourceDir, filePath).replace(/\\/g, '/'),
-      mod: ctx.modName,
-    });
-    return;
-  }
-
-  try {
-    const content = await fs.readFile(filePath, 'utf-8');
-    // fast-xml-parser types parse() as `any`; narrow it at the boundary.
-    const parsed: unknown = parser.parse(content);
-    const root = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
-    const rootKey = Object.keys(root).find((k) => k !== '?xml');
-    if (!rootKey) return;
-    walk(root[rootKey], filePath, ctx, rootKey, true);
-  } catch {
-    ctx.nodes.push({
-      key: path.basename(filePath),
-      type: EXT_TYPE_MAP[ext] ?? 'unknown',
-      file: path.relative(ctx.sourceDir, filePath).replace(/\\/g, '/'),
-      mod: ctx.modName,
-    });
-  }
-}
-
-/**
- * Resolve a `file="…"` reference. RWR packages overlay each other, so a reference can
- * point inside the referring package or fall through to a sibling package. Order:
- * the referring file's own directory, then its package root, then the data root.
- */
-async function resolveFilePath(
-  refFile: string,
-  fromFile: string,
-  sourceDir: string,
-  packageRootOf: (file: string) => string,
-): Promise<string | undefined> {
-  const candidates = [
-    path.resolve(path.dirname(fromFile), refFile),
-    path.resolve(packageRootOf(fromFile), refFile),
-    path.resolve(sourceDir, refFile),
-  ];
-  for (const c of candidates) {
-    try {
-      const stat = await fs.stat(c);
-      if (stat.isFile()) return c;
-    } catch {
-      // Candidate path does not exist — try the next one.
-    }
-  }
-  return undefined;
-}
-
 /** Read a `.as` file and extract its symbols. Shared implementation lives in ingestion/asSymbols. */
 export async function extractScriptSymbolsFromFile(filePath: string): Promise<ScriptSymbol[]> {
   const content = await fs.readFile(filePath, 'utf-8');
@@ -230,25 +178,47 @@ export async function extractScriptSymbolsFromFile(filePath: string): Promise<Sc
 }
 
 /**
- * Build the entity graph over every package under `sourceDir`.
+ * Incremental graph builder — the only way to build the graph.
  *
- * Node `file` paths stay relative to `sourceDir` (not the package dir) so a single
- * data root is enough for the agent's `readSource` tool, while `mod` carries the
- * owning package name.
+ * The index build makes a *single* pass over the data files and feeds each one to both this
+ * collector and the search-document extractor, so a file is read and XML-parsed exactly
+ * once instead of once per index. Nothing here touches the filesystem during the pass — the
+ * caller owns I/O — and the only state kept between files is the node/edge lists.
+ *
+ * Node `file` paths stay relative to the data root (not the package dir) so a single root is
+ * enough for the agent's `readSource` tool, while `mod` carries the owning package name.
  */
-export async function buildGraph(
-  sourceDir: string,
-  packages?: DataPackage[],
-): Promise<{ graph: RwrGraph; symbols: ScriptSymbol[] }> {
-  const root = path.resolve(sourceDir);
-  const pkgs = packages ?? (await discoverPackages(root));
+export interface GraphCollector {
+  /** Package that the following `add*` calls belong to. */
+  setPackage(name: string): void;
+  /** Contribute the nodes and edges of an already-parsed XML tree. */
+  addXmlFile(filePath: string, tree: Record<string, unknown>): void;
+  /**
+   * Contribute a single file-level node for a file with no XML structure to walk. `fallback`
+   * mirrors the two historical cases: `resource` for the natively opaque extensions (`.as`,
+   * `.ai`, `.text_lines`, …), `unknown` for a file that failed to read or parse.
+   */
+  addOpaqueFile(filePath: string, fallback: 'resource' | 'unknown'): void;
+  /** Contribute the AngelScript symbols of a `.as` file from content already in memory. */
+  addScriptSymbols(filePath: string, content: string): void;
+  /** Resolve edges and assemble the graph. */
+  finalize(opts: { packages: DataPackage[]; fileCount: number }): Promise<{ graph: RwrGraph; symbols: ScriptSymbol[] }>;
+}
 
-  const ctx: BuildCtx = { nodes: [], edges: [], sourceDir: root, modName: '' };
-  const limit = pLimit(8);
-  const files: string[] = [];
+export function createGraphCollector(sourceDir: string, packages: DataPackage[]): GraphCollector {
+  const root = path.resolve(sourceDir);
+  const ctx: BuildCtx = {
+    nodes: [],
+    edges: [],
+    sourceDir: root,
+    modName: '',
+    seenNodes: new Set(),
+    firstKeyOfFile: new Map(),
+  };
+  const symbols: ScriptSymbol[] = [];
 
   // Longest-prefix match so a file always maps back to its own package root.
-  const pkgDirs = pkgs
+  const pkgDirs = packages
     .map((p) => ({ dir: path.resolve(p.dir), name: p.name }))
     .sort((a, b) => b.dir.length - a.dir.length);
   const packageEntryOf = (file: string) =>
@@ -257,45 +227,129 @@ export async function buildGraph(
   /** Owning package of a file, by the same longest-prefix rule the node walk uses. */
   const packageNameOf = (file: string): string => packageEntryOf(file)?.name ?? '';
 
-  for (const pkg of pkgs) {
-    const pkgFiles = await collectFiles(pkg.dir);
-    files.push(...pkgFiles);
-    ctx.modName = pkg.name;
-    await Promise.all(pkgFiles.map((file) => limit(() => buildFileNodes(file, ctx))));
-  }
+  return {
+    setPackage(name) {
+      ctx.modName = name;
+    },
 
-  // Deduplicate nodes (same key+file can appear from nested walks)
-  const seenNodes = new Set<string>();
-  const uniqueNodes = ctx.nodes.filter((n) => {
-    const id = `${n.key}|${n.file}`;
-    if (seenNodes.has(id)) return false;
-    seenNodes.add(id);
-    return true;
-  });
+    addXmlFile(filePath, tree) {
+      const rootKey = Object.keys(tree).find((k) => k !== '?xml');
+      if (!rootKey) return;
+      walk(tree[rootKey], filePath, ctx, rootKey, true);
+    },
 
-  const keyToNode = new Map<string, GraphNode>();
-  const fileToNodeKeys = new Map<string, string[]>();
-  for (const n of uniqueNodes) {
-    keyToNode.set(n.key, n);
-    const absFile = path.resolve(root, n.file);
-    const arr = fileToNodeKeys.get(absFile) ?? [];
-    arr.push(n.key);
-    fileToNodeKeys.set(absFile, arr);
+    addOpaqueFile(filePath, fallback) {
+      const ext = path.extname(filePath).toLowerCase();
+      pushNode(
+        ctx,
+        {
+          key: path.basename(filePath),
+          type: EXT_TYPE_MAP[ext] ?? fallback,
+          file: path.relative(root, filePath).replace(/\\/g, '/'),
+          mod: ctx.modName,
+        },
+        filePath,
+      );
+    },
+
+    addScriptSymbols(filePath, content) {
+      // `ScriptSymbol.file` is a basename, so the package has to be stamped here — two mods
+      // shipping `ItemDropEvent.as` are otherwise indistinguishable at lookup time.
+      const mod = packageNameOf(filePath);
+      for (const s of extractScriptSymbols(content, path.basename(filePath))) {
+        symbols.push({ ...s, mod });
+      }
+    },
+
+    async finalize({ packages: pkgs, fileCount }) {
+      const edges = await resolveEdges(ctx, root, packageRootOf, packageNameOf);
+
+      const graph: RwrGraph = {
+        version: 3,
+        packages: pkgs.map((p) => ({ name: p.name, displayName: p.displayName })),
+        source_dir: root,
+        built_at: new Date().toISOString(),
+        stats: { nodes: ctx.nodes.length, edges: edges.length, files: fileCount },
+        nodes: ctx.nodes,
+        edges,
+      };
+
+      return { graph, symbols };
+    },
+  };
+}
+
+/**
+ * Resolve a `file="…"` reference. RWR packages overlay each other, so a reference can
+ * point inside the referring package or fall through to a sibling package. Order:
+ * the referring file's own directory, then its package root, then the data root.
+ *
+ * `existsCache` is what makes this affordable. Thousands of edges point at the same handful
+ * of base files, and every candidate used to cost an `fs.stat` in a fully sequential loop —
+ * up to three per edge, tens of thousands of round trips on a network-backed data volume.
+ */
+async function resolveFilePath(
+  refFile: string,
+  fromFile: string,
+  sourceDir: string,
+  packageRootOf: (file: string) => string,
+  existsCache: Map<string, boolean>,
+): Promise<string | undefined> {
+  const candidates = [
+    path.resolve(path.dirname(fromFile), refFile),
+    path.resolve(packageRootOf(fromFile), refFile),
+    path.resolve(sourceDir, refFile),
+  ];
+  for (const c of candidates) {
+    let exists = existsCache.get(c);
+    if (exists === undefined) {
+      exists = await fs
+        .stat(c)
+        .then((s) => s.isFile())
+        .catch(() => false);
+      existsCache.set(c, exists);
+    }
+    if (exists) return c;
   }
+  return undefined;
+}
+
+async function resolveEdges(
+  ctx: BuildCtx,
+  root: string,
+  packageRootOf: (file: string) => string,
+  packageNameOf: (file: string) => string,
+): Promise<GraphEdge[]> {
+  // Every indexed file is known to exist, which answers the majority of successful lookups
+  // without touching the filesystem at all.
+  const existsCache = new Map<string, boolean>();
+  for (const abs of ctx.firstKeyOfFile.keys()) existsCache.set(abs, true);
+
+  // stat() is I/O, not CPU, so this is allowed to run wider than the parse pass.
+  const limit = pLimit(config.indexConcurrency * 8);
+  const resolved = await Promise.all(
+    ctx.edges.map((re) =>
+      limit(() =>
+        re.targetFile
+          ? resolveFilePath(re.targetFile, re.fromFile, root, packageRootOf, existsCache)
+          : Promise.resolve(undefined),
+      ),
+    ),
+  );
 
   const edges: GraphEdge[] = [];
   const seenEdges = new Set<string>();
-  for (const re of ctx.edges) {
+  for (let i = 0; i < ctx.edges.length; i++) {
+    const re = ctx.edges[i];
     let resolvedTo = re.targetRef;
     let toMod: string | undefined;
 
     if (re.targetFile) {
-      const resolvedPath = await resolveFilePath(re.targetFile, re.fromFile, root, packageRootOf);
+      const resolvedPath = resolved[i];
       if (resolvedPath) {
-        const nodeKeys = fileToNodeKeys.get(resolvedPath);
-        resolvedTo = nodeKeys?.[0] ?? re.targetFile;
         // Keep which package the reference landed in — the key alone is ambiguous for base
         // files that several packages define.
+        resolvedTo = ctx.firstKeyOfFile.get(resolvedPath) ?? re.targetFile;
         toMod = packageNameOf(resolvedPath);
       } else {
         resolvedTo = re.targetFile;
@@ -313,28 +367,7 @@ export async function buildGraph(
     edges.push({ from: re.from, to: resolvedTo, rel: re.rel, context: re.context, mod, toMod });
   }
 
-  const scriptFiles = files.filter((f) => path.extname(f).toLowerCase() === '.as');
-  const symbols: ScriptSymbol[] = [];
-  for (const f of scriptFiles) {
-    try {
-      // `ScriptSymbol.file` is a basename, so the package has to be stamped here — two mods
-      // shipping `ItemDropEvent.as` are otherwise indistinguishable at lookup time.
-      const mod = packageNameOf(f);
-      for (const s of await extractScriptSymbolsFromFile(f)) symbols.push({ ...s, mod });
-    } catch {
-      // An unreadable or unparseable script must not abort the whole graph build.
-    }
-  }
-
-  const graph: RwrGraph = {
-    version: 3,
-    packages: pkgs.map((p) => ({ name: p.name, displayName: p.displayName })),
-    source_dir: root,
-    built_at: new Date().toISOString(),
-    stats: { nodes: uniqueNodes.length, edges: edges.length, files: files.length },
-    nodes: uniqueNodes,
-    edges,
-  };
-
-  return { graph, symbols };
+  // Raw edges carry an absolute path per entry and nothing needs them again.
+  ctx.edges.length = 0;
+  return edges;
 }

@@ -119,7 +119,7 @@ function summarizeToolInput(toolName: string | undefined, input: unknown): strin
 }
 
 /** Build a short summary of a tool result for the UI. */
-function summarizeToolResult(toolName: string | undefined, output: unknown): string {
+function summarizeToolResult(_toolName: string | undefined, output: unknown): string {
   if (!output || typeof output !== 'object') return '';
   const out = output as Record<string, unknown>;
   // Failures come back through the runtime envelope as ordinary results, so check them first —

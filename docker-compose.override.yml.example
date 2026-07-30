@@ -58,3 +58,32 @@ services:
       # Workshop directories are numeric IDs. The mount target renames them to
       # something queryable, since the basename is what becomes `mod_name`.
       # - ${RWR_WORKSHOP_DIR:?set RWR_WORKSHOP_DIR in .env}/2606656554:/app/data/GFL_Castling:ro
+
+  # ── Optional: build the index in a one-shot job, not in the server ──────────
+  #
+  # Uncomment on a small host (2 vCPU / 2 GB). The index build is the heaviest thing this
+  # project does; running it inside `app` means it competes with live requests for the same
+  # two cores. This runs it once, to completion, then exits — and `AUTO_BUILD_INDEX=false`
+  # on `app` above makes the server load-only, so a restart can never trigger a rebuild.
+  #
+  #   docker compose run --rm indexer     # after a data change, or on first deploy
+  #   docker compose up -d app
+  #
+  # Duplicate the `volumes:` block from `app` — the builder needs the same view of the data.
+  #
+  # indexer:
+  #   image: zhaozisong0/rwr-data-agent:${IMAGE_TAG:-latest}
+  #   pull_policy: always
+  #   command: ["node", "dist/agent/buildGraph.js"]
+  #   restart: "no"
+  #   env_file: [.env]
+  #   environment:
+  #     DATA_DIR: /app/data
+  #     OUTPUT_DIR: /app/output
+  #     NODE_OPTIONS: --max-old-space-size=768
+  #   # Leave the server a core to answer on while this runs.
+  #   cpus: 1.0
+  #   mem_limit: 1g
+  #   volumes:
+  #     - ./output:/app/output
+  #     # …plus the same data mounts as `app`.

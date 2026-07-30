@@ -92,32 +92,51 @@ Because the registry is now per scope, `getAgentTools` caches a `Map<scope, regi
 - `GraphEdge.toMod` — package the `file=` reference **resolved to** at build time. Without it, an `extends` pointing at `base_valuable.carry_item` cannot say which of the packages defining that key it meant. Absent when the reference resolved to no file at all (~40% of edges) — `resolveEdgeTarget` then reports `ambiguousIn: [...]` instead of guessing, and the chain stops there.
 - `ScriptSymbol.mod` — `ScriptSymbol.file` is a basename, so two mods shipping `ItemDropEvent.as` are otherwise the same symbol set.
 
-Both fields are optional and an absent `mod` disables filtering, so a graph written before version 3 loads and behaves like the old unscoped build instead of returning nothing. `INDEX_VERSION` (search index) was bumped to 3 to force the rebuild — it is the only staleness signal `ensureIndexes()` checks, and a rebuild regenerates the graph too.
+Both fields are optional and an absent `mod` disables filtering, so a graph written before version 3 loads and behaves like the old unscoped build instead of returning nothing. `INDEX_VERSION` (search index) was bumped to force the rebuild — it is the only staleness signal `ensureIndexes()` checks, and a rebuild regenerates the graph too. It is now at 4, for the on-disk layout change described under [Index Lifecycle](#index-lifecycle-srcindexing).
 
 Calling any tool without `mod` keeps the old global behaviour, which is what `validate.ts`, the CLI and the eval harness use.
 
 ## Index Lifecycle (src/indexing/)
 
-`buildIndexes()` (`build.ts`) — discover packages → `buildGraph()` → write `graph.json` + `script-symbols.json` → `buildSearchIndex()` → write `search-index.json`. Used by both the CLI and startup.
+`buildIndexes()` (`build.ts`) — discover packages → walk each package → **one pass** over the files → `graph.json` + `script-symbols.json` + the search index. Used by both the CLI and startup.
 
-`ensureIndexes()` (`bootstrap.ts`) runs at the top of `buildApp()` and rebuilds when:
-- the index file is missing,
+### One pass, one parse, streamed out
+
+The build is shaped by what a 2 vCPU / 2 GB host can survive, because that is where it runs. Three properties are load-bearing; breaking any of them brings back a build that pinned ~1.2 GB and pegged both cores for minutes:
+
+1. **Each file is read and XML-parsed exactly once**, and the resulting tree is handed to *both* consumers — `createGraphCollector()` (`agent/graphBuilder.ts`) and `parseContent()` (`ingestion/shared.ts`). Graph and search used to run separate passes with separate `XMLParser` instances over the same 4.6k files; that duplicate parse was ~40% of build CPU. `GraphCollector` is now the only way to build the graph and every parser takes content rather than a path, so there is no second implementation to drift into. Anything new that needs the tree gets it from this pass — do not add a second walk.
+2. **Search entries are streamed to disk** through `createIndexWriter`, one line at a time, and dropped. Nothing accumulates a full `IndexEntry[]`, and nothing hands the index to `JSON.stringify`.
+3. **The build never constructs a MiniSearch index.** It used to `addAll()` every entry and then throw the result away — the on-disk index is rebuilt from the body at boot regardless. Pure waste: 3.2s of tokenization and a few hundred MB.
+
+`config.indexConcurrency` (`INDEX_CONCURRENCY`, default: cores clamped to [2, 4]) bounds how many files are in flight. It is a *memory* knob, not a throughput one — parsing is synchronous, so raising it past the core count only keeps more parse trees alive at once.
+
+### Startup
+
+`startIndexes()` (`bootstrap.ts`) is called by `buildApp()` **without being awaited**, so the port opens immediately instead of after a possible multi-minute rebuild. While it runs, `GET /health` reports `status: "building"` and `/v1/chat/*` answers 503 `index_unavailable` rather than searching an index that is not there. Callers that want a ready index instead of a live port — the eval harness — await `whenIndexesReady()`.
+
+`ensureIndexes()` rebuilds when:
+- the index header is missing or unparseable,
 - `version` ≠ `INDEX_VERSION`,
 - `data_dir` in the header ≠ current `DATA_DIR`,
 - the data fingerprint (file count, max mtime) moved.
 
-Then it warms the index into memory. It **never throws** — failures become a console warning and are reported by `GET /health`.
+The staleness probe's own tree walk is handed to `buildIndexes()` (`filesByPackage` + `fingerprint`) instead of being thrown away — `walkFiles` is deterministic, so reusing it is equivalent to re-walking, and on a network-backed data volume a re-walk is thousands of round trips. Note the walk stays **per package**: a single walk from the data root is *not* equivalent, since the root may hold directories that are not packages.
 
-`AUTO_BUILD_INDEX=false` disables auto-rebuild; the CLI then becomes mandatory.
+It **never throws** — failures become a console warning and are reported by `GET /health`.
+
+`AUTO_BUILD_INDEX=false` disables auto-rebuild; the CLI then becomes mandatory. On a small production host that is the recommended setup: build the index in a one-shot job and let the server only load it.
 
 Output files (in `OUTPUT_DIR`, gitignored):
-- `graph.json` — nodes + edges, `version: 2`, with a `packages[]` header
+- `graph.json` — nodes + edges, `version: 3`, with a `packages[]` header
 - `script-symbols.json` — AngelScript function/class/include signatures with line numbers
-- `search-index.json` — `version: 2`, header carries `data_dir`, `packages[]`, `fingerprint`, then `entries[]`
+- `search-index.json` — **header only** (`version: 4`): `data_dir`, `packages[]`, `fingerprint`, `count`
+- `search-index.ndjson` — the body, one `IndexEntry` per line
+
+The split is why `readIndexMeta()` is cheap: every boot reads it before knowing anything about staleness, and it used to parse 46 MB of inline entries to look at one integer. It now reads a bounded prefix (1 MB) — a pre-v4 file fails to parse there and is reported as "no index", which is the right answer since the version check would have forced a rebuild anyway. `finish()` writes the body first and the header second, so a crash between them leaves a header whose fingerprint no longer matches the data, and the next boot rebuilds.
 
 ## Search Index (src/retrieval/localSearch.ts)
 
-One MiniSearch index over `key`, `name`, `i18nNames`, `content`, `type`, loaded from `output/search-index.json` as a process-lifetime singleton. Boosts: key 3, name 2.5, i18nNames 2.5, content 1.
+One MiniSearch index over `key`, `name`, `i18nNames`, `content`, `type`, built at boot by streaming `output/search-index.ndjson` line by line and `add()`ing each entry, held as a process-lifetime singleton. Boosts: key 3, name 2.5, i18nNames 2.5, content 1. Streaming rather than `readFile` + `JSON.parse` + `addAll` halves boot RSS (877 MB → 455 MB), because the body never exists as one string and the parsed entries are never an array.
 
 **i18n is part of the index.** The builder runs `resolveI18n()` per package against that package's own `languages/` dir — this is what fixed the old `findLanguagesDir` bug where a multi-package root resolved to the first `languages/` it found and silently dropped the rest. Only `cn`/`en` are indexed: the other eight ship as ISO-8859-1 (mojibake when read as UTF-8) and indexing all ten dilutes term frequencies.
 
@@ -207,6 +226,8 @@ export default function register(host) {
 - `i18n.ts` loads `<translation><text key="…" text="…"/>` files from a package's `languages/<lang>/` dirs, following `file=` indirections.
 
 Parsed `StructuredDocument`s feed the index builder directly — there is no intermediate `extracted-documents.json` stage any more.
+
+**Every parser entry point takes content, not a path.** `parseContent()` (`shared.ts`) dispatches on extension; `parseXmlTree()` (`xmlParser.ts`) dispatches an already-parsed tree to the per-type extractor. There are deliberately **no** `parseFile` / `parseXmlFile` / `parseCallFile`-style wrappers that read the file themselves: they existed, and because the XML dispatcher chooses a branch by root element, a `.xml` file holding `<calls>` was read and parsed *three* times per build (graph pass, search pass, then again inside the per-type entry). If you need a path-based convenience wrapper, read the file at the call site instead of reintroducing one here.
 
 ### Directory walking (`walk.ts`) — symlinks are supported
 
@@ -313,6 +334,10 @@ Svelte 5 + Vite + Tailwind 4 + daisyUI in `web/`, building into `public/` — tr
 ### Docker
 `docker compose up -d --build` — a single `app` service. `./data` mounts read-only at `/app/data`; `./output` is a writable volume so restarts skip the rebuild; `./tools.d` mounts read-only at `/app/tools.d`.
 
+**Resource ceilings are deliberate.** `mem_limit`, `cpus` and `NODE_OPTIONS=--max-old-space-size` are set (overridable via `MEM_LIMIT` / `CPUS` / `NODE_OPTIONS`) because an index build is the heaviest thing this service ever does and it shares the box. Keep the heap cap well under `mem_limit`: unbounded, V8 sizes its old space from the *host's* RAM, so on a 2 GB VPS a build climbs until it is thrashing GC and dragging the whole machine down instead of collecting.
+
+**On a small host, don't build in the serving process at all.** Run `npm run build:index:prod` as a one-shot job (a separate compose service, or a deploy step) and set `AUTO_BUILD_INDEX=false` on `app` so the server only ever loads. Startup no longer blocks on the build either way — see [Startup](#startup) — but a one-shot builder is what keeps a rebuild from competing with live requests for two cores.
+
 **Sharing a steamcmd download.** `DATA_DIR` may be a directory of symlinks into a steamcmd tree instead of a copy — `walkFiles` follows them (see [Directory walking](#directory-walking-walkts--symlinks-are-supported)). The links must resolve *inside the container*, so mount the steam tree and point the links at the container-side path:
 
 ```yaml
@@ -325,7 +350,7 @@ Workshop packages live at `steamapps/workshop/content/270150/<itemid>/<pkgname>/
 
 ## Testing
 
-- `npm run eval` — 30-case retrieval harness over `tests/eval/dataset.json`, writes a timestamped report into `tests/eval/`. **No LLM calls.** Note the dataset references some keys that no longer exist in the current `./data` snapshot, so absolute recall understates real quality; track deltas, not the absolute number. Baseline on the current snapshot: 13/30.
+- `npm run eval` — 30-case retrieval harness over `tests/eval/dataset.json`, writes a timestamped report into `tests/eval/`. **No LLM calls.** Note the dataset references some keys that no longer exist in the current `./data` snapshot, so absolute recall understates real quality; track deltas, not the absolute number. Baseline on the current snapshot: 15/30 (R@5 0.533, MRR@10 0.507).
 - `npm run eval:agent [id-filter]` — tool-loop harness over `tests/eval/agent-dataset.json`, driving the real route in-process via `app.inject()`. **Spends real LLM quota** (~1–3 min for the full 8 cases) and is non-deterministic, so assertions are "at least this" — `expectedTools` must all have been called, `expectedKeys` must appear in the answer, `stopReason` must be `completed`, and `maxSteps` bounds the loop. Run it after any change to tools, the tool loop, intent classification, or prompt structure.
   - Step budgets come from the design reference (a single-entity question is 1–3 targeted calls) and the system prompt's own "4–6 attempts settle absence" rule, **not** from observed behaviour — so a case that exceeds its budget is reporting a real inefficiency, not a broken test. `agent-references` and `agent-absence-escalation` currently exceed theirs.
   - Both report files and the eval reports are untracked build artifacts; `tests/eval/report-*.json` is **not** gitignored, so delete stray reports before committing.

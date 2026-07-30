@@ -9,9 +9,10 @@ export async function healthRoutes(app: FastifyInstance) {
     const meta = getIndexMeta() ?? status.meta;
 
     return {
-      status: status.ready ? 'ok' : 'degraded',
+      status: status.ready ? 'ok' : status.building ? 'building' : 'degraded',
       index: {
         ready: status.ready,
+        building: status.building,
         documents: meta?.count ?? 0,
         packages: meta?.packages.map((p) => p.name) ?? [],
         builtAt: meta?.built_at ?? null,
