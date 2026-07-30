@@ -9,7 +9,12 @@ import { search as localSearch, configureSearch } from '../../retrieval/localSea
 import { buildSystemPrompt, buildUserPrompt } from '../../retrieval/prompt.js';
 import { buildSearchQuery } from '../../retrieval/queryRewrite.js';
 import { buildLlmProviderOptions } from '../../llm/providerOptions.js';
-import { classifyQuery, extractExactKey, isMetaQuery, retrievalTopK } from '../../retrieval/intent.js';
+import {
+  classifyQuery,
+  extractExactKey,
+  isMetaQuery,
+  retrievalTopK,
+} from '../../retrieval/intent.js';
 import { EnumResultSchema, ComparisonResultSchema } from '../../types/schemas.js';
 import { getSummary, generateSummary, shouldGenerateSummary } from '../../memory/summarizer.js';
 import { getAgentTools as loadAgentTools } from '../../agent/toolDefs.js';
@@ -66,7 +71,9 @@ async function getAgentTools(scope?: string): Promise<Record<string, Tool> | nul
   try {
     return await loadAgentTools(scope);
   } catch (err) {
-    console.warn(`[chat] Agent tools unavailable (${(err as Error).message}), falling back to pure RAG`);
+    console.warn(
+      `[chat] Agent tools unavailable (${(err as Error).message}), falling back to pure RAG`,
+    );
     return null;
   }
 }
@@ -113,6 +120,8 @@ function summarizeToolInput(toolName: string | undefined, input: unknown): strin
       return `Lookup: ${key}`;
     case 'lookupUpgrade':
       return `Upgrade lookup: ${inputField(inp, 'query') || '?'}`;
+    case 'lookupWeaponSkill':
+      return `Skill lookup: ${inputField(inp, 'query') || '?'}`;
     default:
       return toolName;
   }
@@ -144,9 +153,12 @@ export async function chatRoutes(app: FastifyInstance) {
     const body = request.body as ChatCompletionRequest;
     const messages = body.messages ?? [];
     const msgCount = messages.length;
-    const historyRounds = msgCount > 0 ? Math.ceil(messages.filter((m) => m.role !== 'system').length / 2) : 0;
+    const historyRounds =
+      msgCount > 0 ? Math.ceil(messages.filter((m) => m.role !== 'system').length / 2) : 0;
 
-    console.log(`[chat] POST /v1/chat/completions | messages=${msgCount} | rounds=${historyRounds}`);
+    console.log(
+      `[chat] POST /v1/chat/completions | messages=${msgCount} | rounds=${historyRounds}`,
+    );
 
     const nonSystemMessages = messages.filter((m) => m.role !== 'system');
     const lastUserMessage = [...nonSystemMessages].reverse().find((m) => m.role === 'user');
@@ -159,7 +171,9 @@ export async function chatRoutes(app: FastifyInstance) {
 
     const externalSystemCount = messages.length - nonSystemMessages.length;
     if (externalSystemCount > 0) {
-      console.log(`[chat] Ignored ${externalSystemCount} external system message(s). Server-side SYSTEM_PROMPT is enforced.`);
+      console.log(
+        `[chat] Ignored ${externalSystemCount} external system message(s). Server-side SYSTEM_PROMPT is enforced.`,
+      );
     }
 
     const query = lastUserMessage.content;
@@ -174,14 +188,18 @@ export async function chatRoutes(app: FastifyInstance) {
     if (estimatedTokens > effectiveLimit) {
       console.log(`[chat] 400 - Request too large: ~${estimatedTokens} tokens > ${effectiveLimit}`);
       return reply.status(400).send({
-        error: { message: `Request too large: ~${estimatedTokens} estimated tokens exceed safe context limit (${effectiveLimit})`, type: 'invalid_request_error' },
+        error: {
+          message: `Request too large: ~${estimatedTokens} estimated tokens exceed safe context limit (${effectiveLimit})`,
+          type: 'invalid_request_error',
+        },
       });
     }
 
     // The selected package scopes the whole turn: retrieval, every tool the agent can call, and
     // the system prompt. Anything less and the tool loop happily answers from a package the user
     // did not pick — 1300+ keys exist in more than one.
-    const packageScope = typeof body.mod === 'string' && body.mod.trim() ? body.mod.trim() : undefined;
+    const packageScope =
+      typeof body.mod === 'string' && body.mod.trim() ? body.mod.trim() : undefined;
 
     const sessionId = (request.headers['x-session-id'] as string) || undefined;
     const memorySessionId = sessionId ?? 'default';
@@ -189,17 +207,24 @@ export async function chatRoutes(app: FastifyInstance) {
     // A question that is essentially one entity key needs neither query rewriting nor broad retrieval.
     const exactKey = extractExactKey(query);
 
-    const chainObs = startObservation('chat-completions', {
-      input: { query, messages: nonSystemMessages },
-      metadata: { queryCategory, exactKey },
-    }, { asType: 'chain' });
+    const chainObs = startObservation(
+      'chat-completions',
+      {
+        input: { query, messages: nonSystemMessages },
+        metadata: { queryCategory, exactKey },
+      },
+      { asType: 'chain' },
+    );
 
     if (sessionId) {
       chainObs.otelSpan.setAttribute('session.id', sessionId);
     }
     chainObs.otelSpan.setAttribute('langfuse.trace.name', 'chat-completions');
     chainObs.otelSpan.setAttribute('langfuse.trace.tags', [queryCategory]);
-    chainObs.otelSpan.setAttribute('langfuse.trace.input', JSON.stringify({ query, messages: nonSystemMessages }));
+    chainObs.otelSpan.setAttribute(
+      'langfuse.trace.input',
+      JSON.stringify({ query, messages: nonSystemMessages }),
+    );
 
     let results: SearchResult[];
     let searchPath = 'none';
@@ -211,9 +236,13 @@ export async function chatRoutes(app: FastifyInstance) {
         results = [];
       } else {
         const topK = retrievalTopK(queryCategory, exactKey !== null);
-        const searchObs = chainObs.startObservation('search-pipeline', {
-          input: { query, topK, exactKey },
-        }, { asType: 'span' });
+        const searchObs = chainObs.startObservation(
+          'search-pipeline',
+          {
+            input: { query, topK, exactKey },
+          },
+          { asType: 'span' },
+        );
 
         let enrichedQuery: string;
         if (exactKey !== null) {
@@ -234,7 +263,9 @@ export async function chatRoutes(app: FastifyInstance) {
 
           enrichedQuery = buildSearchQuery(query, historyForSearch, summary);
           if (enrichedQuery !== query) {
-            console.log(`[chat] Query enriched: "${truncatedQuery}" → "${enrichedQuery.length > 120 ? enrichedQuery.slice(0, 120) + '…' : enrichedQuery}"`);
+            console.log(
+              `[chat] Query enriched: "${truncatedQuery}" → "${enrichedQuery.length > 120 ? enrichedQuery.slice(0, 120) + '…' : enrichedQuery}"`,
+            );
           }
         }
 
@@ -266,7 +297,9 @@ export async function chatRoutes(app: FastifyInstance) {
       return;
     }
 
-    chainObs.update({ metadata: { queryCategory, searchResults: results.length, searchPath, isLowConfidence } });
+    chainObs.update({
+      metadata: { queryCategory, searchResults: results.length, searchPath, isLowConfidence },
+    });
 
     const ragUserPrompt = buildUserPrompt(query, results, {
       lowConfidence: isLowConfidence,
@@ -280,10 +313,15 @@ export async function chatRoutes(app: FastifyInstance) {
       content: m.content,
     }));
 
-    console.log(`[chat] LLM request | model=${config.llmModel} | history=${historyMessages.length}`);
+    console.log(
+      `[chat] LLM request | model=${config.llmModel} | history=${historyMessages.length}`,
+    );
 
-    const responseFormat = body.response_format?.type ?? (request.headers['x-response-format'] as string | undefined);
-    const useStructured = (queryCategory === 'enumeration' || queryCategory === 'comparison') && responseFormat === 'json_object';
+    const responseFormat =
+      body.response_format?.type ?? (request.headers['x-response-format'] as string | undefined);
+    const useStructured =
+      (queryCategory === 'enumeration' || queryCategory === 'comparison') &&
+      responseFormat === 'json_object';
 
     const llmMessages = [
       ...historyMessages.map((m) => ({
@@ -306,7 +344,8 @@ export async function chatRoutes(app: FastifyInstance) {
     const inputTokens = {
       system: estimateTokens(systemPrompt),
       context: Math.max(estimateTokens(ragUserPrompt) - queryTokens, 0),
-      messages: historyMessages.reduce((sum, m) => sum + estimateTokens(m.content), 0) + queryTokens,
+      messages:
+        historyMessages.reduce((sum, m) => sum + estimateTokens(m.content), 0) + queryTokens,
     };
 
     // Second guard: now that the retrieved context exists, check what will actually be sent. The
@@ -331,16 +370,20 @@ export async function chatRoutes(app: FastifyInstance) {
       });
     }
 
-    const genObs = chainObs.startObservation('llm-generation', {
-      input: { messages: llmMessages, system: systemPrompt },
-      model: config.llmModel,
-      modelParameters: { maxTokens },
-    }, { asType: 'generation' });
+    const genObs = chainObs.startObservation(
+      'llm-generation',
+      {
+        input: { messages: llmMessages, system: systemPrompt },
+        model: config.llmModel,
+        modelParameters: { maxTokens },
+      },
+      { asType: 'generation' },
+    );
 
     reply.raw.writeHead(200, {
       'Content-Type': 'text/plain; charset=utf-8',
       'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
+      Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
     });
 
@@ -384,10 +427,13 @@ export async function chatRoutes(app: FastifyInstance) {
         if (finishReason === 'length') {
           console.warn(`[chat] Structured output truncated at maxOutputTokens=${maxTokens}`);
         }
-        const basis = measureTurn({ ...inputTokens, toolDefs: 0, reasoning: 0, answer: estimateTokens(answerText) }, {
-          replay: [],
-          toolCallTokens: 0,
-        });
+        const basis = measureTurn(
+          { ...inputTokens, toolDefs: 0, reasoning: 0, answer: estimateTokens(answerText) },
+          {
+            replay: [],
+            toolCallTokens: 0,
+          },
+        );
         const resolved = resolveUsage(usage, usage, basis);
         const breakdown = buildBreakdown(basis, resolved);
         const finishData = JSON.stringify({
@@ -430,7 +476,8 @@ export async function chatRoutes(app: FastifyInstance) {
             ? {
                 tools,
                 stopWhen: stepCountIs(100),
-                prepareStep: ({ messages }) => shaper.prepare(messages as Record<string, unknown>[]) as never,
+                prepareStep: ({ messages }) =>
+                  shaper.prepare(messages as Record<string, unknown>[]) as never,
                 experimental_onToolCallFinish: ({ toolCall, durationMs }) => {
                   // The SDK reports fractional milliseconds; the UI only ever shows whole ones.
                   toolDurations.set(toolCall.toolCallId, Math.round(durationMs));
@@ -492,7 +539,9 @@ export async function chatRoutes(app: FastifyInstance) {
             output?: unknown;
           };
           if (process.env.DEBUG_AGENT === '1') {
-            console.log(`[agent-stream] type=${p.type} toolName=${p.toolName ?? ''} hasText=${!!(p.text ?? p.textDelta ?? p.delta)}`);
+            console.log(
+              `[agent-stream] type=${p.type} toolName=${p.toolName ?? ''} hasText=${!!(p.text ?? p.textDelta ?? p.delta)}`,
+            );
           }
           if (p.type === 'reasoning-delta' || p.type === 'reasoning') {
             const delta = p.text ?? p.textDelta ?? p.delta ?? '';
@@ -511,7 +560,9 @@ export async function chatRoutes(app: FastifyInstance) {
           } else if (p.type === 'tool-call') {
             toolCallCount++;
             const summary = summarizeToolInput(p.toolName, p.input);
-            reply.raw.write(JSON.stringify({ type: 'tool-step', toolName: p.toolName, summary }) + '\n');
+            reply.raw.write(
+              JSON.stringify({ type: 'tool-step', toolName: p.toolName, summary }) + '\n',
+            );
             (reply.raw as unknown as { flush?: () => void }).flush?.();
           } else if (p.type === 'tool-result') {
             // The runtime envelope turns thrown tools into ordinary results carrying `error`, so
@@ -624,9 +675,13 @@ export async function chatRoutes(app: FastifyInstance) {
       reply.raw.end();
       const elapsed = Date.now() - startTime;
       if (llmError) {
-        console.log(`[chat] FAILED | ${elapsed}ms | mode=${useStructured ? 'structured' : 'text'} | error=${llmError.message}`);
+        console.log(
+          `[chat] FAILED | ${elapsed}ms | mode=${useStructured ? 'structured' : 'text'} | error=${llmError.message}`,
+        );
       } else {
-        console.log(`[chat] COMPLETED | total=${elapsed}ms | mode=${useStructured ? 'structured' : 'text'}`);
+        console.log(
+          `[chat] COMPLETED | total=${elapsed}ms | mode=${useStructured ? 'structured' : 'text'}`,
+        );
       }
     }
   });
