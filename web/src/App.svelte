@@ -7,6 +7,7 @@
   import type { Message, DisplayItem, Session, TokenBreakdown } from './lib/types.js';
   import { estimateTokens, stripMarkdown } from './lib/utils.js';
   import { authHeaders, captureTokenFromUrl } from './lib/api.js';
+  import { resetLocalState } from './lib/reset.js';
   import * as sessionStore from './lib/sessionStore.js';
   import Header from './components/Header.svelte';
   import Chat from './components/Chat.svelte';
@@ -52,6 +53,7 @@
   let sessions = $state<Session[]>([]);
   let activeSessionId = $state<string | null>(null);
   let drawerOpen = $state(false);
+  let resetting = $state(false);
 
   let nextId = 0;
   function uid(): string { return `m${nextId++}`; }
@@ -66,6 +68,9 @@
   }
 
   async function saveCurrentSession() {
+    // A reset ends in a reload, and reloading fires `visibilitychange`/`beforeunload` — without this
+    // gate the in-memory session would be written straight back into the store we just wiped.
+    if (resetting) return;
     if (!activeSessionId) return;
     const plainMessages: Message[] = JSON.parse(JSON.stringify(history));
     if (plainMessages.length === 0) return;
@@ -234,6 +239,13 @@
     };
     await sessionStore.saveSession(emptySession);
     sessions = [emptySession, ...sessions];
+  }
+
+  async function handleResetAll() {
+    resetting = true;
+    drawerOpen = false;
+    await resetLocalState();
+    window.location.reload();
   }
 
   function showToast(message: string) {
@@ -572,6 +584,7 @@
     onselect={selectSession}
     onnew={newSession}
     ondelete={deleteSessionHandler}
+    onreset={handleResetAll}
     onclose={() => { drawerOpen = false; }}
   />
 
