@@ -89,5 +89,19 @@
     "expectedKeys": [],
     "maxSteps": 12,
     "notes": "Retrieval for ak47 is weak, so this exercises the escalation ladder. It must converge well inside the step limit and must not repeat an identical call."
+  },
+  {
+    "id": "agent-weapon-skill-trait",
+    "query": "HK416 MOD3 的技能特色叫什么？冷却多少秒？技能最终造成多少伤害？",
+    "category": "skill",
+    "expectedTools": [
+      "lookupWeaponSkill"
+    ],
+    "expectedKeys": [
+      "寄生榴弹",
+      "16"
+    ],
+    "notes": "The skill trait name, the 16s cooldown and the blast damage each live in a different file; only lookupWeaponSkill joins them, so a searchDocs-only answer should fail",
+    "maxSteps": 8
   }
 ]
