@@ -373,17 +373,37 @@ function extractHandlerFacts(body) {
 
 /** Facts a GFLskill case body states outright. */
 function extractEffectFacts(body) {
+  // Signature (GFLtask.as): (metagame, time, cId, fId, key, pos, trigger, time_internal, strict).
+  // `time` is the delay before the FIRST tick and `time_internal` the gap between ticks —
+  // two different numbers that are easy to collapse into one wrong "interval".
   const dot = [];
   const dotRe = /ConstantStaticProjectileEvent\s*\(([^;]*?)\)\s*;/g;
   let m;
   while ((m = dotRe.exec(body)) !== null) {
     const args = splitTopLevelArgs(m[1]);
-    dot.push({
-      interval: Number(args[1]),
+    const initialDelaySeconds = Number(args[1]);
+    const ticks = Number(args[6]);
+    const intervalSeconds = Number(args[7]);
+    const entry = {
       projectile: unquote(args[4]) || args[4],
-      ticks: Number(args[6]),
-      radius: Number(args[7]),
-    });
+      initialDelaySeconds,
+      ticks,
+      intervalSeconds,
+      strictDeadCheck: args[8] ? args[8].trim() !== 'false' : true,
+    };
+    if ([initialDelaySeconds, ticks, intervalSeconds].every(Number.isFinite)) {
+      // Fires at t=initialDelay, then every interval; the last of `ticks` fires here.
+      entry.lastTickSeconds = Number(
+        (initialDelaySeconds + (ticks - 1) * intervalSeconds).toFixed(3),
+      );
+    }
+    dot.push(entry);
+  }
+
+  const trackerSpawns = [];
+  const trackerRe = /(\w+)\s*\.insertLast\(\s*(\w*[Tt]rack\w*|\w*_?lister)\s*\(([^;]*?)\)\s*\)/g;
+  while ((m = trackerRe.exec(body)) !== null) {
+    trackerSpawns.push({ array: m[1], tracker: m[2], args: splitTopLevelArgs(m[3]) });
   }
 
   return {
@@ -392,10 +412,175 @@ function extractEffectFacts(body) {
       collect(/getCharactersNearPosition\([^)]*?,\s*([0-9]+(?:\.[0-9]+)?)f?\s*\)/g, body),
     ).map(Number),
     dot,
+    trackerSpawns,
     restoreAmounts: uniq(
       collect(/setIntAttribute\(\s*"untransform_count"\s*,\s*(\d+)\s*\)/g, body),
     ).map(Number),
   };
+}
+
+/**
+ * Tracker classes in gfl_skill_info.as: field defaults plus which fields the constructor
+ * fills from arguments, so a `UZI_tracker(cId, fid, pos, affected)` call site can be
+ * resolved back to concrete timings.
+ */
+function parseTrackerClasses(content) {
+  const classes = {};
+  const re = /class\s+(\w+)\s*\{/g;
+  let m;
+  while ((m = re.exec(content)) !== null) {
+    const name = m[1];
+    const open = re.lastIndex - 1;
+    const body = content.slice(open, blockEnd(content, open));
+
+    const defaults = {};
+    let f;
+    const fieldRe = /(?:int|float|string)\s+(m_\w+)\s*=\s*([0-9.]+)\s*;/g;
+    while ((f = fieldRe.exec(body)) !== null) defaults[f[1]] = Number(f[2]);
+
+    const ctor = new RegExp(`${name}\\s*\\(([^)]*)\\)\\s*\\{`).exec(body);
+    const fieldFromParam = {};
+    let ctorParams = [];
+    if (ctor) {
+      ctorParams = splitTopLevelArgs(ctor[1]).map((p) =>
+        p
+          .split(/[\s@]+/)
+          .filter(Boolean)
+          .pop(),
+      );
+      const ctorOpen = body.indexOf('{', ctor.index + ctor[0].length - 1);
+      const ctorBody = body.slice(ctorOpen, blockEnd(body, ctorOpen));
+      let a;
+      const assignRe = /(m_\w+)\s*=\s*(\w+)\s*;/g;
+      while ((a = assignRe.exec(ctorBody)) !== null) fieldFromParam[a[1]] = a[2];
+    }
+    classes[name] = { name, defaults, ctorParams, fieldFromParam };
+  }
+  return classes;
+}
+
+/**
+ * The re-arm loops in GFLskill.as::update(). This is where a tracker's real cadence lives
+ * — the case body only registers the tracker, so reading the case alone reports a skill
+ * that fires once when it actually fires several times at a different interval.
+ */
+function parseTrackerUpdates(content) {
+  const starts = buildLineStarts(content);
+  const arrayToClass = {};
+  let d;
+  const declRe = /array<\s*(\w+)\s*@?\s*>\s*(\w+)\s*;/g;
+  while ((d = declRe.exec(content)) !== null) arrayToClass[d[2]] = d[1];
+
+  const updateAt = content.search(/^\s*void\s+update\s*\(\s*float\s+time\s*\)\s*\{/m);
+  if (updateAt === -1) return { arrayToClass, updates: {} };
+  const updateOpen = content.indexOf('{', updateAt);
+  const updateBody = content.slice(updateOpen, blockEnd(content, updateOpen));
+
+  const updates = {};
+  const blockRe = /if\s*\(\s*(\w+)\.length\(\)\s*>\s*0\s*\)\s*\{/g;
+  let m;
+  while ((m = blockRe.exec(updateBody)) !== null) {
+    const array = m[1];
+    const open = blockRe.lastIndex - 1;
+    const end = blockEnd(updateBody, open);
+    const body = updateBody.slice(open, end);
+
+    const rearm = new RegExp(`${array}\\[a\\]\\.m_time\\s*=\\s*([^;]+);`).exec(body);
+    const removeBelow = /m_numtime\s*<\s*(-?\d+)/.exec(body);
+    const rearmRaw = rearm ? rearm[1].trim() : undefined;
+    const rearmValue = rearmRaw === undefined ? NaN : Number(rearmRaw);
+    updates[array] = {
+      array,
+      tracker: arrayToClass[array],
+      ...(Number.isFinite(rearmValue)
+        ? { intervalSeconds: rearmValue }
+        : rearmRaw !== undefined
+          ? { intervalExpr: rearmRaw }
+          : {}),
+      ...(removeBelow ? { removeWhenBelow: Number(removeBelow[1]) } : {}),
+      // Some loops build instance_key by concatenating a field (`'" + t.m_projectile + "'`),
+      // which would otherwise be captured as a garbage key. Keep only real keys; the field
+      // is resolved from the constructor binding instead.
+      projectiles: uniq(collect(/instance_key='([^']+)'/g, body)).filter((key) =>
+        /^[A-Za-z0-9_.-]+$/.test(key),
+      ),
+      // Two different targeting shapes: one grenade per locked enemy, or one random pick.
+      perLockedTarget: /m_affected\s*\[/.test(body),
+      randomTarget: /\brand\s*\(/.test(body),
+      radii: uniq(
+        collect(/getCharactersNearPosition\([^)]*?,\s*([0-9]+(?:\.[0-9]+)?)f?\s*\)/g, body),
+      ).map(Number),
+      source: {
+        startLine: lineAt(starts, updateOpen + m.index),
+        endLine: lineAt(starts, updateOpen + end),
+      },
+    };
+  }
+  return { arrayToClass, updates };
+}
+
+/** Bind a tracker registration to its class defaults and its re-arm loop. */
+function resolveTrackerFollowUp(spawn, classes, trackerUpdates, withPrefix) {
+  const cls = classes[spawn.tracker];
+  const loop = trackerUpdates.updates[spawn.array];
+  if (!cls && !loop) return null;
+
+  const followUp = { tracker: spawn.tracker, array: spawn.array };
+
+  // A field is either a constructor argument at the call site or a class default.
+  const fieldValue = (field) => {
+    const param = cls?.fieldFromParam?.[field];
+    if (param) {
+      const at = cls.ctorParams.indexOf(param);
+      const raw = at >= 0 ? spawn.args[at] : undefined;
+      const num = Number(raw);
+      if (Number.isFinite(num)) return num;
+      if (raw !== undefined) return { expr: raw };
+    }
+    return cls?.defaults?.[field];
+  };
+
+  const initial = fieldValue('m_time');
+  if (typeof initial === 'number') followUp.initialDelaySeconds = initial;
+  else if (initial) followUp.initialDelayExpr = initial.expr;
+
+  if (loop) {
+    if (loop.intervalSeconds !== undefined) followUp.intervalSeconds = loop.intervalSeconds;
+    else if (loop.intervalExpr !== undefined) {
+      // `m_time = m_time_interval` — the real number is whatever the constructor bound.
+      const field = /\bm_\w+/.exec(loop.intervalExpr);
+      const resolved = field ? fieldValue(field[0]) : undefined;
+      if (typeof resolved === 'number') followUp.intervalSeconds = resolved;
+      else followUp.intervalExpr = loop.intervalExpr;
+    }
+
+    const projectiles = [...loop.projectiles];
+    if (projectiles.length === 0) {
+      // Loop emits a field-held key; recover it from the call site.
+      for (const field of Object.keys(cls?.fieldFromParam ?? {})) {
+        const bound = fieldValue(field);
+        const literal = typeof bound === 'object' ? unquote(bound.expr) : '';
+        if (literal.endsWith('.projectile')) projectiles.push(literal);
+      }
+    }
+    if (projectiles.length > 0) followUp.projectiles = uniq(projectiles);
+    if (loop.perLockedTarget) followUp.perLockedTarget = true;
+    if (loop.randomTarget) followUp.randomTarget = true;
+    if (loop.radii.length > 0) followUp.radii = loop.radii;
+    followUp.source = {
+      file: withPrefix('scripts/trackers/GFLskill.as'),
+      startLine: loop.source.startLine,
+      endLine: loop.source.endLine,
+    };
+
+    // The loop decrements m_numtime, fires, then drops the tracker once it falls below
+    // the threshold — so the count of volleys is start - threshold + 1.
+    const numtime = fieldValue('m_numtime');
+    if (typeof numtime === 'number' && loop.removeWhenBelow !== undefined) {
+      followUp.repeats = numtime - loop.removeWhenBelow + 1;
+    }
+  }
+  return followUp;
 }
 
 /**
@@ -674,6 +859,11 @@ async function buildIndex(sourceDir, dataDir) {
   const gameSkillByKey = {};
   for (const entry of gameSkillEntries) gameSkillByKey[entry.key] = entry;
   const effectCases = gflSkill ? parseCaseBodies(gflSkill) : new Map();
+  // A case body only registers a tracker; its cadence lives in GFLskill.as::update().
+  const trackerClasses = skillInfo ? parseTrackerClasses(skillInfo) : {};
+  const trackerUpdates = gflSkill
+    ? parseTrackerUpdates(gflSkill)
+    : { arrayToClass: {}, updates: {} };
 
   // Step 5/6 — projectile and weapon XML.
   const projectiles = {};
@@ -811,6 +1001,21 @@ async function buildIndex(sourceDir, dataDir) {
             endLine: body.endLine,
           };
           effectSeeds.push(...effectFacts.projectiles);
+
+          // Delayed volleys fired from update(), not from the case body — without these
+          // the skill looks like it resolves instantly.
+          const followUps = effectFacts.trackerSpawns
+            .map((spawn) =>
+              resolveTrackerFollowUp(spawn, trackerClasses, trackerUpdates, withPrefix),
+            )
+            .filter(Boolean);
+          if (followUps.length > 0) {
+            effect.followUp = followUps;
+            for (const entry of followUps) effectSeeds.push(...(entry.projectiles ?? []));
+          }
+          for (const tick of effectFacts.dot) {
+            if (tick.projectile) effectSeeds.push(tick.projectile);
+          }
         }
       } else {
         effect.note = 'Skill key is not registered in gameSkillIndex — handled by another tracker';
@@ -1046,21 +1251,47 @@ function matchPassiveTrait(index, query) {
   return best?.entry ?? null;
 }
 
+/** Particles shared by most Chinese phrases carry no matching signal. */
+const CJK_STOPWORDS = new Set([
+  '的',
+  '了',
+  '是',
+  '在',
+  '有',
+  '和',
+  '与',
+  '个',
+  '会',
+  '被',
+  '多',
+  '少',
+]);
+
+/**
+ * Near-misses worth showing, or nothing at all. A loose bar produced the same three names
+ * for "激光剑的伤害" and "不存在的东西xyz" — they shared only "的" — which dresses noise up as
+ * a real lead and invites answering about a weapon the user never asked for. When a thing
+ * genuinely is not in the data, an empty list is the honest result.
+ */
 function suggestions(index, query) {
-  const traits = index.names.filter((entry) => entry.kind === 'cn_trait');
-  const queryChars = cjkChars(query.toLowerCase());
-  if (queryChars.size === 0) return traits.slice(0, 3).map((entry) => entry.raw);
+  const queryChars = new Set(
+    [...cjkChars(query.toLowerCase())].filter((c) => !CJK_STOPWORDS.has(c)),
+  );
+  if (queryChars.size === 0) return [];
   const scored = [];
-  for (const entry of traits) {
+  for (const entry of index.names) {
+    if (entry.kind !== 'cn_trait') continue;
     const nameChars = cjkChars(entry.raw.toLowerCase());
     let overlap = 0;
     for (const ch of queryChars) if (nameChars.has(ch)) overlap++;
-    if (overlap > 0) scored.push({ name: entry.raw, overlap });
+    if (overlap >= 2 && overlap / queryChars.size >= 0.5) scored.push({ name: entry.raw, overlap });
   }
-  return scored
-    .sort((a, b) => b.overlap - a.overlap)
-    .slice(0, 3)
-    .map((entry) => entry.name);
+  return uniq(
+    scored
+      .sort((a, b) => b.overlap - a.overlap)
+      .slice(0, 3)
+      .map((entry) => entry.name),
+  );
 }
 
 /**
@@ -1078,6 +1309,31 @@ async function readLines(index, relFile, startLine, endLine, cap) {
     .slice(startLine - 1, endLine)
     .join('\n');
   return excerpt.length > cap ? `${excerpt.slice(0, cap)}\n… (truncated)` : excerpt;
+}
+
+/**
+ * Guidance for reading the timing fields, attached to the result rather than to the tool
+ * description. A description is spent on every query in the session; this is spent only
+ * when a skill with delayed effects is actually returned — and putting it in the
+ * description measurably derailed unrelated eval cases.
+ */
+function readingNotes(skill) {
+  const notes = [];
+  const effects = skill.effects ?? [];
+  if (effects.some((effect) => effect.dot?.length)) {
+    notes.push(
+      'dot[]: initialDelaySeconds is the wait before the FIRST tick, intervalSeconds the gap ' +
+        'between ticks, lastTickSeconds when the final tick lands. Do not report the initial ' +
+        'delay as the tick interval.',
+    );
+  }
+  if (effects.some((effect) => effect.followUp?.length)) {
+    notes.push(
+      'followUp[]: delayed volleys fired from GFLskill.as::update(), not from the effect case. ' +
+        'perLockedTarget means one projectile per locked enemy per repeat.',
+    );
+  }
+  return notes;
 }
 
 /** @type {import('../types/tool-plugin.js').PluginFactory} */
@@ -1177,7 +1433,19 @@ export default function register(host) {
                 'it is a passive or display-only trait. Read the weapon file for its stats.',
             };
           }
-          return { query, found: false, didYouMean: suggestions(index, query) };
+          // State the absence rather than leaving a bare `found: false` next to a list of
+          // names, which reads as "here are some candidates" and invites answering about
+          // a weapon nobody asked for.
+          const didYouMean = suggestions(index, query);
+          return {
+            query,
+            found: false,
+            scope: host.scope,
+            reason: `No weapon skill or skill trait in the Castling data matches "${query}". This tool covers every /skill command skill and every -[trait] name in the package, so a miss here is real evidence the thing does not exist — say so instead of substituting a similar name.`,
+            ...(didYouMean.length > 0
+              ? { didYouMean, didYouMeanNote: 'Unrelated near-matches, not answers.' }
+              : {}),
+          };
         }
 
         const skill = { ...index.skills[hit.position] };
@@ -1208,7 +1476,15 @@ export default function register(host) {
           );
         }
 
-        return { query, found: true, matchedBy: hit.matchedBy, scope: host.scope, skill };
+        const notes = readingNotes(skill);
+        return {
+          query,
+          found: true,
+          matchedBy: hit.matchedBy,
+          scope: host.scope,
+          skill,
+          ...(notes.length > 0 ? { readingNotes: notes } : {}),
+        };
       },
     },
   ];
