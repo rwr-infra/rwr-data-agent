@@ -59,6 +59,13 @@ export interface PluginToolSpec {
   description: string;
   /** JSON Schema for the tool input — no zod dependency in plugin files. */
   inputSchema: Record<string, unknown>;
+  /**
+   * Optional relevance keywords (case-insensitive substring match against the user's query).
+   * When progressive tool disclosure is active (tool count above `toolDisclosureThreshold`),
+   * the first agent step only exposes this tool if one of these hit. Declaring `triggers` is
+   * an author opt-in to being hidden; tools without it are always visible.
+   */
+  triggers?: string[];
   /** May return a promise; `unknown` already covers that. */
   execute: (input: never) => unknown;
 }
@@ -70,6 +77,8 @@ export interface PluginEntry {
   name: string;
   file: string;
   description?: string;
+  /** As declared by the author (not normalized) — what /v1/tools shows should be debuggable. */
+  triggers?: string[];
   loadedAt: string;
   error?: string;
 }
@@ -122,6 +131,18 @@ function validateSpec(spec: unknown, file: string): PluginToolSpec {
   if (typeof s.inputSchema !== 'object' || s.inputSchema === null) {
     throw new Error(`${file}: tool "${s.name}" needs a JSON Schema inputSchema`);
   }
+  if (s.triggers !== undefined) {
+    if (
+      !Array.isArray(s.triggers) ||
+      s.triggers.length === 0 ||
+      !s.triggers.every((t) => typeof t === 'string' && t.trim().length > 0)
+    ) {
+      throw new Error(
+        `${file}: tool "${s.name}" needs triggers as a non-empty array of non-empty strings ` +
+          `(omit the field to keep the tool always visible)`,
+      );
+    }
+  }
   if (typeof s.execute !== 'function') {
     throw new Error(`${file}: tool "${s.name}" needs an execute function`);
   }
@@ -142,6 +163,8 @@ function toTool(spec: PluginToolSpec): Tool {
 export interface LoadedPlugins {
   tools: Record<string, Tool>;
   entries: PluginEntry[];
+  /** Tool name → normalized triggers (trimmed, lowercased), for tools that declared them. */
+  triggers: Map<string, string[]>;
 }
 
 /**
@@ -154,6 +177,7 @@ export async function loadToolPlugins(host: ToolHost, reservedNames: Iterable<st
   const dir = config.toolsDir;
   const tools: Record<string, Tool> = {};
   const entries: PluginEntry[] = [];
+  const triggers = new Map<string, string[]>();
   const reserved = new Set(reservedNames);
 
   let files: string[];
@@ -162,7 +186,7 @@ export async function loadToolPlugins(host: ToolHost, reservedNames: Iterable<st
       .filter((f) => (f.endsWith('.js') || f.endsWith('.mjs')) && !f.startsWith('_') && !f.startsWith('.'))
       .sort();
   } catch {
-    return { tools, entries }; // no plugin directory — plugins are optional
+    return { tools, entries, triggers }; // no plugin directory — plugins are optional
   }
 
   for (const file of files) {
@@ -197,7 +221,13 @@ export async function loadToolPlugins(host: ToolHost, reservedNames: Iterable<st
           continue;
         }
         tools[spec.name] = toTool(spec);
-        entries.push({ name: spec.name, file, description: spec.description, loadedAt });
+        const entry: PluginEntry = { name: spec.name, file, description: spec.description, loadedAt };
+        if (spec.triggers) {
+          entry.triggers = spec.triggers;
+          // Normalized once here so the disclosure matcher stays a plain substring check.
+          triggers.set(spec.name, spec.triggers.map((t) => t.trim().toLowerCase()));
+        }
+        entries.push(entry);
       }
     } catch (err) {
       const message = (err as Error).message;
@@ -206,5 +236,5 @@ export async function loadToolPlugins(host: ToolHost, reservedNames: Iterable<st
     }
   }
 
-  return { tools, entries };
+  return { tools, entries, triggers };
 }

@@ -15,6 +15,7 @@ import {
 } from './tools.js';
 import { createToolHost, loadToolPlugins, type PluginEntry } from './plugins.js';
 import { instrumentTools } from './toolRuntime.js';
+import type { ToolDisclosureMeta } from './toolSelection.js';
 
 let configured = false;
 
@@ -161,6 +162,13 @@ export function buildBuiltinTools(scope?: string) {
  * identity — a fresh object every request would re-measure every tool definition each time.
  */
 const registries = new Map<string, Record<string, Tool>>();
+/**
+ * Per-scope disclosure metadata, cached alongside `registries` and cleared on the same
+ * `dirty` flag so a hot-reload cannot leave it stale. Populated only when a scope's
+ * registry is actually built; `getToolDisclosureMeta` returns `undefined` for scopes
+ * nobody requested yet, which simply disables disclosure for them.
+ */
+const disclosureMeta = new Map<string, ToolDisclosureMeta>();
 let pluginEntries: PluginEntry[] = [];
 let builtinNames: string[] = [];
 let dirty = true;
@@ -201,7 +209,10 @@ function watchPluginDir(): void {
  * host — only ever see that package.
  */
 export async function getAgentTools(scope?: string): Promise<Record<string, Tool>> {
-  if (dirty) registries.clear();
+  if (dirty) {
+    registries.clear();
+    disclosureMeta.clear();
+  }
   const cacheKey = scope ?? '';
   const cached = registries.get(cacheKey);
   if (cached && !dirty) return cached;
@@ -209,12 +220,17 @@ export async function getAgentTools(scope?: string): Promise<Record<string, Tool
   const builtin = buildBuiltinTools(scope) as unknown as Record<string, Tool>;
   builtinNames = Object.keys(builtin);
 
-  const { tools: plugins, entries } = await loadToolPlugins(createToolHost(scope), builtinNames);
+  const { tools: plugins, entries, triggers } = await loadToolPlugins(createToolHost(scope), builtinNames);
   pluginEntries = entries;
   // One envelope over built-ins and plugins alike: duplicate guard, deadline, `{error, hint}` on
   // failure. Wrapped here rather than per request so the token-accounting cache keeps its key.
   const registry = instrumentTools({ ...builtin, ...plugins });
   registries.set(cacheKey, registry);
+  disclosureMeta.set(cacheKey, {
+    coreNames: builtinNames,
+    allNames: Object.keys(registry),
+    pluginTriggers: triggers,
+  });
   dirty = false;
 
   const ok = entries.filter((e) => !e.error);
@@ -237,4 +253,14 @@ export function getToolInventory(): { builtin: string[]; plugins: PluginEntry[];
     toolsDir: config.toolsDir,
     hotReload: config.toolsHotReload,
   };
+}
+
+/**
+ * Disclosure metadata for a package scope, or `undefined` when that scope's registry has not
+ * been built (or registry building failed) — the caller then leaves disclosure off, which is
+ * the safe default. Read-only; the caller is expected to have awaited `getAgentTools(scope)`
+ * for the same request first, so the entry is never stale within a turn.
+ */
+export function getToolDisclosureMeta(scope?: string): ToolDisclosureMeta | undefined {
+  return disclosureMeta.get(scope ?? '');
 }
