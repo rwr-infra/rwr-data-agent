@@ -189,6 +189,10 @@ export default function register(host) {
   return [
     {
       name: 'lookupUpgrade',
+      // Relevance keywords for progressive tool disclosure: this tool is only shown on the
+      // first agent step when one of these hits (case-insensitive substring). Declaring them
+      // is what makes the tool hideable — omit to keep it always visible.
+      triggers: ['升级', 'upgrade', 'castling', 'gfl', 'digimind', '心智', '改造'],
       description:
         'Look up Castling mod weapon upgrade items by Chinese name, English name, carry_item key, or weapon key. ' +
         'Traces the full upgrade chain: localized name → upgrade carry_item → source weapons → upgraded (MOD3) weapons. ' +

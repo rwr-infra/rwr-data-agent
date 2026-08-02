@@ -78,6 +78,14 @@ export interface PluginToolSpec {
   /** Name the model sees. `[A-Za-z_][A-Za-z0-9_]{0,63}`; may not shadow a built-in tool. */
   name: string;
   description: string;
+  /**
+   * Optional relevance keywords for progressive tool disclosure. When built-ins + plugins
+   * exceed `TOOL_DISCLOSURE_THRESHOLD`, the first agent step only shows this tool if the
+   * user's query contains one of these (case-insensitive substring; CJK works out of the
+   * box). Declaring `triggers` is an author opt-in to being hidden — omit it to keep the
+   * tool always visible.
+   */
+  triggers?: string[];
   /** JSON Schema object describing the tool input. */
   inputSchema: Record<string, unknown>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -17,8 +17,9 @@ import {
 } from '../../retrieval/intent.js';
 import { EnumResultSchema, ComparisonResultSchema } from '../../types/schemas.js';
 import { getSummary, generateSummary, shouldGenerateSummary } from '../../memory/summarizer.js';
-import { getAgentTools as loadAgentTools } from '../../agent/toolDefs.js';
+import { getAgentTools as loadAgentTools, getToolDisclosureMeta } from '../../agent/toolDefs.js';
 import { createToolTranscriptShaper } from '../../agent/toolTranscript.js';
+import { selectActiveTools } from '../../agent/toolSelection.js';
 import { isToolFailure, repairToolCall } from '../../agent/toolRuntime.js';
 import {
   buildBreakdown,
@@ -453,6 +454,11 @@ export async function chatRoutes(app: FastifyInstance) {
       } else {
         const tools = await getAgentTools(packageScope);
         const toolDefTokens = measureToolDefTokens(tools);
+        // Progressive tool disclosure: past the threshold, the first step exposes only the
+        // built-ins plus trigger-matched plugins (`prepareStep.activeTools` narrows what the
+        // model sees, never what it can execute). Undefined keeps full disclosure — the
+        // no-op path when the registry fits or disclosure is disabled.
+        const disclosureMeta = getToolDisclosureMeta(packageScope);
         // Tool results are replayed in full; the shaper only sheds them if a step's prompt would
         // otherwise overflow the window. The system prompt, tool definitions and the output
         // reservation ride alongside `messages`, so they come off the budget first.
@@ -476,8 +482,33 @@ export async function chatRoutes(app: FastifyInstance) {
             ? {
                 tools,
                 stopWhen: stepCountIs(100),
-                prepareStep: ({ messages }) =>
-                  shaper.prepare(messages as Record<string, unknown>[]) as never,
+                prepareStep: ({
+                  messages,
+                  stepNumber,
+                }: {
+                  messages: Record<string, unknown>[];
+                  stepNumber: number;
+                }) => {
+                  // The annotation above is the shaper's own message type, so no cast is needed;
+                  // it is also contravariantly compatible with the SDK's `ModelMessage[]` (every
+                  // ModelMessage is a Record<string, unknown>).
+                  const shaped = shaper.prepare(messages);
+                  // `stepNumber` is 0-based: the first LLM call is 0, later steps see the full
+                  // registry again so a mid-loop tool is never locked out.
+                  const active = selectActiveTools(
+                    disclosureMeta,
+                    query,
+                    stepNumber,
+                    config.toolDisclosureThreshold,
+                  );
+                  if (active && process.env.DEBUG_DISCLOSURE === '1') {
+                    console.log(
+                      `[disclosure] step=${stepNumber} active=${active.length}/${disclosureMeta?.allNames.length} tools exposed`,
+                    );
+                  }
+                  if (active) return { ...shaped, activeTools: active } as never;
+                  return shaped as never;
+                },
                 experimental_onToolCallFinish: ({ toolCall, durationMs }) => {
                   // The SDK reports fractional milliseconds; the UI only ever shows whole ones.
                   toolDurations.set(toolCall.toolCallId, Math.round(durationMs));

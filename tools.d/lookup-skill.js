@@ -1374,6 +1374,18 @@ export default function register(host) {
   return [
     {
       name: 'lookupWeaponSkill',
+      // Relevance keywords for progressive tool disclosure — see lookup-upgrade.js.
+      triggers: [
+        '技能',
+        'skill',
+        'trait',
+        '特色',
+        'castling',
+        'gfl',
+        '技能特色',
+        '冷却',
+        'cooldown',
+      ],
       description:
         'Look up Castling mod weapon skill traits (技能特色) by Chinese trait name, Chinese or English ' +
         'weapon name, weapon key, script skill key, projectile key, or handler function name. ' +

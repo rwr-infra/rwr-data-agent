@@ -217,6 +217,15 @@ export default function register(host) {
 - **Hot reload** (`TOOLS_HOT_RELOAD`, defaults on outside production): `fs.watch` + 300ms debounce sets a dirty flag; the reload itself happens when the next request asks for tools, so an in-flight stream is never swapped. It works via `import(url + '?v=<mtime>')` — the ESM module cache cannot be purged, so each reload leaks the previous module. That is why it defaults off in production.
 - **`GET /v1/tools`** reports `{ builtin, plugins[], toolsDir, hotReload }` with per-file errors. Hot reload without this is undebuggable.
 
+### Progressive tool disclosure (`src/agent/toolSelection.ts`)
+
+When built-ins + plugins exceed `TOOL_DISCLOSURE_THRESHOLD` (default `12`, `0` = disabled), the agent loop's **first step** narrows which tool schemas the model sees: `prepareStep` returns `activeTools` = the built-ins always, plus any plugin whose `triggers` matched the query. Later steps always get full disclosure, and the full registry stays the execution set throughout — `activeTools` only filters schemas, so `repairToolCall` aliases and tool execution are untouched. Below the threshold it is a byte-for-byte no-op (`undefined` → SDK uses every tool).
+
+- **`triggers?: string[]`** is an optional `PluginToolSpec` field (`src/agent/plugins.ts`), matched case-insensitively as a substring of the user's query (CJK works because it is plain string inclusion). Declaring it is an **author opt-in to being hidden**; plugins without it are always visible. `lookup-upgrade.js` is the annotated example.
+- Metadata (`coreNames` / `allNames` / `pluginTriggers`) is cached per scope in `toolDefs.ts` on the same dirty/`registries` lifecycle, populated by `getAgentTools()`, read via `getToolDisclosureMeta(scope)`.
+- Token budgeting stays conservative: `measureToolDefTokens` still counts the **full** registry, so `breakdown.toolDefs` overstates the first step rather than understating any step.
+- Smoke-test with `TOOL_DISCLOSURE_THRESHOLD=2` + `DEBUG_DISCLOSURE=1`: the first step logs `active=N/all=M` (N < M) and later steps log nothing.
+
 ⚠️ **Trust model.** Plugins are `import()`ed into the server process and run with its full privileges — filesystem, network, `process.env`. This is fine for files an operator placed themselves. It is **not** a sandbox: never wire plugin loading to untrusted uploads. That would require `worker_threads` isolation, which this loader deliberately does not implement.
 
 ## Parsers (src/ingestion/)
@@ -316,6 +325,7 @@ Svelte 5 + Vite + Tailwind 4 + daisyUI in `web/`, building into `public/` — tr
 | `AUTO_BUILD_INDEX` | `true` | |
 | `TOOLS_DIR` | `./tools.d` | Runtime tool plugins; skipped if absent |
 | `TOOLS_HOT_RELOAD` | on outside prod | Watch `TOOLS_DIR` and reload on the next request |
+| `TOOL_DISCLOSURE_THRESHOLD` | `12` | Progressive tool disclosure gate: above this tool count the first step exposes built-ins + trigger-matched plugins only; `0` disables |
 | `PORT` | `3000` | |
 | `MAX_CONTEXT_TOKENS` | `500000` | Also reported to the UI on `finish`, so the usage bar follows it |
 | `LLM_MAX_OUTPUT_TOKENS` | `32768` | Reasoning + answer share this budget |

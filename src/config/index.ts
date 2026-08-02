@@ -51,6 +51,14 @@ export const config = {
     process.env.TOOLS_HOT_RELOAD !== undefined
       ? process.env.TOOLS_HOT_RELOAD === 'true'
       : process.env.NODE_ENV !== 'production',
+  /**
+   * Gate for progressive tool disclosure. When built-ins + plugins exceed this many tools,
+   * the agent loop's FIRST step only exposes the built-ins plus any plugin whose `triggers`
+   * matched the query; later steps always see everything. `0` disables disclosure entirely.
+   * Default 12 — a no-op at the current tool count, so it only kicks in once `tools.d/`
+   * grows past it.
+   */
+  toolDisclosureThreshold: parseInt(process.env.TOOL_DISCLOSURE_THRESHOLD ?? '12', 10),
 
   // ── Server ────────────────────────────────────────────────────────────────
   port: parseInt(process.env.PORT ?? '3000', 10),
