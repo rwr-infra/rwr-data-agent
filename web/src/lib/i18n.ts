@@ -70,6 +70,17 @@ export interface Translations {
   resetHint: string;
   resetConfirm: string;
   resetConfirmBtn: string;
+  maxMode: string;
+  maxModeHint: string;
+  runningCandidates: (n: number) => string;
+  synthesizing: string;
+  candidateN: (n: number) => string;
+  candidatesTitle: string;
+  disagreement: string;
+  fallbackNote: string;
+  modelLabel: string;
+  modelSwitchHint: string;
+  aiDisclaimer: string;
 }
 
 const i18n: Record<Lang, Translations> = {
@@ -135,6 +146,17 @@ const i18n: Record<Lang, Translations> = {
     resetHint: '清空浏览器本地存储，修复历史会话打不开的问题',
     resetConfirm: '清空全部本地数据（会话记录、数据包选择、语言与主题偏好）并刷新页面？不可撤销。API Token 会保留。',
     resetConfirmBtn: '确认重置',
+    maxMode: 'Max 模式',
+    maxModeHint: '并行运行 N 路候选答案，再综合归纳出一份最终答案（更全面，更耗时）',
+    runningCandidates: (n) => `正在并行运行 ${n} 路候选答案…`,
+    synthesizing: '正在归纳候选答案…',
+    candidateN: (n) => `候选 ${n}`,
+    candidatesTitle: 'N 路候选原文',
+    disagreement: '候选答案之间可能存在分歧，以归纳结果为准。',
+    fallbackNote: '⚠ 归纳失败，已回退到最佳单路候选答案。',
+    modelLabel: '模型',
+    modelSwitchHint: '切换对话使用的模型',
+    aiDisclaimer: 'AI 生成内容，仅供参考，可能会犯错，请仔细甄别',
   },
   en: {
     htmlLang: 'en',
@@ -196,6 +218,17 @@ const i18n: Record<Lang, Translations> = {
     resetHint: 'Clear browser local storage to fix sessions that will not open',
     resetConfirm: 'Clear all local data (sessions, package choice, language & theme) and reload? This cannot be undone. The API token is kept.',
     resetConfirmBtn: 'Confirm reset',
+    maxMode: 'Max mode',
+    maxModeHint: 'Run N candidate answers in parallel, then synthesize one final answer (more thorough, slower)',
+    runningCandidates: (n) => `Running ${n} candidates in parallel…`,
+    synthesizing: 'Synthesizing candidate answers…',
+    candidateN: (n) => `Candidate ${n}`,
+    candidatesTitle: 'N candidate drafts',
+    disagreement: 'Candidates may disagree; the synthesis is authoritative.',
+    fallbackNote: '⚠ Synthesis failed — fell back to the best single candidate.',
+    modelLabel: 'Model',
+    modelSwitchHint: 'Switch the model used for this conversation',
+    aiDisclaimer: 'AI-generated content — may be wrong. Verify important details.',
   },
 };
 

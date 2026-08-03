@@ -35,6 +35,8 @@ export interface AgentEvalCase {
   query: string;
   category: string;
   notes: string;
+  /** 'max' drives the request through the best-of-N path (N candidates + judge). */
+  mode?: 'max';
   /** Tools that must appear among the calls. Empty means "no requirement". */
   expectedTools?: string[];
   /** Entity keys the answer text must mention. */
@@ -59,7 +61,15 @@ interface ToolStep {
 type StreamEvent =
   | { type: 'text-delta' | 'reasoning-delta'; textDelta?: string }
   | ({ type: 'tool-step' } & ToolStep)
-  | { type: 'finish'; stopReason?: string; usage?: { promptTokens?: number; contextTokens?: number; breakdown?: { steps?: number } } }
+  | {
+      type: 'finish';
+      stopReason?: string;
+      usage?: {
+        promptTokens?: number;
+        contextTokens?: number;
+        breakdown?: { steps?: number; candidates?: number; perCandidate?: unknown[] };
+      };
+    }
   | { type: 'error'; error?: string }
   | { type: string };
 
@@ -75,6 +85,9 @@ interface TurnObservation {
   contextTokens: number;
   latencyMs: number;
   streamError: string | null;
+  /** Best-of-N turns only: candidate count from finish.usage.breakdown. */
+  breakdownCandidates?: number;
+  perCandidateCount?: number;
 }
 
 const NOT_FOUND_MARKERS =
@@ -85,13 +98,19 @@ async function runTurn(
   app: Awaited<ReturnType<typeof buildApp>>,
   query: string,
   id: string,
+  mode?: 'max',
 ): Promise<TurnObservation> {
   const startedAt = Date.now();
   const response = await app.inject({
     method: 'POST',
     url: '/v1/chat/completions',
     headers: { 'content-type': 'application/json', 'x-session-id': `eval-${id}` },
-    payload: { model: 'rwr-agent', stream: true, messages: [{ role: 'user', content: query }] },
+    payload: {
+      model: 'rwr-agent',
+      stream: true,
+      messages: [{ role: 'user', content: query }],
+      ...(mode ? { mode } : {}),
+    },
   });
 
   const observation: TurnObservation = {
@@ -144,6 +163,8 @@ async function runTurn(
         observation.steps = event.usage?.breakdown?.steps ?? 0;
         observation.promptTokens = event.usage?.promptTokens ?? 0;
         observation.contextTokens = event.usage?.contextTokens ?? 0;
+        observation.breakdownCandidates = event.usage?.breakdown?.candidates;
+        observation.perCandidateCount = event.usage?.breakdown?.perCandidate?.length;
         break;
       }
       case 'error':
@@ -163,7 +184,8 @@ function assess(evalCase: AgentEvalCase, obs: TurnObservation): string[] {
   if (obs.stopReason !== 'completed') failures.push(`stopReason=${obs.stopReason}`);
 
   for (const tool of evalCase.expectedTools ?? []) {
-    if (!called.has(tool)) failures.push(`never called ${tool} (called: ${[...called].join(', ') || 'none'})`);
+    if (!called.has(tool))
+      failures.push(`never called ${tool} (called: ${[...called].join(', ') || 'none'})`);
   }
   for (const key of evalCase.expectedKeys ?? []) {
     if (!obs.answer.includes(key)) failures.push(`answer omits the key ${key}`);
@@ -177,6 +199,16 @@ function assess(evalCase: AgentEvalCase, obs: TurnObservation): string[] {
   if (evalCase.maxSteps && obs.steps > evalCase.maxSteps) {
     failures.push(`took ${obs.steps} steps, budget was ${evalCase.maxSteps}`);
   }
+  // Best-of-N turns must report their candidate fan-out on `finish`, or the client has no idea it
+  // was a max-mode run.
+  if (evalCase.mode === 'max') {
+    if (!obs.breakdownCandidates || obs.breakdownCandidates < 1) {
+      failures.push('finish.usage.breakdown.candidates is missing or zero');
+    }
+    if (!obs.perCandidateCount || obs.perCandidateCount < 1) {
+      failures.push('finish.usage.breakdown.perCandidate is missing or empty');
+    }
+  }
   // Repetition is always a defect: the guard already refused the call, so a rejection means the model
   // burned a step. One is a stumble worth reporting, and the escalation should stop it there.
   if (obs.duplicateRejections > 1) {
@@ -187,7 +219,12 @@ function assess(evalCase: AgentEvalCase, obs: TurnObservation): string[] {
 
 async function main(): Promise<void> {
   if (!config.llmApiKey) {
-    console.error(c('\nLLM_API_KEY is not set — this eval drives the real model and cannot run without it.\n', 'red'));
+    console.error(
+      c(
+        '\nLLM_API_KEY is not set — this eval drives the real model and cannot run without it.\n',
+        'red',
+      ),
+    );
     process.exit(1);
   }
 
@@ -211,20 +248,32 @@ async function main(): Promise<void> {
   try {
     for (const [i, evalCase] of cases.entries()) {
       process.stdout.write(`  [${i + 1}/${cases.length}] ${evalCase.id.padEnd(28)} `);
-      const obs = await runTurn(app, evalCase.query, evalCase.id);
+      const obs = await runTurn(app, evalCase.query, evalCase.id, evalCase.mode);
       const failures = assess(evalCase, obs);
       const ok = failures.length === 0;
       if (ok) passed++;
 
-      const tools = obs.toolCalls.map((t) => `${t.toolName}${t.ok === false ? '✕' : ''}`).join(' → ') || 'none';
+      const tools =
+        obs.toolCalls.map((t) => `${t.toolName}${t.ok === false ? '✕' : ''}`).join(' → ') || 'none';
       console.log(
         `${ok ? c('PASS', 'green') : c('FAIL', 'red')}  ` +
-          c(`${obs.steps} steps · ${obs.toolCalls.length} calls · ${(obs.latencyMs / 1000).toFixed(1)}s · ${obs.promptTokens} in`, 'dim'),
+          c(
+            `${obs.steps} steps · ${obs.toolCalls.length} calls · ${(obs.latencyMs / 1000).toFixed(1)}s · ${obs.promptTokens} in`,
+            'dim',
+          ),
       );
       console.log(c(`        tools: ${tools}`, 'dim'));
       for (const f of failures) console.log(`        ${c('✕', 'red')} ${f}`);
       rows.push(
-        [evalCase.id, ok ? 'PASS' : 'FAIL', obs.steps, obs.toolCalls.length, obs.promptTokens, obs.contextTokens, failures.join('; ')].join('\t'),
+        [
+          evalCase.id,
+          ok ? 'PASS' : 'FAIL',
+          obs.steps,
+          obs.toolCalls.length,
+          obs.promptTokens,
+          obs.contextTokens,
+          failures.join('; '),
+        ].join('\t'),
       );
     }
   } finally {

@@ -62,6 +62,18 @@
     "maxSteps": 8
   },
   {
+    "id": "agent-references-max",
+    "query": "有哪些武器引用了 bullet.projectile？",
+    "category": "references",
+    "mode": "max",
+    "expectedTools": [
+      "findReferences"
+    ],
+    "expectedKeys": [],
+    "maxSteps": 25,
+    "notes": "Best-of-N run of the reverse-lookup question: N parallel candidates + a judge. breakdown.steps sums every candidate loop plus the judge, so the budget is the per-candidate cap times N plus one. Must report breakdown.candidates and perCandidate on finish."
+  },
+  {
     "id": "agent-script-symbols",
     "query": "GFL_Castling 里的 AngelScript 脚本定义了哪些函数？",
     "category": "script",

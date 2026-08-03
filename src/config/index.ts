@@ -16,7 +16,8 @@ const outputDir = path.resolve(process.env.OUTPUT_DIR ?? './output');
 const indexConcurrency = (() => {
   const raw = parseInt(process.env.INDEX_CONCURRENCY ?? '', 10);
   if (Number.isFinite(raw) && raw > 0) return raw;
-  const cores = typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length;
+  const cores =
+    typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length;
   return Math.max(2, Math.min(4, cores || 2));
 })();
 
@@ -26,12 +27,46 @@ export const config = {
   llmApiKey: process.env.LLM_API_KEY ?? process.env.SILICONFLOW_API_KEY ?? '',
   llmBaseUrl: process.env.LLM_BASE_URL ?? 'https://api.siliconflow.cn/v1',
   llmModel: process.env.LLM_MODEL ?? 'deepseek-v4-flash',
+  /**
+   * Models offered by GET /v1/models and accepted in `body.model`. Comma-separated; defaults to
+   * the single configured model. Requests naming anything outside this list fall back to
+   * `llmModel` — the client may switch within the operator's list, never beyond it.
+   */
+  llmModels: (() => {
+    const raw = process.env.LLM_MODELS;
+    if (raw) {
+      const parsed = raw
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (parsed.length > 0) return parsed;
+    }
+    return [process.env.LLM_MODEL ?? 'deepseek-v4-flash'];
+  })(),
+  /**
+   * Display names for the model switcher, as `id=Label` pairs (comma-separated). The UI shows
+   * these instead of the raw model ids — a mapping table in the Gemini Flash/Pro style — while
+   * `body.model` keeps carrying the real id. Absent labels fall back to the id itself.
+   */
+  llmModelLabels: (() => {
+    const raw = process.env.LLM_MODEL_LABELS;
+    const out: Record<string, string> = {};
+    if (raw) {
+      for (const pair of raw.split(',')) {
+        const eq = pair.indexOf('=');
+        if (eq > 0) out[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+      }
+    }
+    return out;
+  })(),
 
   // ── Local data & index ────────────────────────────────────────────────────
   /** Data root — either a single RWR package or a directory of packages. */
   dataDir,
   outputDir,
-  graphPath: process.env.GRAPH_PATH ? path.resolve(process.env.GRAPH_PATH) : path.join(outputDir, 'graph.json'),
+  graphPath: process.env.GRAPH_PATH
+    ? path.resolve(process.env.GRAPH_PATH)
+    : path.join(outputDir, 'graph.json'),
   searchIndexPath: process.env.SEARCH_INDEX_PATH
     ? path.resolve(process.env.SEARCH_INDEX_PATH)
     : path.join(outputDir, 'search-index.json'),
@@ -113,6 +148,47 @@ export const config = {
   // ── Session memory ────────────────────────────────────────────────────────
   summaryIntervalTurns: parseInt(process.env.SUMMARY_INTERVAL_TURNS ?? '3', 10),
   summaryModel: process.env.SUMMARY_MODEL ?? process.env.LLM_MODEL ?? 'deepseek-v4-flash',
+
+  // ── Best-of-N synthesis ("max mode") ──────────────────────────────────────
+  /**
+   * Master switch for best-of-N. When on, a request with `mode: 'max'` runs N parallel
+   * candidate agent loops and one synthesis ("judge") call that merges them into the
+   * final answer. The normal path is untouched either way.
+   */
+  bestOfNEnabled: process.env.BEST_OF_N_ENABLED !== 'false',
+  /** Number of parallel candidate drafts. Requests may override it via `body.candidates`. */
+  bestOfN: parseInt(process.env.BEST_OF_N ?? '3', 10),
+  /**
+   * Per-candidate agent step cap. The normal loop's `stepCountIs(100)` is a runaway backstop,
+   * not a budget — a single question has measured 2.5M input tokens — and best-of-N multiplies
+   * that by N, so each candidate gets a deliberately tight cap.
+   */
+  bestOfNMaxSteps: parseInt(process.env.BEST_OF_N_MAX_STEPS ?? '6', 10),
+  /**
+   * Temperatures applied to the candidates, cycled when fewer entries than candidates. Default
+   * `[0.3, 0.6, 0.9]`; the differentiation mostly comes from the tool paths anyway — reasoning
+   * models respond weakly to temperature, so the sequence is a spread, not a guarantee.
+   */
+  bestOfNTemperatures: (() => {
+    const raw = process.env.BEST_OF_N_TEMPERATURES;
+    if (raw) {
+      const parsed = raw
+        .split(',')
+        .map((s) => parseFloat(s.trim()))
+        .filter((n) => Number.isFinite(n) && n >= 0 && n <= 2);
+      if (parsed.length > 0) return parsed;
+    }
+    return [0.3, 0.6, 0.9];
+  })(),
+  /** Seed of the first candidate; each candidate adds its own index, so the runs stay distinct. */
+  bestOfNSeedBase: process.env.BEST_OF_N_SEED_BASE
+    ? parseInt(process.env.BEST_OF_N_SEED_BASE, 10)
+    : 1,
+  /** Model for the synthesis ("judge") call — defaults to the main model, can be a stronger one. */
+  judgeModel: process.env.JUDGE_MODEL ?? process.env.LLM_MODEL ?? 'deepseek-v4-flash',
+  /** True when JUDGE_MODEL was explicitly set — then the judge stays pinned even when the client
+   *  switches the main model; otherwise the judge follows the turn's selected model. */
+  judgeModelExplicit: !!process.env.JUDGE_MODEL,
 
   // ── Observability ─────────────────────────────────────────────────────────
   langfuseEnabled: process.env.LANGFUSE_ENABLED === 'true',
