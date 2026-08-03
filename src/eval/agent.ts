@@ -61,6 +61,9 @@ interface ToolStep {
 type StreamEvent =
   | { type: 'text-delta' | 'reasoning-delta'; textDelta?: string }
   | ({ type: 'tool-step' } & ToolStep)
+  // Best-of-N candidate tool activity uses the same shape as `tool-step` plus a candidate index;
+  // counting it here is what makes `expectedTools` enforceable on max-mode cases.
+  | ({ type: 'candidate-step' } & ToolStep)
   | {
       type: 'finish';
       stopReason?: string;
@@ -148,7 +151,8 @@ async function runTurn(
       case 'reasoning-delta':
         observation.reasoning += 'textDelta' in event ? (event.textDelta ?? '') : '';
         break;
-      case 'tool-step': {
+      case 'tool-step':
+      case 'candidate-step': {
         const step = event as ToolStep;
         // Only the closing line carries the outcome; the opening one would double-count.
         if (!step.done) break;

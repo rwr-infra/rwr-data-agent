@@ -21,6 +21,14 @@ const indexConcurrency = (() => {
   return Math.max(2, Math.min(4, cores || 2));
 })();
 
+/** Parse a positive integer from an env var, falling back to `fallback` on missing/garbage. The
+ *  plain `parseInt(env ?? 'N')` idiom returns NaN for non-numeric input, which silently breaks
+ *  loop bounds downstream (e.g. `BEST_OF_N='abc'` → NaN candidates → empty best-of-N turn). */
+function positiveIntEnv(name: string, fallback: number): number {
+  const raw = parseInt(process.env[name] ?? '', 10);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
+}
+
 export const config = {
   // ── LLM (the only required external service) ──────────────────────────────
   // SILICONFLOW_* is still honoured as a fallback so pre-existing .env files keep working.
@@ -157,13 +165,13 @@ export const config = {
    */
   bestOfNEnabled: process.env.BEST_OF_N_ENABLED !== 'false',
   /** Number of parallel candidate drafts. Requests may override it via `body.candidates`. */
-  bestOfN: parseInt(process.env.BEST_OF_N ?? '3', 10),
+  bestOfN: positiveIntEnv('BEST_OF_N', 3),
   /**
    * Per-candidate agent step cap. The normal loop's `stepCountIs(100)` is a runaway backstop,
    * not a budget — a single question has measured 2.5M input tokens — and best-of-N multiplies
    * that by N, so each candidate gets a deliberately tight cap.
    */
-  bestOfNMaxSteps: parseInt(process.env.BEST_OF_N_MAX_STEPS ?? '6', 10),
+  bestOfNMaxSteps: positiveIntEnv('BEST_OF_N_MAX_STEPS', 6),
   /**
    * Temperatures applied to the candidates, cycled when fewer entries than candidates. Default
    * `[0.3, 0.6, 0.9]`; the differentiation mostly comes from the tool paths anyway — reasoning
@@ -181,9 +189,7 @@ export const config = {
     return [0.3, 0.6, 0.9];
   })(),
   /** Seed of the first candidate; each candidate adds its own index, so the runs stay distinct. */
-  bestOfNSeedBase: process.env.BEST_OF_N_SEED_BASE
-    ? parseInt(process.env.BEST_OF_N_SEED_BASE, 10)
-    : 1,
+  bestOfNSeedBase: positiveIntEnv('BEST_OF_N_SEED_BASE', 1),
   /** Model for the synthesis ("judge") call — defaults to the main model, can be a stronger one. */
   judgeModel: process.env.JUDGE_MODEL ?? process.env.LLM_MODEL ?? 'deepseek-v4-flash',
   /** True when JUDGE_MODEL was explicitly set — then the judge stays pinned even when the client

@@ -317,7 +317,11 @@ export function aggregateBestOfN(
     sum(resolvedCandidates.map((r) => r.promptTokens)) + (resolvedJudge?.promptTokens ?? 0);
   const completionTokens =
     sum(resolvedCandidates.map((r) => r.completionTokens)) + (resolvedJudge?.completionTokens ?? 0);
-  const answerTokens = judge ? judge.basis.out.answer : estimateTokens(fallbackAnswer);
+  // A judge can succeed but produce no text — the turn then falls back to a draft, and that draft
+  // (not the empty judge answer) is what enters the conversation, so measure it.
+  const answerTokens = judge?.basis.out.answer
+    ? judge.basis.out.answer
+    : estimateTokens(fallbackAnswer);
   const reasoningTokens = [
     ...resolvedCandidates.map((r) => r.reasoningTokens),
     resolvedJudge?.reasoningTokens,

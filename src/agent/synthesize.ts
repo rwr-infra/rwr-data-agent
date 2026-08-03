@@ -478,6 +478,30 @@ async function runJudge(
   } catch (err) {
     console.warn(`[best-of-n] judge failed: ${(err as Error).message}`);
     obs?.update({ level: 'ERROR', statusMessage: 'Judge failed' });
+    // If text already streamed to the client, keep it as the answer rather than discarding it —
+    // otherwise runBestOfN would treat this as a judge failure and emit a fallback draft on top of
+    // the partial output the client already received (duplicated / garbled message).
+    if (answerText.length > 0) {
+      const basis = measureTurn(
+        {
+          system: estimateTokens(options.systemPrompt),
+          toolDefs: 0,
+          context: estimateTokens(prompt),
+          messages: 0,
+          reasoning: estimateTokens(reasoningText),
+          answer: estimateTokens(answerText),
+        },
+        { replay: [], toolCallTokens: 0 },
+      );
+      return {
+        answer: answerText,
+        reasoning: reasoningText,
+        basis,
+        totalUsage: undefined,
+        lastStepUsage: undefined,
+        finishReason: 'error',
+      };
+    }
     return undefined;
   } finally {
     obs?.end();
@@ -488,11 +512,13 @@ async function runJudge(
 // Orchestration
 // ---------------------------------------------------------------------------
 
-/** "Best" draft = the one with the most steps whose finishReason is not an error. When every
- *  candidate errored, fall back to the longest partial run rather than answering nothing. */
+/** "Best" draft = prefer one that actually produced text, then the most steps whose finishReason
+ *  is not an error. A longer run that ended with no answer is useless, so a text-bearing draft
+ *  always wins over a textless one. When none have text, fall back to the longest partial run. */
 function bestCandidate(perCandidate: BestOfNCandidateResult[]): BestOfNCandidateResult | undefined {
-  const nonError = perCandidate.filter((c) => c.finishReason !== 'error');
-  const pool = nonError.length > 0 ? nonError : perCandidate;
+  const withText = perCandidate.filter((c) => c.answer.trim().length > 0);
+  const nonError = withText.filter((c) => c.finishReason !== 'error');
+  const pool = nonError.length > 0 ? nonError : withText.length > 0 ? withText : perCandidate;
   if (pool.length === 0) return undefined;
   return [...pool].sort((a, b) => b.steps - a.steps)[0];
 }

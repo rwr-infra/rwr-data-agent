@@ -278,8 +278,14 @@ export async function chatRoutes(app: FastifyInstance) {
     // retrieved context, where N drafts buy nothing. `body.candidates` overrides the configured N
     // (clamped; the feature exists to bound cost, not to multiply it unboundedly).
     const maxMode = body.mode === 'max' && config.bestOfNEnabled && !useStructured;
+    // Coerce the candidate count to a finite integer before clamping: a non-numeric
+    // `body.candidates` (or a garbage BEST_OF_N, now guarded in config) must not become NaN —
+    // `Array.from({ length: NaN })` runs zero candidates and silently answers nothing.
+    const requestedCandidates = Math.trunc(Number(body.candidates ?? config.bestOfN));
     const candidateCount = maxMode
-      ? Math.max(1, Math.min(body.candidates ?? config.bestOfN, 8))
+      ? Number.isFinite(requestedCandidates)
+        ? Math.max(1, Math.min(requestedCandidates, 8))
+        : config.bestOfN
       : 0;
 
     const llmMessages = [
