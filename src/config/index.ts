@@ -21,19 +21,25 @@ const indexConcurrency = (() => {
   return Math.max(2, Math.min(4, cores || 2));
 })();
 
-/** Parse a positive integer from an env var, falling back to `fallback` on missing/garbage. The
- *  plain `parseInt(env ?? 'N')` idiom returns NaN for non-numeric input, which silently breaks
- *  loop bounds downstream (e.g. `BEST_OF_N='abc'` → NaN candidates → empty best-of-N turn). */
+/** Parse an integer env var, falling back to `fallback` on missing/garbage. `parseInt` is the wrong
+ *  tool twice over: it returns NaN for non-numeric input, which silently breaks loop bounds
+ *  downstream (`BEST_OF_N='abc'` → NaN candidates → empty best-of-N turn), and it happily reads
+ *  `'3junk'` as `3` — a typo then applies a value nobody configured. `Number` rejects both. */
+function intEnv(name: string, fallback: number, min: number): number {
+  const raw = process.env[name];
+  if (!raw?.trim()) return fallback;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed >= min ? parsed : fallback;
+}
+
 function positiveIntEnv(name: string, fallback: number): number {
-  const raw = parseInt(process.env[name] ?? '', 10);
-  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
+  return intEnv(name, fallback, 1);
 }
 
 /** Same as `positiveIntEnv`, but `0` is a meaningful value (used as "no limit") rather than
  *  garbage that falls back to the default. Negative and non-numeric input still fall back. */
 function nonNegativeIntEnv(name: string, fallback: number): number {
-  const raw = parseInt(process.env[name] ?? '', 10);
-  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : fallback;
+  return intEnv(name, fallback, 0);
 }
 
 export const config = {

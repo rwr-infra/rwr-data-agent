@@ -401,6 +401,10 @@ async function runJudge(
     options.query,
     options.retrievedContext,
     drafts.map((d) => ({ i: d.i, answer: d.answer })),
+    // Same budget the candidates' transcript shaper works against: window × ratio, minus the system
+    // prompt, tool definitions and the output reservation. The judge carries no tools, so counting
+    // their definitions here only makes it more conservative.
+    options.shaperBudgetTokens,
   );
   const obs = options.startObservation?.('best-of-n-judge', { input: { prompt } });
   let reasoningText = '';

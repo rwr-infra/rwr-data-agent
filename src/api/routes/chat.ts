@@ -304,11 +304,15 @@ export async function chatRoutes(app: FastifyInstance) {
     // Coerce the candidate count to a finite integer before clamping: a non-numeric
     // `body.candidates` (or a garbage BEST_OF_N, now guarded in config) must not become NaN —
     // `Array.from({ length: NaN })` runs zero candidates and silently answers nothing.
-    const requestedCandidates = Math.trunc(Number(body.candidates ?? config.bestOfN));
+    // The configured default goes through the same 1..8 clamp as a request-supplied count: the cap
+    // exists to bound cost, and `BEST_OF_N=100` with an unparseable `body.candidates` would
+    // otherwise reach the fallback branch un-clamped and start 100 parallel loops.
+    const configuredCandidates = Math.max(1, Math.min(config.bestOfN, 8));
+    const requestedCandidates = Math.trunc(Number(body.candidates ?? configuredCandidates));
     const candidateCount = maxMode
       ? Number.isFinite(requestedCandidates)
         ? Math.max(1, Math.min(requestedCandidates, 8))
-        : config.bestOfN
+        : configuredCandidates
       : 0;
 
     const llmMessages = [

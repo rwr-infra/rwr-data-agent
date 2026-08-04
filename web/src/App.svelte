@@ -51,6 +51,9 @@
   // the server default, replaced by the real figure from `GET /v1/limits` at mount. `0` = unlimited,
   // and the indicator hides itself then.
   let maxRounds = $state(20);
+  // Until `/v1/limits` answers, `maxRounds` is a guess. Gating on it would reject a valid question
+  // on a server configured for more rounds (or for none), so both the gate and the indicator wait.
+  let limitsLoaded = $state(false);
   let pendingRecallId: string | null = $state(null);
   let prefillText = $state('');
   let toast = $state<{ message: string; visible: boolean }>({ message: '', visible: false });
@@ -223,9 +226,19 @@
     // Before anything hits /v1: persist a ?token= if the operator supplied one.
     captureTokenFromUrl();
     // Not awaited: the round cap only feeds an indicator, so session restore must not wait on it.
-    void fetchLimits().then((limits) => {
-      if (typeof limits?.maxConversationRounds === 'number') maxRounds = limits.maxConversationRounds;
-    });
+    void fetchLimits()
+      .then((limits) => {
+        if (typeof limits?.maxConversationRounds === 'number') maxRounds = limits.maxConversationRounds;
+        if (typeof limits?.maxContextTokens === 'number' && limits.maxContextTokens > 0) {
+          maxContext = limits.maxContextTokens;
+        }
+      })
+      // Marked loaded even on failure: an older backend has no `/v1/limits`, and leaving the gate
+      // permanently disarmed there would drop the client-side check entirely. The fallback figures
+      // are then the best available, and the server still enforces the real ones.
+      .finally(() => {
+        limitsLoaded = true;
+      });
     void restoreLatestSession();
 
     const onVisibilityChange = () => {
@@ -326,7 +339,7 @@
     if (!isRetry) {
       // Round cap, checked client-side so the user gets a localized note instead of the server's
       // 400 body. A retry re-sends an existing round and is deliberately exempt.
-      if (maxRounds > 0 && roundsUsed >= maxRounds) {
+      if (limitsLoaded && maxRounds > 0 && roundsUsed >= maxRounds) {
         showWelcome = false;
         displayItems.push({ type: 'message', role: 'error', content: tr.roundsOver(maxRounds), id: uid() });
         displayItems = displayItems;
@@ -725,7 +738,7 @@
     contextUsed={effectiveContextUsed}
     maxContext={maxContext}
     {roundsUsed}
-    {maxRounds}
+    maxRounds={limitsLoaded ? maxRounds : 0}
     breakdown={lastBreakdown}
     {maxMode}
     onmaxtoggle={handleMaxModeToggle}
