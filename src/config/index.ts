@@ -16,9 +16,31 @@ const outputDir = path.resolve(process.env.OUTPUT_DIR ?? './output');
 const indexConcurrency = (() => {
   const raw = parseInt(process.env.INDEX_CONCURRENCY ?? '', 10);
   if (Number.isFinite(raw) && raw > 0) return raw;
-  const cores = typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length;
+  const cores =
+    typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length;
   return Math.max(2, Math.min(4, cores || 2));
 })();
+
+/** Parse an integer env var, falling back to `fallback` on missing/garbage. `parseInt` is the wrong
+ *  tool twice over: it returns NaN for non-numeric input, which silently breaks loop bounds
+ *  downstream (`BEST_OF_N='abc'` → NaN candidates → empty best-of-N turn), and it happily reads
+ *  `'3junk'` as `3` — a typo then applies a value nobody configured. `Number` rejects both. */
+function intEnv(name: string, fallback: number, min: number): number {
+  const raw = process.env[name];
+  if (!raw?.trim()) return fallback;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed >= min ? parsed : fallback;
+}
+
+function positiveIntEnv(name: string, fallback: number): number {
+  return intEnv(name, fallback, 1);
+}
+
+/** Same as `positiveIntEnv`, but `0` is a meaningful value (used as "no limit") rather than
+ *  garbage that falls back to the default. Negative and non-numeric input still fall back. */
+function nonNegativeIntEnv(name: string, fallback: number): number {
+  return intEnv(name, fallback, 0);
+}
 
 export const config = {
   // ── LLM (the only required external service) ──────────────────────────────
@@ -26,12 +48,46 @@ export const config = {
   llmApiKey: process.env.LLM_API_KEY ?? process.env.SILICONFLOW_API_KEY ?? '',
   llmBaseUrl: process.env.LLM_BASE_URL ?? 'https://api.siliconflow.cn/v1',
   llmModel: process.env.LLM_MODEL ?? 'deepseek-v4-flash',
+  /**
+   * Models offered by GET /v1/models and accepted in `body.model`. Comma-separated; defaults to
+   * the single configured model. Requests naming anything outside this list fall back to
+   * `llmModel` — the client may switch within the operator's list, never beyond it.
+   */
+  llmModels: (() => {
+    const raw = process.env.LLM_MODELS;
+    if (raw) {
+      const parsed = raw
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (parsed.length > 0) return parsed;
+    }
+    return [process.env.LLM_MODEL ?? 'deepseek-v4-flash'];
+  })(),
+  /**
+   * Display names for the model switcher, as `id=Label` pairs (comma-separated). The UI shows
+   * these instead of the raw model ids — a mapping table in the Gemini Flash/Pro style — while
+   * `body.model` keeps carrying the real id. Absent labels fall back to the id itself.
+   */
+  llmModelLabels: (() => {
+    const raw = process.env.LLM_MODEL_LABELS;
+    const out: Record<string, string> = {};
+    if (raw) {
+      for (const pair of raw.split(',')) {
+        const eq = pair.indexOf('=');
+        if (eq > 0) out[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+      }
+    }
+    return out;
+  })(),
 
   // ── Local data & index ────────────────────────────────────────────────────
   /** Data root — either a single RWR package or a directory of packages. */
   dataDir,
   outputDir,
-  graphPath: process.env.GRAPH_PATH ? path.resolve(process.env.GRAPH_PATH) : path.join(outputDir, 'graph.json'),
+  graphPath: process.env.GRAPH_PATH
+    ? path.resolve(process.env.GRAPH_PATH)
+    : path.join(outputDir, 'graph.json'),
   searchIndexPath: process.env.SEARCH_INDEX_PATH
     ? path.resolve(process.env.SEARCH_INDEX_PATH)
     : path.join(outputDir, 'search-index.json'),
@@ -78,6 +134,16 @@ export const config = {
    */
   apiToken: process.env.API_TOKEN ?? '',
   maxContextTokens: parseInt(process.env.MAX_CONTEXT_TOKENS ?? '500000', 10),
+  /**
+   * Cap on how many rounds a single conversation may carry. A "round" is one user turn plus its
+   * answer, counted off the non-system messages the client replays — so the 21st question of a
+   * session is rejected with 400 rather than served, and the user starts a new chat.
+   *
+   * This is a conversation-length limit, not a rate limit: it bounds how far a single thread can
+   * grow, which is what actually drives cost here (the whole history is re-sent every turn, and
+   * the tool loop re-sends it once per step on top of that). `0` disables the check.
+   */
+  maxConversationRounds: nonNegativeIntEnv('MAX_CONVERSATION_ROUNDS', 20),
   // Cap on generated output tokens (reasoning + answer share this budget). Bounds long
   // enumerations/comparisons; raise if answers get truncated. DeepSeek-V4 allows up to 384K.
   llmMaxOutputTokens: parseInt(process.env.LLM_MAX_OUTPUT_TOKENS ?? '32768', 10),
@@ -113,6 +179,45 @@ export const config = {
   // ── Session memory ────────────────────────────────────────────────────────
   summaryIntervalTurns: parseInt(process.env.SUMMARY_INTERVAL_TURNS ?? '3', 10),
   summaryModel: process.env.SUMMARY_MODEL ?? process.env.LLM_MODEL ?? 'deepseek-v4-flash',
+
+  // ── Best-of-N synthesis ("max mode") ──────────────────────────────────────
+  /**
+   * Master switch for best-of-N. When on, a request with `mode: 'max'` runs N parallel
+   * candidate agent loops and one synthesis ("judge") call that merges them into the
+   * final answer. The normal path is untouched either way.
+   */
+  bestOfNEnabled: process.env.BEST_OF_N_ENABLED !== 'false',
+  /** Number of parallel candidate drafts. Requests may override it via `body.candidates`. */
+  bestOfN: positiveIntEnv('BEST_OF_N', 3),
+  /**
+   * Per-candidate agent step cap. The normal loop's `stepCountIs(100)` is a runaway backstop,
+   * not a budget — a single question has measured 2.5M input tokens — and best-of-N multiplies
+   * that by N, so each candidate gets a deliberately tight cap.
+   */
+  bestOfNMaxSteps: positiveIntEnv('BEST_OF_N_MAX_STEPS', 6),
+  /**
+   * Temperatures applied to the candidates, cycled when fewer entries than candidates. Default
+   * `[0.3, 0.6, 0.9]`; the differentiation mostly comes from the tool paths anyway — reasoning
+   * models respond weakly to temperature, so the sequence is a spread, not a guarantee.
+   */
+  bestOfNTemperatures: (() => {
+    const raw = process.env.BEST_OF_N_TEMPERATURES;
+    if (raw) {
+      const parsed = raw
+        .split(',')
+        .map((s) => parseFloat(s.trim()))
+        .filter((n) => Number.isFinite(n) && n >= 0 && n <= 2);
+      if (parsed.length > 0) return parsed;
+    }
+    return [0.3, 0.6, 0.9];
+  })(),
+  /** Seed of the first candidate; each candidate adds its own index, so the runs stay distinct. */
+  bestOfNSeedBase: positiveIntEnv('BEST_OF_N_SEED_BASE', 1),
+  /** Model for the synthesis ("judge") call — defaults to the main model, can be a stronger one. */
+  judgeModel: process.env.JUDGE_MODEL ?? process.env.LLM_MODEL ?? 'deepseek-v4-flash',
+  /** True when JUDGE_MODEL was explicitly set — then the judge stays pinned even when the client
+   *  switches the main model; otherwise the judge follows the turn's selected model. */
+  judgeModelExplicit: !!process.env.JUDGE_MODEL,
 
   // ── Observability ─────────────────────────────────────────────────────────
   langfuseEnabled: process.env.LANGFUSE_ENABLED === 'true',

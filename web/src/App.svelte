@@ -4,9 +4,9 @@
   import { getInitialLang, t, toggleLang } from './lib/i18n.js';
   import type { Theme } from './lib/theme.js';
   import { getInitialTheme, toggleTheme } from './lib/theme.js';
-  import type { Message, DisplayItem, Session, TokenBreakdown } from './lib/types.js';
+  import type { Message, DisplayItem, Session, TokenBreakdown, CandidateView, TurnStat } from './lib/types.js';
   import { estimateTokens, stripMarkdown } from './lib/utils.js';
-  import { authHeaders, captureTokenFromUrl } from './lib/api.js';
+  import { authHeaders, captureTokenFromUrl, fetchLimits } from './lib/api.js';
   import { resetLocalState } from './lib/reset.js';
   import * as sessionStore from './lib/sessionStore.js';
   import Header from './components/Header.svelte';
@@ -16,7 +16,7 @@
   import SessionDrawer from './components/SessionDrawer.svelte';
 
   const LOCAL_CACHE_KEY = 'rwr-data-agent-cache';
-  type LocalCache = { selectedMod?: string };
+  type LocalCache = { selectedMod?: string; maxMode?: boolean };
   function readCache(): LocalCache {
     try { return JSON.parse(localStorage.getItem(LOCAL_CACHE_KEY) || '{}'); } catch { return {}; }
   }
@@ -36,11 +36,24 @@
   let streaming = $state(false);
   let showWelcome = $state(true);
   let selectedMod = $state(readCache().selectedMod ?? '');
+  // Best-of-N ("Max mode") per-message toggle, persisted like `selectedMod`. `maxModeTotal` is the
+  // candidate count while a max run is streaming progress; `judgePhase` is on between the last
+  // candidate-close and the first synthesis delta — both drive the thinking indicator text.
+  let maxMode = $state(readCache().maxMode === true);
+  let maxModeTotal = $state(0);
+  let judgePhase = $state(false);
   let contextUsed = $state(0);
   let lastBreakdown = $state<TokenBreakdown | undefined>(undefined);
   // Fallback until the first `finish` event reports the server's own MAX_CONTEXT_TOKENS. Hardcoding
   // it alone would put the gate and the bar's denominator out of step with the server config.
   let maxContext = $state(500000);
+  // Conversation-round cap (MAX_CONVERSATION_ROUNDS). Mirrors `maxContext`: a fallback that matches
+  // the server default, replaced by the real figure from `GET /v1/limits` at mount. `0` = unlimited,
+  // and the indicator hides itself then.
+  let maxRounds = $state(20);
+  // Until `/v1/limits` answers, `maxRounds` is a guess. Gating on it would reject a valid question
+  // on a server configured for more rounds (or for none), so both the gate and the indicator wait.
+  let limitsLoaded = $state(false);
   let pendingRecallId: string | null = $state(null);
   let prefillText = $state('');
   let toast = $state<{ message: string; visible: boolean }>({ message: '', visible: false });
@@ -59,12 +72,34 @@
   function uid(): string { return `m${nextId++}`; }
 
   function buildDisplayItems(msgs: Message[]): DisplayItem[] {
-    return msgs.map((m) => ({
-      type: 'message' as const,
-      role: (m.role === 'assistant' ? 'ai' : m.role) as 'user' | 'ai',
-      content: m.content,
-      id: uid(),
-    }));
+    const items: DisplayItem[] = [];
+    for (const m of msgs) {
+      items.push({
+        type: 'message' as const,
+        role: (m.role === 'assistant' ? 'ai' : m.role) as 'user' | 'ai',
+        content: m.content,
+        id: uid(),
+      });
+      // Restored turns re-render their meta line (TTFB / total / tokens / steps) from the stats
+      // attached to the assistant message, so a reload does not lose the per-turn numbers.
+      if (m.role === 'assistant' && m.stats) {
+        items.push({
+          type: 'meta',
+          text: tr.metaFormat(m.stats.ttfb, m.stats.total, m.stats.inTokens, m.stats.outTokens, m.stats.steps),
+          id: uid(),
+        });
+      }
+    }
+    return items;
+  }
+
+  /** Restore the context bar from the last turn's stats: real context occupancy, server max, and
+   *  the breakdown dropdown. Falls back to the historical estimate when the session has none. */
+  function applySessionStats(session: Session) {
+    const lastStats = [...session.messages].reverse().find((m) => m.role === 'assistant' && m.stats)?.stats;
+    lastBreakdown = lastStats?.breakdown;
+    if (lastStats?.maxContextTokens) maxContext = lastStats.maxContextTokens;
+    contextUsed = lastStats?.contextTokens ?? 0;
   }
 
   async function saveCurrentSession() {
@@ -81,6 +116,7 @@
       updatedAt: Date.now(),
       messages: plainMessages,
       selectedMod: selectedMod || undefined,
+      maxMode: maxMode || undefined,
     };
     await sessionStore.saveSession(session);
     const idx = sessions.findIndex((s) => s.id === session.id);
@@ -109,6 +145,7 @@
       updatedAt: Date.now(),
       messages: [],
       selectedMod: selectedMod || undefined,
+      maxMode: maxMode || undefined,
     };
     await sessionStore.saveSession(emptySession);
     sessions = [emptySession, ...sessions];
@@ -123,12 +160,15 @@
     history = session.messages.slice();
     nextId = 0;
     displayItems = buildDisplayItems(history);
-    contextUsed = 0;
-    lastBreakdown = undefined;
+    applySessionStats(session);
     showWelcome = history.length === 0;
     if (session.selectedMod !== undefined) {
       selectedMod = session.selectedMod;
       writeCache({ selectedMod: session.selectedMod });
+    }
+    if (session.maxMode !== undefined) {
+      maxMode = session.maxMode;
+      writeCache({ maxMode: session.maxMode });
     }
     drawerOpen = false;
   }
@@ -159,9 +199,9 @@
     document.documentElement.lang = tr.htmlLang;
   });
 
-  onMount(async () => {
-    // Before anything hits /v1: persist a ?token= if the operator supplied one.
-    captureTokenFromUrl();
+  /** Restore the most recent session, or open an empty one. Split out of `onMount` because an async
+   *  `onMount` callback may not return a cleanup function — Svelte only awaits it. */
+  async function restoreLatestSession() {
     sessions = await sessionStore.getAllSessions();
     if (sessions.length > 0) {
       const latest = sessions[0];
@@ -169,13 +209,37 @@
       history = latest.messages.slice();
       nextId = 0;
       displayItems = buildDisplayItems(history);
+      applySessionStats(latest);
       showWelcome = history.length === 0;
       if (latest.selectedMod !== undefined) {
         selectedMod = latest.selectedMod;
       }
+      if (latest.maxMode !== undefined) {
+        maxMode = latest.maxMode;
+      }
     } else {
       await newSession();
     }
+  }
+
+  onMount(() => {
+    // Before anything hits /v1: persist a ?token= if the operator supplied one.
+    captureTokenFromUrl();
+    // Not awaited: the round cap only feeds an indicator, so session restore must not wait on it.
+    void fetchLimits()
+      .then((limits) => {
+        if (typeof limits?.maxConversationRounds === 'number') maxRounds = limits.maxConversationRounds;
+        if (typeof limits?.maxContextTokens === 'number' && limits.maxContextTokens > 0) {
+          maxContext = limits.maxContextTokens;
+        }
+      })
+      // Marked loaded even on failure: an older backend has no `/v1/limits`, and leaving the gate
+      // permanently disarmed there would drop the client-side check entirely. The fallback figures
+      // are then the best available, and the server still enforces the real ones.
+      .finally(() => {
+        limitsLoaded = true;
+      });
+    void restoreLatestSession();
 
     const onVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
@@ -200,6 +264,11 @@
   function handleInputChange(text: string) {
     currentInputText = text;
   }
+
+  // Rounds consumed by this conversation. One user message = one round, which is exactly how the
+  // server counts the replayed history (`ceil(nonSystemMessages / 2)`), so the indicator and the
+  // 400 it prevents stay in step.
+  let roundsUsed = $derived(history.filter((m) => m.role === 'user').length);
 
   let effectiveContextUsed = $derived(
     contextUsed > 0
@@ -236,9 +305,15 @@
       updatedAt: Date.now(),
       messages: [],
       selectedMod: mod || undefined,
+      maxMode: maxMode || undefined,
     };
     await sessionStore.saveSession(emptySession);
     sessions = [emptySession, ...sessions];
+  }
+
+  function handleMaxModeToggle() {
+    maxMode = !maxMode;
+    writeCache({ maxMode });
   }
 
   async function handleResetAll() {
@@ -262,6 +337,15 @@
     if (!text || loading) return;
 
     if (!isRetry) {
+      // Round cap, checked client-side so the user gets a localized note instead of the server's
+      // 400 body. A retry re-sends an existing round and is deliberately exempt.
+      if (limitsLoaded && maxRounds > 0 && roundsUsed >= maxRounds) {
+        showWelcome = false;
+        displayItems.push({ type: 'message', role: 'error', content: tr.roundsOver(maxRounds), id: uid() });
+        displayItems = displayItems;
+        return;
+      }
+
       const checkBase = contextUsed > 0 ? contextUsed : estimateHistoryTokens();
       if (checkBase + estimateTokens(text) >= maxContext) {
         showWelcome = false;
@@ -288,6 +372,10 @@
     let fullReasoning = '';
     let aiItemIdx = -1;
     let currentTraceIdx = -1;
+    // Stats of this turn, attached to the assistant message at the end so they survive a reload.
+    let turnStat: TurnStat | undefined;
+    // Candidate-close events received so far; when all N have closed the judge phase begins.
+    let closedCount = 0;
 
     try {
       const res = await fetch('/v1/chat/completions', {
@@ -299,8 +387,10 @@
         },
         body: JSON.stringify({
           model: 'rwr-agent',
-          messages: history.slice(),
+          // `stats` is client-side only — strip it before the wire.
+          messages: history.map(({ role, content }) => ({ role, content })),
           ...(selectedMod ? { mod: selectedMod } : {}),
+          ...(maxMode ? { mode: 'max' } : {}),
         }),
       });
 
@@ -365,14 +455,78 @@
               const icon = !event.done ? '\uD83D\uDD27' : failed ? '\u2715' : '\u2713';
               const text = event.summary ?? event.toolName ?? 'tool';
               const step = { icon, text, ok: event.done ? event.ok !== false : undefined, durationMs: event.durationMs };
-              if (currentTraceIdx >= 0 && displayItems[currentTraceIdx]?.type === 'tool-trace') {
-                displayItems[currentTraceIdx].steps.push(step);
+              // Bound to a local so the `type === 'tool-trace'` check narrows the push below —
+              // re-indexing the array would throw the narrowing away.
+              const trace = currentTraceIdx >= 0 ? displayItems[currentTraceIdx] : undefined;
+              if (trace?.type === 'tool-trace') {
+                trace.steps.push(step);
                 displayItems = [...displayItems];
               } else {
                 displayItems.push({ type: 'tool-trace', steps: [step], id: uid() });
                 currentTraceIdx = displayItems.length - 1;
                 displayItems = displayItems;
               }
+            } else if (event.type === 'candidate-open') {
+              // Start a live trace per candidate; tool steps arrive as `candidate-step`.
+              maxModeTotal = event.total ?? 0;
+              judgePhase = false;
+              displayItems.push({
+                type: 'candidate-trace',
+                candidate: event.candidate ?? 0,
+                total: maxModeTotal,
+                steps: [],
+                id: uid(),
+              });
+              displayItems = displayItems;
+            } else if (event.type === 'candidate-step') {
+              const c = event.candidate;
+              const idx = displayItems.findIndex(
+                (it) => it.type === 'candidate-trace' && it.candidate === c,
+              );
+              if (idx >= 0 && displayItems[idx]?.type === 'candidate-trace') {
+                const failed = event.done && event.ok === false;
+                const icon = !event.done ? '\uD83D\uDD27' : failed ? '\u2715' : '\u2713';
+                const step = {
+                  icon,
+                  text: event.summary ?? event.toolName ?? 'tool',
+                  ok: event.done ? event.ok !== false : undefined,
+                  durationMs: event.durationMs,
+                  candidate: c,
+                };
+                displayItems[idx].steps.push(step);
+                displayItems = [...displayItems];
+              }
+            } else if (event.type === 'candidate-close') {
+              const idx = displayItems.findIndex(
+                (it) => it.type === 'candidate-trace' && it.candidate === event.candidate,
+              );
+              if (idx >= 0 && displayItems[idx]?.type === 'candidate-trace') {
+                displayItems[idx] = {
+                  ...displayItems[idx],
+                  done: true,
+                  ok: event.ok === true,
+                };
+                displayItems = [...displayItems];
+              }
+              closedCount++;
+              if (maxModeTotal > 0 && closedCount >= maxModeTotal) {
+                judgePhase = true;
+              }
+            } else if (event.type === 'candidates') {
+              // All drafts are in: drop the live traces, show the collapsible raw-drafts panel.
+              const traceIds = new Set(
+                displayItems.filter((it) => it.type === 'candidate-trace').map((it) => it.id),
+              );
+              displayItems = displayItems.filter((it) => !traceIds.has(it.id));
+              displayItems.push({
+                type: 'candidate-panel',
+                candidates: (event.list ?? []) as CandidateView[],
+                kind: event.kind,
+                id: uid(),
+              });
+              displayItems = displayItems;
+              maxModeTotal = 0;
+              judgePhase = false;
             } else if (event.type === 'finish') {
               const usage = event.usage;
               if (usage) {
@@ -391,6 +545,16 @@
               const est = usage?.estimated === true;
               const inTokens = usage?.promptTokens != null ? (est ? `~${usage.promptTokens}` : usage.promptTokens) : '-';
               const outTokens = usage?.completionTokens != null ? (est ? `~${usage.completionTokens}` : usage.completionTokens) : '-';
+              turnStat = {
+                ttfb,
+                total: totalTime,
+                inTokens,
+                outTokens,
+                steps: usage?.breakdown?.steps,
+                contextTokens: usage?.contextTokens ?? undefined,
+                maxContextTokens: usage?.maxContextTokens ?? undefined,
+                breakdown: usage?.breakdown ?? undefined,
+              };
               if (usage?.breakdown) lastBreakdown = usage.breakdown;
               displayItems.push({ type: 'meta', text: tr.metaFormat(ttfb, totalTime, inTokens, outTokens, usage?.breakdown?.steps), id: uid() });
               // Why the loop ended, when it was not a clean finish. The backend reports the reason,
@@ -408,6 +572,8 @@
       thinking = false;
       streaming = false;
       stopTimer();
+      maxModeTotal = 0;
+      judgePhase = false;
       if (!isRetry) {
         history.pop();
       }
@@ -422,9 +588,11 @@
     thinking = false;
     streaming = false;
     stopTimer();
+    maxModeTotal = 0;
+    judgePhase = false;
 
     if (fullContent) {
-      history.push({ role: 'assistant', content: fullContent });
+      history.push({ role: 'assistant', content: fullContent, stats: turnStat });
     }
     loading = false;
     saveCurrentSession();
@@ -541,7 +709,7 @@
   }
 </script>
 
-<div class="flex flex-col h-screen bg-base-100 text-base-content">
+<div class="flex flex-col h-dvh overflow-hidden bg-base-100 text-base-content">
   <Header {lang} {tr} {selectedMod} {theme} onmodchange={handleModChange} ontogglelang={handleToggleLang} ontoggletheme={handleToggleTheme} ontogglemenu={handleToggleMenu} />
   {#if showWelcome}
     <Welcome {tr} onask={handleAsk} />
@@ -550,7 +718,7 @@
       items={displayItems}
       {thinking}
       {streaming}
-      thinkingText={tr.thinking}
+      thinkingText={maxModeTotal > 0 ? tr.runningCandidates(maxModeTotal) : judgePhase ? tr.synthesizing : tr.thinking}
       searchingText={tr.searching}
       generatingText={tr.generating}
       {elapsed}
@@ -569,7 +737,11 @@
     {loading}
     contextUsed={effectiveContextUsed}
     maxContext={maxContext}
+    {roundsUsed}
+    maxRounds={limitsLoaded ? maxRounds : 0}
     breakdown={lastBreakdown}
+    {maxMode}
+    onmaxtoggle={handleMaxModeToggle}
     onsend={sendMessage}
     oninputchange={handleInputChange}
     {prefillText}

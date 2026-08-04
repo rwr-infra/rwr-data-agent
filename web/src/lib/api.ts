@@ -24,6 +24,30 @@ export function authHeaders(): Record<string, string> {
   return token ? { 'x-api-key': token } : {};
 }
 
+/**
+ * Server-side ceilings from `GET /v1/limits`. Fetched once at mount so the round indicator shows
+ * the operator's real cap from the first turn instead of after a rejected request. On failure the
+ * caller keeps its own default — a missing endpoint (older backend) must not break the page.
+ */
+export async function fetchLimits(): Promise<{
+  maxConversationRounds?: number;
+  maxContextTokens?: number;
+} | null> {
+  try {
+    const res = await fetch('/v1/limits', { headers: authHeaders() });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return {
+      maxConversationRounds: data?.max_conversation_rounds,
+      // Without this the context bar and its send gate run on the hardcoded fallback until the
+      // first `finish` frame — wrong denominator on every deployment that changed the window.
+      maxContextTokens: data?.max_context_tokens,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export interface ChatRequest {
   model: string;
   messages: Message[];

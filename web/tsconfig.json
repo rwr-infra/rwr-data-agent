@@ -10,7 +10,9 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
-    "lib": ["ES2022", "DOM", "DOM.Iterable"]
+    // ES2023 for `Array.prototype.findLastIndex` (Chat.svelte) — baseline in every browser this UI
+    // targets; the emit target stays ES2022 since Vite/esbuild transpiles, not this config.
+    "lib": ["ES2023", "DOM", "DOM.Iterable"]
   },
   "include": ["src/**/*.ts", "src/**/*.svelte"]
 }

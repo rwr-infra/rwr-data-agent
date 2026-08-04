@@ -22,6 +22,7 @@ import { createToolTranscriptShaper } from '../../agent/toolTranscript.js';
 import { selectActiveTools } from '../../agent/toolSelection.js';
 import { isToolFailure, repairToolCall } from '../../agent/toolRuntime.js';
 import {
+  aggregateBestOfN,
   buildBreakdown,
   estimateTokens,
   measureToolCallTokens,
@@ -29,6 +30,7 @@ import {
   measureTurn,
   resolveUsage,
 } from '../tokenAccounting.js';
+import { runBestOfN, summarizeToolInput, summarizeToolResult } from '../../agent/synthesize.js';
 import type { Tool } from 'ai';
 import type { ChatCompletionRequest, SearchResult } from '../../types/index.js';
 
@@ -79,71 +81,6 @@ async function getAgentTools(scope?: string): Promise<Record<string, Tool> | nul
   }
 }
 
-/**
- * Read one field of a tool input as a display string. Tool inputs are model-produced
- * JSON, so every field is `unknown` — anything non-scalar has no useful label form.
- */
-function inputField(input: Record<string, unknown>, name: string): string {
-  const value = input[name];
-  if (typeof value === 'string') return value;
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
-  return '';
-}
-
-/** Build a short human-readable summary of a tool call's input, shown to the UI. */
-function summarizeToolInput(toolName: string | undefined, input: unknown): string {
-  if (!toolName || !input || typeof input !== 'object') return '';
-  const inp = input as Record<string, unknown>;
-  const key = inputField(inp, 'key') || '?';
-  const file = inputField(inp, 'file') || '?';
-  switch (toolName) {
-    case 'searchDocs': {
-      const type = inputField(inp, 'type');
-      return `Search: ${inputField(inp, 'query') || '?'}${type ? ` [${type}]` : ''}`;
-    }
-    case 'getInheritanceChain':
-      return `Inheritance: ${key}`;
-    case 'findReferences':
-      return `References: ${key}`;
-    case 'getTransformChain':
-      return `Transform chain: ${key}`;
-    case 'readSource': {
-      const startLine = inputField(inp, 'startLine');
-      return `Read: ${file}${startLine ? ` (L${startLine}-${inputField(inp, 'endLine')})` : ''}`;
-    }
-    case 'listFiles': {
-      const type = inputField(inp, 'type');
-      return `List: ${inputField(inp, 'pattern') || '?'}${type ? ` [${type}]` : ''}`;
-    }
-    case 'getScriptSymbols':
-      return `Script symbols: ${file}`;
-    case 'getNode':
-      return `Lookup: ${key}`;
-    case 'lookupUpgrade':
-      return `Upgrade lookup: ${inputField(inp, 'query') || '?'}`;
-    case 'lookupWeaponSkill':
-      return `Skill lookup: ${inputField(inp, 'query') || '?'}`;
-    default:
-      return toolName;
-  }
-}
-
-/** Build a short summary of a tool result for the UI. */
-function summarizeToolResult(_toolName: string | undefined, output: unknown): string {
-  if (!output || typeof output !== 'object') return '';
-  const out = output as Record<string, unknown>;
-  // Failures come back through the runtime envelope as ordinary results, so check them first —
-  // otherwise a `{error, hint}` payload would fall through and report "done".
-  if (typeof out.error === 'string') return out.error;
-  if (typeof out.total === 'number') return `${out.total} result(s)`;
-  if (Array.isArray(out.chain)) return `${out.chain.length} layer(s)`;
-  if (Array.isArray(out.parents)) return `${out.parents.length} parent(s)`;
-  if (Array.isArray(out.referencedBy)) return `${out.referencedBy.length} ref(s)`;
-  if (Array.isArray(out.symbols)) return `${out.symbols.length} symbol(s)`;
-  if (typeof out.totalLines === 'number') return `${out.totalLines} line(s)`;
-  return 'done';
-}
-
 // eslint-disable-next-line @typescript-eslint/require-await -- Fastify plugin contract: register() awaits the returned promise, so `async` is the interface here.
 export async function chatRoutes(app: FastifyInstance) {
   // Point the local MiniSearch index at the configured path (loaded lazily / by bootstrap).
@@ -167,6 +104,29 @@ export async function chatRoutes(app: FastifyInstance) {
       console.log('[chat] 400 - No user message found');
       return reply.status(400).send({
         error: { message: 'No user message found', type: 'invalid_request_error' },
+      });
+    }
+
+    // Conversation-length cap. Counted off the messages the client replays, so it bounds a single
+    // thread rather than a client's request rate — the whole history is re-sent every turn, and the
+    // tool loop re-sends it once per step, so an endless thread is the expensive failure mode here.
+    // `MAX_CONVERSATION_ROUNDS=0` disables it.
+    if (config.maxConversationRounds > 0 && historyRounds > config.maxConversationRounds) {
+      console.log(
+        `[chat] 400 - Conversation too long: ${historyRounds} rounds > ${config.maxConversationRounds}`,
+      );
+      return reply.status(400).send({
+        error: {
+          message:
+            `Conversation limit reached: this thread is ${historyRounds} rounds long and the server allows ` +
+            `${config.maxConversationRounds}. Start a new conversation to continue.`,
+          type: 'invalid_request_error',
+          // `code` is the OpenAI-shaped machine-readable field; the two counters are additive, so a
+          // client can render "20/20" without parsing the message.
+          code: 'conversation_limit_exceeded',
+          rounds: historyRounds,
+          max_rounds: config.maxConversationRounds,
+        },
       });
     }
 
@@ -314,8 +274,20 @@ export async function chatRoutes(app: FastifyInstance) {
       content: m.content,
     }));
 
+    // The client may switch models within the operator's list (`LLM_MODELS`); anything else —
+    // including the legacy `rwr-agent` alias — resolves to the configured default, so a request
+    // can never steer the turn onto a model the operator did not approve.
+    const turnModelId =
+      typeof body.model === 'string' &&
+      body.model !== 'rwr-agent' &&
+      config.llmModels.includes(body.model)
+        ? body.model
+        : config.llmModel;
+    // The judge follows the turn's model unless the operator pinned one via JUDGE_MODEL.
+    const judgeModelId = config.judgeModelExplicit ? config.judgeModel : turnModelId;
+
     console.log(
-      `[chat] LLM request | model=${config.llmModel} | history=${historyMessages.length}`,
+      `[chat] LLM request | model=${turnModelId} | history=${historyMessages.length}`,
     );
 
     const responseFormat =
@@ -323,6 +295,25 @@ export async function chatRoutes(app: FastifyInstance) {
     const useStructured =
       (queryCategory === 'enumeration' || queryCategory === 'comparison') &&
       responseFormat === 'json_object';
+
+    // Best-of-N ("max mode"): parallel candidate agent loops + one synthesis call. Structured
+    // responses are excluded by design — enumeration/comparison output is JSON built from the
+    // retrieved context, where N drafts buy nothing. `body.candidates` overrides the configured N
+    // (clamped; the feature exists to bound cost, not to multiply it unboundedly).
+    const maxMode = body.mode === 'max' && config.bestOfNEnabled && !useStructured;
+    // Coerce the candidate count to a finite integer before clamping: a non-numeric
+    // `body.candidates` (or a garbage BEST_OF_N, now guarded in config) must not become NaN —
+    // `Array.from({ length: NaN })` runs zero candidates and silently answers nothing.
+    // The configured default goes through the same 1..8 clamp as a request-supplied count: the cap
+    // exists to bound cost, and `BEST_OF_N=100` with an unparseable `body.candidates` would
+    // otherwise reach the fallback branch un-clamped and start 100 parallel loops.
+    const configuredCandidates = Math.max(1, Math.min(config.bestOfN, 8));
+    const requestedCandidates = Math.trunc(Number(body.candidates ?? configuredCandidates));
+    const candidateCount = maxMode
+      ? Number.isFinite(requestedCandidates)
+        ? Math.max(1, Math.min(requestedCandidates, 8))
+        : configuredCandidates
+      : 0;
 
     const llmMessages = [
       ...historyMessages.map((m) => ({
@@ -375,7 +366,7 @@ export async function chatRoutes(app: FastifyInstance) {
       'llm-generation',
       {
         input: { messages: llmMessages, system: systemPrompt },
-        model: config.llmModel,
+        model: turnModelId,
         modelParameters: { maxTokens },
       },
       { asType: 'generation' },
@@ -393,7 +384,7 @@ export async function chatRoutes(app: FastifyInstance) {
       if (useStructured) {
         const schema = queryCategory === 'enumeration' ? EnumResultSchema : ComparisonResultSchema;
         const result = streamObject({
-          model: getProvider().chatModel(config.llmModel),
+          model: getProvider().chatModel(turnModelId),
           system: systemPrompt,
           messages: llmMessages,
           maxOutputTokens: maxTokens,
@@ -459,238 +450,311 @@ export async function chatRoutes(app: FastifyInstance) {
         // model sees, never what it can execute). Undefined keeps full disclosure — the
         // no-op path when the registry fits or disclosure is disabled.
         const disclosureMeta = getToolDisclosureMeta(packageScope);
-        // Tool results are replayed in full; the shaper only sheds them if a step's prompt would
-        // otherwise overflow the window. The system prompt, tool definitions and the output
-        // reservation ride alongside `messages`, so they come off the budget first.
-        const shaper = createToolTranscriptShaper({
-          budgetTokens:
+
+        if (maxMode) {
+          // Best-of-N: N parallel candidate agent loops + one synthesis call. Retrieval, the RAG
+          // prompt, the tool registry and the disclosure metadata are all shared — only the
+          // temperature/seed per candidate differ. Candidate tool steps stream as progress;
+          // the judge's text/reasoning deltas are the final answer.
+          const shaperBudgetTokens =
             Math.floor(config.maxContextTokens * config.toolContextBudgetRatio) -
             inputTokens.system -
             toolDefTokens -
-            maxTokens,
-          shedTargetTokens: config.toolShedResultTokens,
-        });
-        // Tool execution time, reported by the SDK and keyed by tool call, so the UI can show it
-        // without the timing ever entering the model's context.
-        const toolDurations = new Map<string, number>();
-        const result = streamText({
-          model: getProvider().chatModel(config.llmModel),
-          system: systemPrompt,
-          messages: llmMessages,
-          maxOutputTokens: maxTokens,
-          ...(tools
-            ? {
-                tools,
-                stopWhen: stepCountIs(100),
-                prepareStep: ({
-                  messages,
-                  stepNumber,
-                }: {
-                  messages: Record<string, unknown>[];
-                  stepNumber: number;
-                }) => {
-                  // The annotation above is the shaper's own message type, so no cast is needed;
-                  // it is also contravariantly compatible with the SDK's `ModelMessage[]` (every
-                  // ModelMessage is a Record<string, unknown>).
-                  const shaped = shaper.prepare(messages);
-                  // `stepNumber` is 0-based: the first LLM call is 0, later steps see the full
-                  // registry again so a mid-loop tool is never locked out.
-                  const active = selectActiveTools(
-                    disclosureMeta,
-                    query,
-                    stepNumber,
-                    config.toolDisclosureThreshold,
-                  );
-                  if (active && process.env.DEBUG_DISCLOSURE === '1') {
-                    console.log(
-                      `[disclosure] step=${stepNumber} active=${active.length}/${disclosureMeta?.allNames.length} tools exposed`,
-                    );
-                  }
-                  if (active) return { ...shaped, activeTools: active } as never;
-                  return shaped as never;
-                },
-                experimental_onToolCallFinish: ({ toolCall, durationMs }) => {
-                  // The SDK reports fractional milliseconds; the UI only ever shows whole ones.
-                  toolDurations.set(toolCall.toolCallId, Math.round(durationMs));
-                },
-                // Models carry coding-agent priors and invent `grep` / `cat` / `ls`. Remap the
-                // unambiguous ones instead of spending a step on NoSuchToolError.
-                experimental_repairToolCall: repairToolCall,
-              }
-            : {}),
-          providerOptions: buildLlmProviderOptions(),
-          onFinish: ({ text, totalUsage }) => {
-            const outputText = text.slice(0, 500);
-            // `totalUsage`, not `usage`: the latter reports only the tool loop's final step.
-            genObs.update({
-              output: outputText,
-              usageDetails: {
-                inputTokens: totalUsage?.inputTokens ?? 0,
-                outputTokens: totalUsage?.outputTokens ?? 0,
-                totalTokens: (totalUsage?.inputTokens ?? 0) + (totalUsage?.outputTokens ?? 0),
-                ...(totalUsage?.outputTokenDetails?.reasoningTokens
-                  ? { reasoningTokens: totalUsage.outputTokenDetails.reasoningTokens }
-                  : {}),
-                ...(totalUsage?.inputTokenDetails?.cacheReadTokens
-                  ? { cacheReadInputTokens: totalUsage.inputTokenDetails.cacheReadTokens }
-                  : {}),
-              },
-            });
-            chainObs.otelSpan.setAttribute('langfuse.trace.output', outputText);
-          },
-        });
-
-        // Iterate fullStream (not textStream) so reasoning parts are surfaced separately. B4.
-        // Accumulate reasoning vs answer chars separately to estimate output tokens (and the
-        // breakdown) when the provider omits usage.
-        let reasoningText = '';
-        let answerText = '';
-        let toolCallCount = 0;
-        let toolFailureCount = 0;
-        // Execution time per tool call, filled by `experimental_onToolCallFinish` above. Measuring
-        // the gap between the `tool-call` and `tool-result` stream parts instead would report the
-        // flush interval, not the work — the SDK can emit both back to back once a tool has already
-        // finished, which showed up as 0ms for calls that actually took tens of ms.
-        const durationOf = (id: string | undefined): number | undefined => {
-          if (!id) return undefined;
-          const ms = toolDurations.get(id);
-          toolDurations.delete(id);
-          return ms;
-        };
-        for await (const part of result.fullStream) {
-          const p = part as {
-            type: string;
-            text?: string;
-            textDelta?: string;
-            delta?: string;
-            error?: unknown;
-            toolName?: string;
-            toolCallId?: string;
-            input?: unknown;
-            output?: unknown;
+            maxTokens;
+          const onEvent = (event: Record<string, unknown>) => {
+            reply.raw.write(JSON.stringify(event) + '\n');
+            (reply.raw as unknown as { flush?: () => void }).flush?.();
           };
-          if (process.env.DEBUG_AGENT === '1') {
+          const result = await runBestOfN({
+            model: getProvider().chatModel(turnModelId),
+            judgeModel: getProvider().chatModel(judgeModelId),
+            systemPrompt,
+            llmMessages,
+            query,
+            retrievedContext: results,
+            tools,
+            candidateCount,
+            temperatures: config.bestOfNTemperatures,
+            seedBase: config.bestOfNSeedBase,
+            maxSteps: config.bestOfNMaxSteps,
+            maxOutputTokens: maxTokens,
+            inputTokens,
+            toolDefTokens,
+            shaperBudgetTokens,
+            disclosureMeta,
+            disclosureThreshold: config.toolDisclosureThreshold,
+            onEvent,
+            startObservation: (name: string, input?: unknown) => {
+              // One generation observation per candidate and one for the judge, so N runs do not
+              // collapse into a single telemetry blob. The cast widens the update patch type to
+              // the `Record<string, unknown>` the orchestrator speaks.
+              const obs = chainObs.startObservation(name, { input }, { asType: 'generation' });
+              return {
+                update: (patch: Record<string, unknown>) => obs.update(patch),
+                end: () => obs.end(),
+              };
+            },
+          });
+          const agg = aggregateBestOfN(result.perCandidate, result.judge, result.answer);
+          genObs.update({
+            output: result.answer.slice(0, 500),
+            usageDetails: {
+              inputTokens: agg.promptTokens,
+              outputTokens: agg.completionTokens,
+              totalTokens: agg.promptTokens + agg.completionTokens,
+            },
+          });
+          chainObs.otelSpan.setAttribute('langfuse.trace.output', result.answer.slice(0, 500));
+          const finishData = JSON.stringify({
+            type: 'finish',
+            stopReason: result.stopReason,
+            usage: {
+              promptTokens: agg.promptTokens,
+              completionTokens: agg.completionTokens,
+              contextTokens: agg.contextTokens,
+              maxContextTokens: config.maxContextTokens,
+              estimated: agg.estimated,
+              breakdown: agg.breakdown,
+            },
+          });
+          reply.raw.write(finishData + '\n');
+          (reply.raw as unknown as { flush?: () => void }).flush?.();
+        } else {
+          // Tool results are replayed in full; the shaper only sheds them if a step's prompt would
+          // otherwise overflow the window. The system prompt, tool definitions and the output
+          // reservation ride alongside `messages`, so they come off the budget first.
+          const shaper = createToolTranscriptShaper({
+            budgetTokens:
+              Math.floor(config.maxContextTokens * config.toolContextBudgetRatio) -
+              inputTokens.system -
+              toolDefTokens -
+              maxTokens,
+            shedTargetTokens: config.toolShedResultTokens,
+          });
+          // Tool execution time, reported by the SDK and keyed by tool call, so the UI can show it
+          // without the timing ever entering the model's context.
+          const toolDurations = new Map<string, number>();
+          const result = streamText({
+            model: getProvider().chatModel(turnModelId),
+            system: systemPrompt,
+            messages: llmMessages,
+            maxOutputTokens: maxTokens,
+            ...(tools
+              ? {
+                  tools,
+                  stopWhen: stepCountIs(100),
+                  prepareStep: ({
+                    messages,
+                    stepNumber,
+                  }: {
+                    messages: Record<string, unknown>[];
+                    stepNumber: number;
+                  }) => {
+                    // The annotation above is the shaper's own message type, so no cast is needed;
+                    // it is also contravariantly compatible with the SDK's `ModelMessage[]` (every
+                    // ModelMessage is a Record<string, unknown>).
+                    const shaped = shaper.prepare(messages);
+                    // `stepNumber` is 0-based: the first LLM call is 0, later steps see the full
+                    // registry again so a mid-loop tool is never locked out.
+                    const active = selectActiveTools(
+                      disclosureMeta,
+                      query,
+                      stepNumber,
+                      config.toolDisclosureThreshold,
+                    );
+                    if (active && process.env.DEBUG_DISCLOSURE === '1') {
+                      console.log(
+                        `[disclosure] step=${stepNumber} active=${active.length}/${disclosureMeta?.allNames.length} tools exposed`,
+                      );
+                    }
+                    if (active) return { ...shaped, activeTools: active } as never;
+                    return shaped as never;
+                  },
+                  experimental_onToolCallFinish: ({ toolCall, durationMs }) => {
+                    // The SDK reports fractional milliseconds; the UI only ever shows whole ones.
+                    toolDurations.set(toolCall.toolCallId, Math.round(durationMs));
+                  },
+                  // Models carry coding-agent priors and invent `grep` / `cat` / `ls`. Remap the
+                  // unambiguous ones instead of spending a step on NoSuchToolError.
+                  experimental_repairToolCall: repairToolCall,
+                }
+              : {}),
+            providerOptions: buildLlmProviderOptions(),
+            onFinish: ({ text, totalUsage }) => {
+              const outputText = text.slice(0, 500);
+              // `totalUsage`, not `usage`: the latter reports only the tool loop's final step.
+              genObs.update({
+                output: outputText,
+                usageDetails: {
+                  inputTokens: totalUsage?.inputTokens ?? 0,
+                  outputTokens: totalUsage?.outputTokens ?? 0,
+                  totalTokens: (totalUsage?.inputTokens ?? 0) + (totalUsage?.outputTokens ?? 0),
+                  ...(totalUsage?.outputTokenDetails?.reasoningTokens
+                    ? { reasoningTokens: totalUsage.outputTokenDetails.reasoningTokens }
+                    : {}),
+                  ...(totalUsage?.inputTokenDetails?.cacheReadTokens
+                    ? { cacheReadInputTokens: totalUsage.inputTokenDetails.cacheReadTokens }
+                    : {}),
+                },
+              });
+              chainObs.otelSpan.setAttribute('langfuse.trace.output', outputText);
+            },
+          });
+
+          // Iterate fullStream (not textStream) so reasoning parts are surfaced separately. B4.
+          // Accumulate reasoning vs answer chars separately to estimate output tokens (and the
+          // breakdown) when the provider omits usage.
+          let reasoningText = '';
+          let answerText = '';
+          let toolCallCount = 0;
+          let toolFailureCount = 0;
+          // Execution time per tool call, filled by `experimental_onToolCallFinish` above. Measuring
+          // the gap between the `tool-call` and `tool-result` stream parts instead would report the
+          // flush interval, not the work — the SDK can emit both back to back once a tool has already
+          // finished, which showed up as 0ms for calls that actually took tens of ms.
+          const durationOf = (id: string | undefined): number | undefined => {
+            if (!id) return undefined;
+            const ms = toolDurations.get(id);
+            toolDurations.delete(id);
+            return ms;
+          };
+          for await (const part of result.fullStream) {
+            const p = part as {
+              type: string;
+              text?: string;
+              textDelta?: string;
+              delta?: string;
+              error?: unknown;
+              toolName?: string;
+              toolCallId?: string;
+              input?: unknown;
+              output?: unknown;
+            };
+            if (process.env.DEBUG_AGENT === '1') {
+              console.log(
+                `[agent-stream] type=${p.type} toolName=${p.toolName ?? ''} hasText=${!!(p.text ?? p.textDelta ?? p.delta)}`,
+              );
+            }
+            if (p.type === 'reasoning-delta' || p.type === 'reasoning') {
+              const delta = p.text ?? p.textDelta ?? p.delta ?? '';
+              if (delta) {
+                reasoningText += delta;
+                reply.raw.write(
+                  JSON.stringify({ type: 'reasoning-delta', textDelta: delta }) + '\n',
+                );
+                (reply.raw as unknown as { flush?: () => void }).flush?.();
+              }
+            } else if (p.type === 'text-delta' || p.type === 'text') {
+              const delta = p.text ?? p.textDelta ?? p.delta ?? '';
+              if (delta) {
+                answerText += delta;
+                reply.raw.write(JSON.stringify({ type: 'text-delta', textDelta: delta }) + '\n');
+                (reply.raw as unknown as { flush?: () => void }).flush?.();
+              }
+            } else if (p.type === 'tool-call') {
+              toolCallCount++;
+              const summary = summarizeToolInput(p.toolName, p.input);
+              reply.raw.write(
+                JSON.stringify({ type: 'tool-step', toolName: p.toolName, summary }) + '\n',
+              );
+              (reply.raw as unknown as { flush?: () => void }).flush?.();
+            } else if (p.type === 'tool-result') {
+              // The runtime envelope turns thrown tools into ordinary results carrying `error`, so
+              // success has to be read off the output shape rather than the stream part type.
+              const failed = isToolFailure(p.output);
+              if (failed) toolFailureCount++;
+              reply.raw.write(
+                JSON.stringify({
+                  type: 'tool-step',
+                  toolName: p.toolName,
+                  done: true,
+                  ok: !failed,
+                  durationMs: durationOf(p.toolCallId),
+                  summary: summarizeToolResult(p.toolName, p.output),
+                }) + '\n',
+              );
+              (reply.raw as unknown as { flush?: () => void }).flush?.();
+            } else if (p.type === 'tool-error') {
+              // Failures that never reach `execute` — schema validation, unknown tool name. The model
+              // still receives them as tool results, so this must close the UI's trace line and must
+              // NOT throw: only a stream-level `error` may end the response.
+              toolFailureCount++;
+              const message = p.error instanceof Error ? p.error.message : String(p.error);
+              console.warn(`[chat] tool-error ${p.toolName ?? '?'} — ${message}`);
+              reply.raw.write(
+                JSON.stringify({
+                  type: 'tool-step',
+                  toolName: p.toolName,
+                  done: true,
+                  ok: false,
+                  durationMs: durationOf(p.toolCallId),
+                  // The SDK's message appends the full tool inventory, which is useful to the model but
+                  // just noise in a one-line trace entry.
+                  summary: message.split('. Available tools:')[0],
+                }) + '\n',
+              );
+              (reply.raw as unknown as { flush?: () => void }).flush?.();
+            } else if (p.type === 'error') {
+              throw p.error;
+            }
+          }
+
+          const finishReason = await result.finishReason;
+          if (toolCallCount > 0) {
             console.log(
-              `[agent-stream] type=${p.type} toolName=${p.toolName ?? ''} hasText=${!!(p.text ?? p.textDelta ?? p.delta)}`,
+              `[chat] Agent used ${toolCallCount} tool call(s)` +
+                (toolFailureCount > 0 ? ` (${toolFailureCount} failed)` : '') +
+                ` | finishReason=${finishReason} | answerLen=${answerText.length}`,
             );
           }
-          if (p.type === 'reasoning-delta' || p.type === 'reasoning') {
-            const delta = p.text ?? p.textDelta ?? p.delta ?? '';
-            if (delta) {
-              reasoningText += delta;
-              reply.raw.write(JSON.stringify({ type: 'reasoning-delta', textDelta: delta }) + '\n');
-              (reply.raw as unknown as { flush?: () => void }).flush?.();
-            }
-          } else if (p.type === 'text-delta' || p.type === 'text') {
-            const delta = p.text ?? p.textDelta ?? p.delta ?? '';
-            if (delta) {
-              answerText += delta;
-              reply.raw.write(JSON.stringify({ type: 'text-delta', textDelta: delta }) + '\n');
-              (reply.raw as unknown as { flush?: () => void }).flush?.();
-            }
-          } else if (p.type === 'tool-call') {
-            toolCallCount++;
-            const summary = summarizeToolInput(p.toolName, p.input);
-            reply.raw.write(
-              JSON.stringify({ type: 'tool-step', toolName: p.toolName, summary }) + '\n',
-            );
-            (reply.raw as unknown as { flush?: () => void }).flush?.();
-          } else if (p.type === 'tool-result') {
-            // The runtime envelope turns thrown tools into ordinary results carrying `error`, so
-            // success has to be read off the output shape rather than the stream part type.
-            const failed = isToolFailure(p.output);
-            if (failed) toolFailureCount++;
-            reply.raw.write(
-              JSON.stringify({
-                type: 'tool-step',
-                toolName: p.toolName,
-                done: true,
-                ok: !failed,
-                durationMs: durationOf(p.toolCallId),
-                summary: summarizeToolResult(p.toolName, p.output),
-              }) + '\n',
-            );
-            (reply.raw as unknown as { flush?: () => void }).flush?.();
-          } else if (p.type === 'tool-error') {
-            // Failures that never reach `execute` — schema validation, unknown tool name. The model
-            // still receives them as tool results, so this must close the UI's trace line and must
-            // NOT throw: only a stream-level `error` may end the response.
-            toolFailureCount++;
-            const message = p.error instanceof Error ? p.error.message : String(p.error);
-            console.warn(`[chat] tool-error ${p.toolName ?? '?'} — ${message}`);
-            reply.raw.write(
-              JSON.stringify({
-                type: 'tool-step',
-                toolName: p.toolName,
-                done: true,
-                ok: false,
-                durationMs: durationOf(p.toolCallId),
-                // The SDK's message appends the full tool inventory, which is useful to the model but
-                // just noise in a one-line trace entry.
-                summary: message.split('. Available tools:')[0],
-              }) + '\n',
-            );
-            (reply.raw as unknown as { flush?: () => void }).flush?.();
-          } else if (p.type === 'error') {
-            throw p.error;
-          }
-        }
 
-        const finishReason = await result.finishReason;
-        if (toolCallCount > 0) {
-          console.log(
-            `[chat] Agent used ${toolCallCount} tool call(s)` +
-              (toolFailureCount > 0 ? ` (${toolFailureCount} failed)` : '') +
-              ` | finishReason=${finishReason} | answerLen=${answerText.length}`,
+          // Why the loop ended, reported as a field on `finish` rather than as an `error` event: the
+          // UI owns the wording (it is fully localized) and `error` stays reserved for a stream that
+          // actually broke. `output-limit` was previously invisible — the answer just stopped.
+          let stopReason: 'completed' | 'step-limit' | 'output-limit' = 'completed';
+          if (finishReason === 'tool-calls' && answerText.trim().length === 0) {
+            stopReason = 'step-limit';
+            console.warn('[chat] Agent step limit reached without a final answer');
+            chainObs.update({ level: 'ERROR', statusMessage: 'Agent step limit reached' });
+          } else if (finishReason === 'length') {
+            stopReason = 'output-limit';
+            console.warn(`[chat] Output truncated at maxOutputTokens=${maxTokens}`);
+            chainObs.update({ level: 'WARNING', statusMessage: 'Output token limit reached' });
+          }
+
+          // `totalUsage` sums every step of the tool loop; `usage` is the last step alone, which is
+          // what still occupies the context window.
+          const [totalUsage, lastStepUsage, stepResults] = await Promise.all([
+            result.totalUsage,
+            result.usage,
+            result.steps,
+          ]);
+          const basis = measureTurn(
+            {
+              ...inputTokens,
+              toolDefs: toolDefTokens,
+              reasoning: estimateTokens(reasoningText),
+              answer: estimateTokens(answerText),
+            },
+            { replay: shaper.replay, toolCallTokens: measureToolCallTokens(stepResults) },
           );
+          const resolved = resolveUsage(totalUsage, lastStepUsage, basis);
+          const breakdown = buildBreakdown(basis, resolved);
+          const finishData = JSON.stringify({
+            type: 'finish',
+            stopReason,
+            usage: {
+              promptTokens: resolved.promptTokens,
+              completionTokens: resolved.completionTokens,
+              contextTokens: resolved.contextTokens,
+              maxContextTokens: config.maxContextTokens,
+              estimated: resolved.estimated,
+              breakdown,
+            },
+          });
+          reply.raw.write(finishData + '\n');
+          (reply.raw as unknown as { flush?: () => void }).flush?.();
         }
-
-        // Why the loop ended, reported as a field on `finish` rather than as an `error` event: the
-        // UI owns the wording (it is fully localized) and `error` stays reserved for a stream that
-        // actually broke. `output-limit` was previously invisible — the answer just stopped.
-        let stopReason: 'completed' | 'step-limit' | 'output-limit' = 'completed';
-        if (finishReason === 'tool-calls' && answerText.trim().length === 0) {
-          stopReason = 'step-limit';
-          console.warn('[chat] Agent step limit reached without a final answer');
-          chainObs.update({ level: 'ERROR', statusMessage: 'Agent step limit reached' });
-        } else if (finishReason === 'length') {
-          stopReason = 'output-limit';
-          console.warn(`[chat] Output truncated at maxOutputTokens=${maxTokens}`);
-          chainObs.update({ level: 'WARNING', statusMessage: 'Output token limit reached' });
-        }
-
-        // `totalUsage` sums every step of the tool loop; `usage` is the last step alone, which is
-        // what still occupies the context window.
-        const [totalUsage, lastStepUsage, stepResults] = await Promise.all([
-          result.totalUsage,
-          result.usage,
-          result.steps,
-        ]);
-        const basis = measureTurn(
-          {
-            ...inputTokens,
-            toolDefs: toolDefTokens,
-            reasoning: estimateTokens(reasoningText),
-            answer: estimateTokens(answerText),
-          },
-          { replay: shaper.replay, toolCallTokens: measureToolCallTokens(stepResults) },
-        );
-        const resolved = resolveUsage(totalUsage, lastStepUsage, basis);
-        const breakdown = buildBreakdown(basis, resolved);
-        const finishData = JSON.stringify({
-          type: 'finish',
-          stopReason,
-          usage: {
-            promptTokens: resolved.promptTokens,
-            completionTokens: resolved.completionTokens,
-            contextTokens: resolved.contextTokens,
-            maxContextTokens: config.maxContextTokens,
-            estimated: resolved.estimated,
-            breakdown,
-          },
-        });
-        reply.raw.write(finishData + '\n');
-        (reply.raw as unknown as { flush?: () => void }).flush?.();
       }
     } catch (err) {
       llmError = err as Error;
@@ -707,11 +771,11 @@ export async function chatRoutes(app: FastifyInstance) {
       const elapsed = Date.now() - startTime;
       if (llmError) {
         console.log(
-          `[chat] FAILED | ${elapsed}ms | mode=${useStructured ? 'structured' : 'text'} | error=${llmError.message}`,
+          `[chat] FAILED | ${elapsed}ms | mode=${useStructured ? 'structured' : maxMode ? 'max' : 'text'} | error=${llmError.message}`,
         );
       } else {
         console.log(
-          `[chat] COMPLETED | total=${elapsed}ms | mode=${useStructured ? 'structured' : 'text'}`,
+          `[chat] COMPLETED | total=${elapsed}ms | mode=${useStructured ? 'structured' : maxMode ? 'max' : 'text'}`,
         );
       }
     }

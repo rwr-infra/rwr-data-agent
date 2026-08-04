@@ -78,12 +78,21 @@ export interface StepLike {
 
 /** Tokens the model spent emitting tool-call arguments across the turn (output side). */
 export function measureToolCallTokens(steps: readonly StepLike[]): number {
-  return steps.reduce((n, s) => n + s.toolCalls.reduce((m, c) => m + estimateTokens(safeStringify(c.input)), 0), 0);
+  return steps.reduce(
+    (n, s) => n + s.toolCalls.reduce((m, c) => m + estimateTokens(safeStringify(c.input)), 0),
+    0,
+  );
 }
 
 /** Token basis for one turn, with the agent loop's prompt replay already expanded. */
 export interface TurnBasis {
-  in: { system: number; toolDefs: number; context: number; messages: number; toolTranscript: number };
+  in: {
+    system: number;
+    toolDefs: number;
+    context: number;
+    messages: number;
+    toolTranscript: number;
+  };
   out: { reasoning: number; toolCalls: number; answer: number };
   inTotal: number;
   outTotal: number;
@@ -152,7 +161,10 @@ export function measureTurn(tokens: TurnTokens, activity: TurnActivity): TurnBas
     outTotal: sum(outSlices),
     steps: stepCount,
     // With no tool loop there is no replay log, so fall back to the caller's own base estimate.
-    baseIn: tokens.system + tokens.toolDefs + (activity.replay.length > 0 ? perStepBase : tokens.context + tokens.messages),
+    baseIn:
+      tokens.system +
+      tokens.toolDefs +
+      (activity.replay.length > 0 ? perStepBase : tokens.context + tokens.messages),
     lastStepTranscript: Math.max(lastReplay - perStepBase, 0),
   };
 }
@@ -192,7 +204,8 @@ export function resolveUsage(
   // overstatement eventually blocks the conversation outright. Anchor on the provider's last-step
   // input figure and subtract the transcript the shaper measured on that step.
   const lastIn = num(lastStep?.inputTokens);
-  const carriedOver = lastIn !== undefined ? Math.max(lastIn - basis.lastStepTranscript, 0) : basis.baseIn;
+  const carriedOver =
+    lastIn !== undefined ? Math.max(lastIn - basis.lastStepTranscript, 0) : basis.baseIn;
 
   return {
     promptTokens,
@@ -224,6 +237,137 @@ export interface TokenBreakdown {
   exact: string[];
 }
 
+/**
+ * Best-of-N ("max mode") accounting inputs. Every candidate is its own agent loop, so each has
+ * its own `TurnBasis` (measured from its own transcript shaper) and its own provider usage pair.
+ */
+export interface BestOfNCandidateAccounting {
+  i: number;
+  basis: TurnBasis;
+  totalUsage?: LanguageModelUsage;
+  lastStepUsage?: LanguageModelUsage;
+}
+
+/** The synthesis ("judge") call: a single tool-less LLM call. */
+export interface BestOfNJudgeAccounting {
+  basis: TurnBasis;
+  totalUsage?: LanguageModelUsage;
+  lastStepUsage?: LanguageModelUsage;
+}
+
+/** TokenBreakdown plus the best-of-N fields. Existing fields keep their meanings — they sum the
+ *  whole turn (all candidates + the judge). The extra fields are additive, per the stream contract. */
+export interface BestOfNBreakdown extends TokenBreakdown {
+  /** Number of candidate runs in this best-of-N turn. */
+  candidates?: number;
+  /** Per-candidate spend, in candidate order. */
+  perCandidate?: { i: number; steps: number; promptTokens: number; completionTokens: number }[];
+  /** The synthesis call's own spend. Absent when the turn fell back to a single candidate. */
+  judge?: { promptTokens: number; completionTokens: number };
+}
+
+/**
+ * Aggregate a best-of-N turn: N parallel candidate agent loops plus (usually) one judge call.
+ *
+ * The totals are plain sums — prompt/completion spend accumulates across every LLM round trip.
+ * `contextTokens` is NOT a sum: only the final answer (the judge's, or the fallback candidate's)
+ * enters the conversation, so next-request occupancy is the shared base prompt plus that answer,
+ * with every candidate-loop token excluded — same semantics as the single-path turn.
+ */
+export function aggregateBestOfN(
+  candidates: BestOfNCandidateAccounting[],
+  judge: BestOfNJudgeAccounting | undefined,
+  fallbackAnswer: string,
+): {
+  breakdown: BestOfNBreakdown;
+  promptTokens: number;
+  completionTokens: number;
+  contextTokens: number;
+  estimated: boolean;
+} {
+  const resolvedCandidates = candidates.map((c) =>
+    resolveUsage(c.totalUsage, c.lastStepUsage, c.basis),
+  );
+  const resolvedJudge = judge
+    ? resolveUsage(judge.totalUsage, judge.lastStepUsage, judge.basis)
+    : undefined;
+
+  const bases = [...candidates.map((c) => c.basis), ...(judge ? [judge.basis] : [])];
+  const merged: TurnBasis = {
+    in: {
+      system: sum(bases.map((b) => b.in.system)),
+      toolDefs: sum(bases.map((b) => b.in.toolDefs)),
+      context: sum(bases.map((b) => b.in.context)),
+      messages: sum(bases.map((b) => b.in.messages)),
+      toolTranscript: sum(bases.map((b) => b.in.toolTranscript)),
+    },
+    out: {
+      reasoning: sum(bases.map((b) => b.out.reasoning)),
+      toolCalls: sum(bases.map((b) => b.out.toolCalls)),
+      answer: sum(bases.map((b) => b.out.answer)),
+    },
+    inTotal: sum(bases.map((b) => b.inTotal)),
+    outTotal: sum(bases.map((b) => b.outTotal)),
+    steps: sum(bases.map((b) => b.steps)),
+    baseIn: candidates[0]?.basis.baseIn ?? 0,
+    lastStepTranscript: 0,
+  };
+
+  const promptTokens =
+    sum(resolvedCandidates.map((r) => r.promptTokens)) + (resolvedJudge?.promptTokens ?? 0);
+  const completionTokens =
+    sum(resolvedCandidates.map((r) => r.completionTokens)) + (resolvedJudge?.completionTokens ?? 0);
+  // A judge can succeed but produce no text — the turn then falls back to a draft, and that draft
+  // (not the empty judge answer) is what enters the conversation, so measure it.
+  const answerTokens = judge?.basis.out.answer
+    ? judge.basis.out.answer
+    : estimateTokens(fallbackAnswer);
+  const reasoningTokens = [
+    ...resolvedCandidates.map((r) => r.reasoningTokens),
+    resolvedJudge?.reasoningTokens,
+  ].filter((n): n is number => n !== undefined);
+  const cacheReadTokens = [
+    ...resolvedCandidates.map((r) => r.cacheReadTokens),
+    resolvedJudge?.cacheReadTokens,
+  ].filter((n): n is number => n !== undefined);
+
+  const resolved: ResolvedUsage = {
+    promptTokens,
+    completionTokens,
+    contextTokens: merged.baseIn + answerTokens,
+    ...(reasoningTokens.length > 0 ? { reasoningTokens: sum(reasoningTokens) } : {}),
+    ...(cacheReadTokens.length > 0 ? { cacheReadTokens: sum(cacheReadTokens) } : {}),
+    estimated: resolvedCandidates.some((r) => r.estimated) || (resolvedJudge?.estimated ?? false),
+  };
+
+  const breakdown: BestOfNBreakdown = buildBreakdown(merged, resolved);
+  breakdown.candidates = candidates.length;
+  breakdown.perCandidate = resolvedCandidates.map((r, idx) => ({
+    i: candidates[idx].i,
+    steps: candidates[idx].basis.steps,
+    promptTokens: r.promptTokens,
+    completionTokens: r.completionTokens,
+  }));
+  if (resolvedJudge) {
+    breakdown.judge = {
+      promptTokens: resolvedJudge.promptTokens,
+      completionTokens: resolvedJudge.completionTokens,
+    };
+  }
+
+  return {
+    breakdown,
+    promptTokens,
+    completionTokens,
+    contextTokens: resolved.contextTokens,
+    estimated: resolved.estimated,
+  };
+}
+
+function sum(values: number[]): number {
+  return values.reduce((a, b) => a + b, 0);
+}
+
 /** Distribute the reported input/output totals over the turn's char basis so the UI can show
  *  "where the tokens went" even when the provider only reports aggregates. Provider-reported detail
  *  (reasoning tokens, cache reads) is used verbatim and kept out of the scaling. */
@@ -245,7 +389,10 @@ export function buildBreakdown(basis: TurnBasis, usage: ResolvedUsage): TokenBre
   } else {
     reasoning = scaler(basis.outTotal, usage.completionTokens)(basis.out.reasoning);
   }
-  const outScale = scaler(basis.outTotal - basis.out.reasoning, Math.max(usage.completionTokens - reasoning, 0));
+  const outScale = scaler(
+    basis.outTotal - basis.out.reasoning,
+    Math.max(usage.completionTokens - reasoning, 0),
+  );
 
   if (usage.cacheReadTokens !== undefined) exact.push('cacheRead');
 

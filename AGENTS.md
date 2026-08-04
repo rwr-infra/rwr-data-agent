@@ -273,23 +273,25 @@ Diagrams for the request pipeline, the tool loop, the stream contract and the in
 ### Routes
 | Route | Purpose |
 |---|---|
-| `POST /v1/chat/completions` | Main endpoint. Extra fields: `mod`, `response_format` |
+| `POST /v1/chat/completions` | Main endpoint. Extra fields: `mod`, `response_format`, `mode` ('max' = best-of-N), `candidates` |
 | `GET /v1/models` | Model list |
 | `GET /v1/packages` | Packages in the current index (`name`, `displayName`, `count`) |
 | `GET /v1/tools` | Tool inventory: built-ins, plugin entries with per-file errors, `toolsDir`, `hotReload` |
+| `GET /v1/limits` | `{max_conversation_rounds, max_context_tokens}` — the caps the UI shows before the first turn |
 | `GET /health` | `{status, index:{ready, documents, packages, builtAt, reason?}}` — no external check |
 
 ### Request pipeline (src/api/routes/chat.ts)
 1. External `system` messages dropped; server enforces its own `SYSTEM_PROMPT` (`src/retrieval/prompt.ts`). Anti-injection.
-2. Token-size guard at ~`maxContextTokens * 0.7`.
-3. `x-session-id` keys a rolling summary (`src/memory/summarizer.ts`, in-process `Map`, never persisted); summaries regenerate every `SUMMARY_INTERVAL_TURNS`.
-4. `isMetaQuery` short-circuits search for questions about the bot.
-5. `buildSearchQuery` (`src/retrieval/queryRewrite.ts`) merges history + summary + CN↔EN synonym expansion.
-6. `retrievalTopK(category, exactKey)` picks the breadth: 5 for a bare key, 150 for enumeration, 12 for inheritance/source/script (those are answered by graph tools, so prose only has to identify the entity), else 30. `localSearch(query, filters, topK, enrichedQuery)` then runs, optionally filtered by `body.mod`.
-7. `buildUserPrompt` embeds each result at up to 2000 chars **until `CONTEXT_BUDGET_TOKENS` is spent**; the remainder are listed as `Key | type | name | mod | file` one-liners with an instruction to expand them via `searchDocs`/`readSource`. Every hit still appears, so enumeration keeps full coverage while the prompt stops growing.
-8. A second size guard runs here, once the real prompt exists: the first one only sees the incoming messages, and a 150-result enumeration adds far more than the user typed.
-9. Tools come from `getAgentTools()` (`src/agent/toolDefs.ts`), re-queried per request so hot-reloaded plugins take effect.
-10. `streamText` with graph tools, or `streamObject` with `EnumResultSchema`/`ComparisonResultSchema` (`src/types/schemas.ts`) when the query is enumeration/comparison **and** `response_format: json_object` (or `x-response-format`) is set.
+2. Conversation-round guard: `ceil(nonSystemMessages / 2) > MAX_CONVERSATION_ROUNDS` → 400 `conversation_limit_exceeded` (carries `rounds` / `max_rounds`). Bounds thread length, not request rate — the history is re-sent every turn *and* once per tool-loop step, so an endless thread is the real cost sink. `0` disables it.
+3. Token-size guard at ~`maxContextTokens * 0.7`.
+4. `x-session-id` keys a rolling summary (`src/memory/summarizer.ts`, in-process `Map`, never persisted); summaries regenerate every `SUMMARY_INTERVAL_TURNS`.
+5. `isMetaQuery` short-circuits search for questions about the bot.
+6. `buildSearchQuery` (`src/retrieval/queryRewrite.ts`) merges history + summary + CN↔EN synonym expansion.
+7. `retrievalTopK(category, exactKey)` picks the breadth: 5 for a bare key, 150 for enumeration, 12 for inheritance/source/script (those are answered by graph tools, so prose only has to identify the entity), else 30. `localSearch(query, filters, topK, enrichedQuery)` then runs, optionally filtered by `body.mod`.
+8. `buildUserPrompt` embeds each result at up to 2000 chars **until `CONTEXT_BUDGET_TOKENS` is spent**; the remainder are listed as `Key | type | name | mod | file` one-liners with an instruction to expand them via `searchDocs`/`readSource`. Every hit still appears, so enumeration keeps full coverage while the prompt stops growing.
+9. A second size guard runs here, once the real prompt exists: the first one only sees the incoming messages, and a 150-result enumeration adds far more than the user typed.
+10. Tools come from `getAgentTools()` (`src/agent/toolDefs.ts`), re-queried per request so hot-reloaded plugins take effect.
+11. `streamText` with graph tools, or `streamObject` with `EnumResultSchema`/`ComparisonResultSchema` (`src/types/schemas.ts`) when the query is enumeration/comparison **and** `response_format: json_object` (or `x-response-format`) is set.
 
 ### Streaming format
 Custom **NDJSON**, not SSE. One JSON object per line, keyed by `type`: `text-delta`, `reasoning-delta`, `json-delta`, `tool-step`, `finish`, `error`. Treat these shapes as a contract with the Web UI — **extend with new optional fields, never repurpose an existing one.**
@@ -305,6 +307,18 @@ Before lowering it, note two causes worth fixing first, because they may remove 
 - "有哪些 X 引用了 Y" classifies as `enumeration` (topK 150) when it is a reverse lookup that wants `findReferences` and topK 12.
 - `SYSTEM_PROMPT` tells the model to work in 3–6 calls and settle absence in 4–6 attempts; measured runs reach 28–64. Either the constraint needs teeth or the wording needs to stop claiming a budget nothing enforces.
 
+### Best-of-N synthesis ("max mode")
+`mode: 'max'` on `/v1/chat/completions` (the UI's per-message Max toggle) runs **N parallel candidate agent loops, then one tool-less synthesis ("judge") call** that merges the drafts into the final answer. Orchestrated by `runBestOfN()` (`src/agent/synthesize.ts`), prompted by `buildSynthesisPrompt()` (`src/retrieval/synthesisPrompt.ts`). Not Cursor-style Max mode: this is best-of-N / self-consistency, and there is **no quota, billing or tiering** — a per-message toggle and an env-guarded N.
+
+- **Cost guardrail is the whole point.** The normal loop's 100-step stop is unbounded in practice (see the gap above); best-of-N multiplies spend by N, so every candidate runs under `stopWhen: stepCountIs(BEST_OF_N_MAX_STEPS)` (default **6**) — deliberately tight. Do not raise it casually, and never widen the candidate count beyond `BEST_OF_N`/`body.candidates` (clamped to ≤ 8).
+- **Retrieval and the tool registry are shared, once.** `ragUserPrompt`, `tools`, disclosure metadata and the input-token estimates are computed once; only each candidate's temperature/seed (`buildCandidateProviderOptions`) and its own transcript shaper differ. Every candidate must get **its own** `createToolTranscriptShaper()` — the shaper holds mutable `replay` state.
+- **Candidates reuse the full tool surface**: `prepareStep` disclosure, `repairToolCall` aliases, `toolRuntime` envelope — the same as the normal path, so a candidate cannot drift from normal behaviour.
+- **Failure policy** (`runBestOfN` never throws): fewer than 2 successful drafts, or a judge that fails/produces nothing, degrades to the "best" draft (most steps, `finishReason` ≠ error) emitted as a one-shot `text-delta`. All candidates failed → whatever partial text the longest run produced, `stopReason` stays `completed`. Judge `length` → `output-limit`.
+- **Structured mode is excluded**: enumeration/comparison with `response_format: json_object` never enters best-of-N (`useStructured` short-circuits).
+- **Stream contract additions (all additive)**: `candidate-open`/`candidate-close` frame each run; `candidate-step` reuses the `tool-step` shape plus a `candidate` index; judge `text-delta`/`reasoning-delta` are the final answer; `candidates` delivers the raw drafts (`{i, steps, ok, answer}[]` + `kind: synthesis|fallback`) for the collapsible panel. `finish.usage.breakdown` adds optional `candidates`, `perCandidate[]`, `judge` — existing fields keep their meanings and sum the whole turn.
+- **Token accounting is a sum plus one exclusion**: `aggregateBestOfN()` (`src/api/tokenAccounting.ts`) sums every candidate loop + the judge for `promptTokens`/`completionTokens`, but `contextTokens` is **baseIn + the final answer only** — candidate-loop tokens never occupy the next request, mirroring how the tool transcript is excluded on the normal path. Don't let the usage bar start counting candidate context.
+- **Judges and candidates share the provider** (`getProvider()`); the judge follows the turn's selected model (`body.model`) unless `JUDGE_MODEL` was explicitly set. Each candidate and the judge get their own Langfuse generation observation so N runs do not collapse into one span.
+
 ### Frontend
 Svelte 5 + Vite + Tailwind 4 + daisyUI in `web/`, building into `public/` — treat `public/` as generated. `web/vite.config.ts` reads `PORT` from the repo-root `.env` via `loadEnv`, so the dev proxy always follows the backend port. The Header's dropdown is a package filter fed by `GET /v1/packages`; it hides itself when there is only one package.
 
@@ -319,6 +333,8 @@ Svelte 5 + Vite + Tailwind 4 + daisyUI in `web/`, building into `public/` — tr
 |---|---|---|
 | `LLM_BASE_URL` | `https://api.siliconflow.cn/v1` | |
 | `LLM_MODEL` | `deepseek-v4-flash` | |
+| `LLM_MODELS` | `LLM_MODEL` | Comma-separated list served by `GET /v1/models` and accepted in `body.model`; anything else (incl. the legacy `rwr-agent` alias) falls back to `LLM_MODEL`. The UI's model switcher only lists these |
+| `LLM_MODEL_LABELS` | — | Display-name mapping for the switcher (`id=Label` pairs, comma-separated); each `/v1/models` entry carries a `display_name`, which the UI renders instead of the raw id — raw ids stay the wire format only |
 | `DATA_DIR` | `./data` | Single package or directory of packages |
 | `OUTPUT_DIR` | `./output` | |
 | `GRAPH_PATH` / `SEARCH_INDEX_PATH` | `<OUTPUT_DIR>/…` | Individual overrides |
@@ -331,12 +347,19 @@ Svelte 5 + Vite + Tailwind 4 + daisyUI in `web/`, building into `public/` — tr
 | `LLM_MAX_OUTPUT_TOKENS` | `32768` | Reasoning + answer share this budget |
 | `CORS_ORIGINS` | empty (reflect any) | Comma-separated allowlist; set it once the port is not LAN-only |
 | `API_TOKEN` | empty (no auth) | When set, `/v1/*` needs `Authorization: Bearer` or `x-api-key` |
+| `MAX_CONVERSATION_ROUNDS` | `20` | Max rounds one thread may carry (round = question + answer, counted off the replayed history). Past it `/v1/chat/completions` answers 400 `conversation_limit_exceeded`; `0` disables |
 | `CONTEXT_BUDGET_TOKENS` | `24000` | Cap on full-text retrieved context; the rest become one-liners |
 | `TOOL_TIMEOUT_MS` | `15000` | Deadline per tool execution; expiry returns `{error, hint}` |
 | `TOOL_CONTEXT_BUDGET_RATIO` | `0.75` | Window fraction a step's prompt may fill before old tool results are shed |
 | `TOOL_SHED_RESULT_TOKENS` | `600` | Size an old tool result is shrunk to when shedding is unavoidable |
 | `LLM_REASONING_EFFORT` / `LLM_THINKING_ENABLED` / `LLM_TEMPERATURE` | unset | Omitted from the request when unset |
 | `SUMMARY_INTERVAL_TURNS` / `SUMMARY_MODEL` | `3` / `LLM_MODEL` | |
+| `BEST_OF_N_ENABLED` | `true` | Master switch for max mode |
+| `BEST_OF_N` | `3` | Candidate count for max mode (`body.candidates` overrides, clamped ≤ 8) |
+| `BEST_OF_N_MAX_STEPS` | `6` | Per-candidate step cap — the cost guardrail |
+| `BEST_OF_N_TEMPERATURES` | `0.3,0.6,0.9` | Candidate temperature sequence, cycled |
+| `BEST_OF_N_SEED_BASE` | `1` | Seed of candidate 0; each candidate adds its index |
+| `JUDGE_MODEL` | `LLM_MODEL` | Model for the synthesis call |
 | `LANGFUSE_*` | disabled | |
 
 ## Deployment

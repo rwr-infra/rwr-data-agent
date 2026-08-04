@@ -5,6 +5,7 @@ import { chatRoutes } from './api/routes/chat.js';
 import { modelsRoutes } from './api/routes/models.js';
 import { healthRoutes } from './api/routes/health.js';
 import { packagesRoutes } from './api/routes/packages.js';
+import { limitsRoutes } from './api/routes/limits.js';
 import { toolsRoutes } from './api/routes/tools.js';
 import { shutdownLangfuse } from './observability/langfuse.js';
 import { getIndexStatus, startIndexes } from './indexing/bootstrap.js';
@@ -65,6 +66,7 @@ export async function buildApp() {
   await app.register(modelsRoutes, { prefix: '/v1' });
   await app.register(packagesRoutes, { prefix: '/v1' });
   await app.register(toolsRoutes, { prefix: '/v1' });
+  await app.register(limitsRoutes, { prefix: '/v1' });
   await app.register(healthRoutes);
 
   try {

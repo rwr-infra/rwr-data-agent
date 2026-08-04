@@ -16,6 +16,11 @@ RUN npm --prefix web install
 
 COPY tsconfig.json ./
 COPY src ./src
+
+# The web build bakes this into the header badge. Declared here (not at the top of
+# the stage) so changing it only busts the build layer, not the npm install layers.
+ARG APP_VERSION=dev
+ENV APP_VERSION=$APP_VERSION
 RUN npm run build
 
 # -----------------------------------------------------------------------------

@@ -1,4 +1,14 @@
-export type DocumentType = 'weapon' | 'soldier' | 'faction' | 'script_chunk' | 'projectile' | 'vehicle' | 'call' | 'character' | 'carry_item' | 'resource';
+export type DocumentType =
+  | 'weapon'
+  | 'soldier'
+  | 'faction'
+  | 'script_chunk'
+  | 'projectile'
+  | 'vehicle'
+  | 'call'
+  | 'character'
+  | 'carry_item'
+  | 'resource';
 
 export interface LanguageData {
   language: string;
@@ -74,4 +84,12 @@ export interface ChatCompletionRequest {
   /** Restrict retrieval to a single data package (see GET /v1/packages). */
   mod?: string;
   response_format?: { type: 'json_object' | 'text' };
+  /**
+   * 'max' runs best-of-N: N parallel candidate agent loops, then one synthesis call that
+   * merges them into the final answer. 'normal' (default) is the single-path agent loop.
+   * Only the agentic text path honours it; structured (enumeration/comparison) stays single.
+   */
+  mode?: 'normal' | 'max';
+  /** Override the candidate count for a max-mode request (default: BEST_OF_N). */
+  candidates?: number;
 }

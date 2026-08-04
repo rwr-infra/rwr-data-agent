@@ -35,6 +35,9 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ github.ref_name }}
+          # Surfaces the release tag in the web header badge.
+          build-args: |
+            APP_VERSION=${{ github.ref_name }}
           # Layer cache lives in the Actions cache, so `npm ci` and the web build
           # are reused across tags as long as the lockfiles are unchanged.
           cache-from: type=gha

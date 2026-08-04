@@ -34,3 +34,19 @@ export function buildLlmProviderOptions(): Record<string, Record<string, JSONVal
 export function disabledThinkingOptions(): Record<string, Record<string, JSONValue>> {
   return { llm: { thinking: { type: 'disabled' } } };
 }
+
+/**
+ * Per-candidate options for best-of-N runs: the main options as a base, overridden with the
+ * candidate's own temperature and seed. Both live under the same `llm` key as the base fields,
+ * so they are forwarded verbatim (snake_case) next to reasoning_effort / thinking.
+ */
+export function buildCandidateProviderOptions(
+  temperature: number,
+  seed: number,
+): Record<string, Record<string, JSONValue>> {
+  const base = buildLlmProviderOptions() ?? {};
+  const llm: Record<string, JSONValue> = { ...(base.llm ?? {}) };
+  llm.temperature = temperature;
+  llm.seed = seed;
+  return { llm };
+}
