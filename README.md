@@ -1,5 +1,11 @@
 # Running With Rifles AI Agent
 
+[![Docker Image Size](https://img.shields.io/docker/image-size/zhaozisong0/rwr-data-agent/latest?logo=docker&label=image%20size)](https://hub.docker.com/r/zhaozisong0/rwr-data-agent)
+[![CI](https://github.com/rwr-infra/rwr-data-agent/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/rwr-infra/rwr-data-agent/actions/workflows/ci.yml)
+[![Docker Image Version](https://img.shields.io/docker/v/zhaozisong0/rwr-data-agent?sort=semver&logo=docker&label=version)](https://hub.docker.com/r/zhaozisong0/rwr-data-agent/tags)
+[![Docker Pulls](https://img.shields.io/docker/pulls/zhaozisong0/rwr-data-agent?logo=docker)](https://hub.docker.com/r/zhaozisong0/rwr-data-agent)
+[![License](https://img.shields.io/github/license/rwr-infra/rwr-data-agent)](./LICENSE)
+
 An AI agent that answers questions about *Running With Rifles* game data — weapons, vehicles, soldiers, carry items, calls and AngelScript game modes — over an **OpenAI-compatible** `/v1/chat/completions` API, with a built-in chat UI.
 
 Retrieval runs entirely **in-process from the game files on disk**: a MiniSearch full-text index plus an entity graph. No database, no embedding service, no vector store.
