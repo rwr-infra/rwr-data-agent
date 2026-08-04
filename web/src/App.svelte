@@ -604,6 +604,14 @@
       // row — a malformed history that the next request replays to the model.
       if (!isRetry && !fullContent) {
         history.pop();
+        // The assistant bubble exists as soon as *any* delta arrives, reasoning included, so a break
+        // that produced only reasoning leaves a bubble with no matching `history` turn. Retrying from
+        // it would then delete the *previous* turn's assistant message and re-send a history missing
+        // this question, so the empty bubble has to go with the rolled-back turn.
+        if (aiItemIdx >= 0) {
+          displayItems.splice(aiItemIdx, 1);
+          aiItemIdx = -1;
+        }
       }
       if (fullContent) {
         displayItems.push({ type: 'meta', text: tr.streamInterrupted, id: uid() });

@@ -389,8 +389,13 @@ export async function chatRoutes(app: FastifyInstance) {
       clientGone = true;
       abort.abort();
     };
-    request.raw.on('close', () => {
-      if (!reply.raw.writableEnded) onClientGone();
+    // `reply.raw`, not `request.raw`: the incoming request closes as soon as its body has been read,
+    // measurably while the response is still streaming, so guarding on that would abort every healthy
+    // turn the moment it started. The response's own 'close' fires either once the body was flushed
+    // (`writableFinished`) or when the connection died under it — exactly the distinction needed.
+    // `writableEnded` is not enough: it only means `end()` was called, not that anything got out.
+    reply.raw.on('close', () => {
+      if (!reply.raw.writableFinished) onClientGone();
     });
     // A raw stream gets none of Fastify's error handling: an unhandled 'error' on a destroyed socket
     // is an uncaught exception, which would take the process — and every other live stream — down.
@@ -405,12 +410,13 @@ export async function chatRoutes(app: FastifyInstance) {
 
     // Heartbeat, so a silent phase never looks like a dead upstream to whatever sits in front of the
     // app (see `streamHeartbeatMs`). The first ping goes out immediately: it also forces a buffering
-    // proxy to commit the response head instead of holding it until the first real delta.
-    emit({ type: 'ping' });
-    const heartbeat =
-      config.streamHeartbeatMs > 0
-        ? setInterval(() => emit({ type: 'ping' }), config.streamHeartbeatMs)
-        : null;
+    // proxy to commit the response head instead of holding it until the first real delta. Disabling
+    // the heartbeat suppresses that one too — `0` means a stream carrying nothing but real events.
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
+    if (config.streamHeartbeatMs > 0) {
+      emit({ type: 'ping' });
+      heartbeat = setInterval(() => emit({ type: 'ping' }), config.streamHeartbeatMs);
+    }
 
     let llmError: Error | null = null;
     try {
@@ -784,7 +790,7 @@ export async function chatRoutes(app: FastifyInstance) {
       if (config.langfuseEnabled) {
         await flushLangfuse();
       }
-      if (!reply.raw.writableEnded) reply.raw.end();
+      if (!reply.raw.destroyed && !reply.raw.writableEnded) reply.raw.end();
       const elapsed = Date.now() - startTime;
       if (clientGone) {
         console.log(
