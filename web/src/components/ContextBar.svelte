@@ -51,8 +51,11 @@
 
 {#snippet bar()}
   <div class="flex w-full items-center gap-2 text-xs text-base-content/50 select-none" title={tr.ctxHint}>
-    <progress class="progress progress-primary w-full max-w-[200px] h-1" value={pct} max="100"></progress>
-    <span class:text-error={pct > 90} class:text-warning={pct > 70 && pct <= 90}>
+    <!-- The bar yields, the label does not: `min-w` + shrink on the progress and `nowrap` +
+         `shrink-0` on the counter, so a narrow container shortens the bar instead of wrapping
+         "Context 0 / 500K" onto two lines. -->
+    <progress class="progress progress-primary w-full max-w-[200px] min-w-[48px] shrink h-1" value={pct} max="100"></progress>
+    <span class="whitespace-nowrap shrink-0" class:text-error={pct > 90} class:text-warning={pct > 70 && pct <= 90}>
       {tr.ctxLabel} {display} / {maxDisplay}
     </span>
   </div>

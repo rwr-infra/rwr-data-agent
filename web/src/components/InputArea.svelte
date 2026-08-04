@@ -8,6 +8,9 @@
     loading: boolean;
     contextUsed: number;
     maxContext: number;
+    /** Rounds used / server cap. `maxRounds === 0` means unlimited and hides the indicator. */
+    roundsUsed: number;
+    maxRounds: number;
     breakdown?: TokenBreakdown;
     maxMode?: boolean;
     onmaxtoggle?: () => void;
@@ -21,6 +24,8 @@
     loading,
     contextUsed,
     maxContext,
+    roundsUsed,
+    maxRounds,
     breakdown,
     maxMode = false,
     onmaxtoggle,
@@ -32,6 +37,12 @@
 
   let inputText = $state('');
   let textarea: HTMLTextAreaElement | undefined = $state();
+
+  // The indicator only earns its space once the cap is in sight: warning on the last three rounds,
+  // error once nothing is left. Below that it stays a plain, quiet counter.
+  let roundsLeft = $derived(Math.max(maxRounds - roundsUsed, 0));
+  let roundsExhausted = $derived(maxRounds > 0 && roundsLeft === 0);
+  let roundsLow = $derived(maxRounds > 0 && roundsLeft > 0 && roundsLeft <= 3);
 
   function handleInput() {
     if (textarea) {
@@ -99,12 +110,40 @@
     </button>
   </div>
 
-  <!-- One full-width row: context indicator on the left, Max-mode toggle on the right. On mobile
-       it stacks — context first, then the toggle. `min-w-0` everywhere is what lets the row
+  <!-- One full-width row: the usage stats on the left, Max-mode toggle on the right. On mobile
+       it stacks — stats first, then the toggle. `min-w-0` everywhere is what lets the row
        compress instead of spilling a horizontal scrollbar. -->
   <div class="flex flex-col sm:flex-row sm:items-center gap-2 w-full max-w-full min-w-0">
-    <div class="min-w-0 sm:flex-1">
-      <ContextBar used={contextUsed} max={maxContext} {breakdown} {tr} />
+    <!-- Stats cluster: context occupancy and the round counter are both "how much of the budget is
+         gone", so they sit together. `flex-wrap` + a basis on the bar is the mobile behaviour: on a
+         narrow phone the round counter drops to its own line instead of squeezing the bar. -->
+    <div class="flex flex-wrap items-center gap-x-3 gap-y-1 min-w-0 sm:flex-1">
+      <!-- Sized, not grown: with `flex-1` the bar ate the whole row and pushed the round counter to
+           the far right, which read as two unrelated widgets. A fixed basis keeps the counter
+           glued to the bar on desktop; it may still shrink, and wraps below on a narrow phone. -->
+      <!-- `h-4` on both stats (= the `text-xs` line box) is what makes their text sit on one line:
+           left to their own heights, the bar's row and the counter resolve differently and the
+           counter rides high. Fixed identical boxes + `items-center` inside each one. -->
+      <div class="flex h-4 items-center min-w-0 basis-[300px] grow-0 shrink">
+        <ContextBar used={contextUsed} max={maxContext} {breakdown} {tr} />
+      </div>
+      <!-- Round counter: how many question/answer rounds this conversation has spent against the
+           server's MAX_CONVERSATION_ROUNDS. Hidden when the operator disabled the cap (0). -->
+      {#if maxRounds > 0}
+        <!-- Divider only from `sm` up: below that the cluster wraps and the rule would be left
+             dangling at the end of the context row. Decorative, so it is hidden from a11y. -->
+        <span class="hidden sm:block h-3 w-px shrink-0 self-center bg-base-300" aria-hidden="true"></span>
+        <span
+          class="inline-flex h-4 items-center shrink-0 text-xs leading-4 tabular-nums select-none {roundsExhausted
+            ? 'text-error'
+            : roundsLow
+              ? 'text-warning'
+              : 'text-base-content/50'}"
+          title={tr.roundsHint(maxRounds)}
+        >
+          {tr.roundsLabel} {Math.min(roundsUsed, maxRounds)} / {maxRounds}
+        </span>
+      {/if}
     </div>
     <div class="flex items-center gap-2 min-w-0">
       <!-- Max mode: a daisyUI toggle switch with its label, wrapped in a hover tooltip explaining

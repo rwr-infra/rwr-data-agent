@@ -277,19 +277,21 @@ Diagrams for the request pipeline, the tool loop, the stream contract and the in
 | `GET /v1/models` | Model list |
 | `GET /v1/packages` | Packages in the current index (`name`, `displayName`, `count`) |
 | `GET /v1/tools` | Tool inventory: built-ins, plugin entries with per-file errors, `toolsDir`, `hotReload` |
+| `GET /v1/limits` | `{max_conversation_rounds, max_context_tokens}` — the caps the UI shows before the first turn |
 | `GET /health` | `{status, index:{ready, documents, packages, builtAt, reason?}}` — no external check |
 
 ### Request pipeline (src/api/routes/chat.ts)
 1. External `system` messages dropped; server enforces its own `SYSTEM_PROMPT` (`src/retrieval/prompt.ts`). Anti-injection.
-2. Token-size guard at ~`maxContextTokens * 0.7`.
-3. `x-session-id` keys a rolling summary (`src/memory/summarizer.ts`, in-process `Map`, never persisted); summaries regenerate every `SUMMARY_INTERVAL_TURNS`.
-4. `isMetaQuery` short-circuits search for questions about the bot.
-5. `buildSearchQuery` (`src/retrieval/queryRewrite.ts`) merges history + summary + CN↔EN synonym expansion.
-6. `retrievalTopK(category, exactKey)` picks the breadth: 5 for a bare key, 150 for enumeration, 12 for inheritance/source/script (those are answered by graph tools, so prose only has to identify the entity), else 30. `localSearch(query, filters, topK, enrichedQuery)` then runs, optionally filtered by `body.mod`.
-7. `buildUserPrompt` embeds each result at up to 2000 chars **until `CONTEXT_BUDGET_TOKENS` is spent**; the remainder are listed as `Key | type | name | mod | file` one-liners with an instruction to expand them via `searchDocs`/`readSource`. Every hit still appears, so enumeration keeps full coverage while the prompt stops growing.
-8. A second size guard runs here, once the real prompt exists: the first one only sees the incoming messages, and a 150-result enumeration adds far more than the user typed.
-9. Tools come from `getAgentTools()` (`src/agent/toolDefs.ts`), re-queried per request so hot-reloaded plugins take effect.
-10. `streamText` with graph tools, or `streamObject` with `EnumResultSchema`/`ComparisonResultSchema` (`src/types/schemas.ts`) when the query is enumeration/comparison **and** `response_format: json_object` (or `x-response-format`) is set.
+2. Conversation-round guard: `ceil(nonSystemMessages / 2) > MAX_CONVERSATION_ROUNDS` → 400 `conversation_limit_exceeded` (carries `rounds` / `max_rounds`). Bounds thread length, not request rate — the history is re-sent every turn *and* once per tool-loop step, so an endless thread is the real cost sink. `0` disables it.
+3. Token-size guard at ~`maxContextTokens * 0.7`.
+4. `x-session-id` keys a rolling summary (`src/memory/summarizer.ts`, in-process `Map`, never persisted); summaries regenerate every `SUMMARY_INTERVAL_TURNS`.
+5. `isMetaQuery` short-circuits search for questions about the bot.
+6. `buildSearchQuery` (`src/retrieval/queryRewrite.ts`) merges history + summary + CN↔EN synonym expansion.
+7. `retrievalTopK(category, exactKey)` picks the breadth: 5 for a bare key, 150 for enumeration, 12 for inheritance/source/script (those are answered by graph tools, so prose only has to identify the entity), else 30. `localSearch(query, filters, topK, enrichedQuery)` then runs, optionally filtered by `body.mod`.
+8. `buildUserPrompt` embeds each result at up to 2000 chars **until `CONTEXT_BUDGET_TOKENS` is spent**; the remainder are listed as `Key | type | name | mod | file` one-liners with an instruction to expand them via `searchDocs`/`readSource`. Every hit still appears, so enumeration keeps full coverage while the prompt stops growing.
+9. A second size guard runs here, once the real prompt exists: the first one only sees the incoming messages, and a 150-result enumeration adds far more than the user typed.
+10. Tools come from `getAgentTools()` (`src/agent/toolDefs.ts`), re-queried per request so hot-reloaded plugins take effect.
+11. `streamText` with graph tools, or `streamObject` with `EnumResultSchema`/`ComparisonResultSchema` (`src/types/schemas.ts`) when the query is enumeration/comparison **and** `response_format: json_object` (or `x-response-format`) is set.
 
 ### Streaming format
 Custom **NDJSON**, not SSE. One JSON object per line, keyed by `type`: `text-delta`, `reasoning-delta`, `json-delta`, `tool-step`, `finish`, `error`. Treat these shapes as a contract with the Web UI — **extend with new optional fields, never repurpose an existing one.**
@@ -345,6 +347,7 @@ Svelte 5 + Vite + Tailwind 4 + daisyUI in `web/`, building into `public/` — tr
 | `LLM_MAX_OUTPUT_TOKENS` | `32768` | Reasoning + answer share this budget |
 | `CORS_ORIGINS` | empty (reflect any) | Comma-separated allowlist; set it once the port is not LAN-only |
 | `API_TOKEN` | empty (no auth) | When set, `/v1/*` needs `Authorization: Bearer` or `x-api-key` |
+| `MAX_CONVERSATION_ROUNDS` | `20` | Max rounds one thread may carry (round = question + answer, counted off the replayed history). Past it `/v1/chat/completions` answers 400 `conversation_limit_exceeded`; `0` disables |
 | `CONTEXT_BUDGET_TOKENS` | `24000` | Cap on full-text retrieved context; the rest become one-liners |
 | `TOOL_TIMEOUT_MS` | `15000` | Deadline per tool execution; expiry returns `{error, hint}` |
 | `TOOL_CONTEXT_BUDGET_RATIO` | `0.75` | Window fraction a step's prompt may fill before old tool results are shed |

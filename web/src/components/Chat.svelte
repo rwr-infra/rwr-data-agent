@@ -36,13 +36,32 @@
     return recallStartIdx >= 0 && i >= recallStartIdx;
   }
 
+  // Each of these binds the neighbour to a local first: indexing twice (`items[i-1].type === … &&
+  // items[i-1].role === …`) discards the narrowing between the two reads, since TS cannot know the
+  // array did not change in between.
   function prevWasAi(i: number): boolean {
-    return i > 0 && items[i - 1].type === 'message' && items[i - 1].role === 'ai';
+    const prev = i > 0 ? items[i - 1] : undefined;
+    return prev?.type === 'message' && prev.role === 'ai';
   }
 
   function nextIsMeta(i: number): boolean {
-    return i + 1 < items.length && items[i + 1].type === 'meta';
+    return items[i + 1]?.type === 'meta';
   }
+
+  /** Text of the meta line that follows an AI message, or '' when there is none. */
+  function metaTextAt(i: number): string {
+    const next = items[i + 1];
+    return next?.type === 'meta' ? next.text : '';
+  }
+
+  // A meta line that follows an AI message is rendered *inside* that message's block, so it must not
+  // render again on its own. Filtering it out here (keeping the original index, which `prevWasAi` /
+  // `nextIsMeta` / `isDimmed` all key off) replaces what used to be an empty `{:else if}` branch.
+  let rows = $derived(
+    items
+      .map((item, i) => ({ item, i }))
+      .filter(({ item, i }) => !(item.type === 'meta' && prevWasAi(i))),
+  );
 
   let chatEl: HTMLDivElement | undefined = $state();
 
@@ -55,12 +74,11 @@
 </script>
 
 <div class="flex-1 overflow-y-auto p-3 sm:p-6 flex flex-col gap-4" bind:this={chatEl}>
-  {#each items as item, i}
+  {#each rows as { item, i } (item.id)}
     {#if item.type === 'message' && item.role === 'ai' && nextIsMeta(i)}
-      {@const metaItem = items[i + 1]}
       <div class="group flex flex-col items-start animate-fade-in" class:opacity-50={isDimmed(i) || isDimmed(i + 1)} class:transition-opacity={isDimmed(i) || isDimmed(i + 1)}>
         <Message content={item.content} type="ai" id={item.id} streaming={streaming && i === lastAiIdx} reasoning={item.reasoning} reasoningLabel={tr.reasoning} />
-        <div class="text-xs text-base-content/50 mt-0.5 animate-fade-in">{metaItem.text}</div>
+        <div class="text-xs text-base-content/50 mt-0.5 animate-fade-in">{metaTextAt(i)}</div>
         <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 sm:group-hover:opacity-100 transition-opacity mt-1 mb-2">
           <button class="btn btn-ghost btn-xs" onclick={() => oncopy(item.id, 'text')} title={tr.copyText}>
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
@@ -71,7 +89,6 @@
           </button>
         </div>
       </div>
-    {:else if item.type === 'meta' && prevWasAi(i)}
     {:else if item.type === 'message'}
       {#if item.role === 'ai' && !nextIsMeta(i) && !(streaming && i === lastAiIdx)}
         <div class="group flex flex-col items-start animate-fade-in" class:opacity-50={isDimmed(i)} class:transition-opacity={isDimmed(i)}>

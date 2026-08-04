@@ -107,6 +107,29 @@ export async function chatRoutes(app: FastifyInstance) {
       });
     }
 
+    // Conversation-length cap. Counted off the messages the client replays, so it bounds a single
+    // thread rather than a client's request rate — the whole history is re-sent every turn, and the
+    // tool loop re-sends it once per step, so an endless thread is the expensive failure mode here.
+    // `MAX_CONVERSATION_ROUNDS=0` disables it.
+    if (config.maxConversationRounds > 0 && historyRounds > config.maxConversationRounds) {
+      console.log(
+        `[chat] 400 - Conversation too long: ${historyRounds} rounds > ${config.maxConversationRounds}`,
+      );
+      return reply.status(400).send({
+        error: {
+          message:
+            `Conversation limit reached: this thread is ${historyRounds} rounds long and the server allows ` +
+            `${config.maxConversationRounds}. Start a new conversation to continue.`,
+          type: 'invalid_request_error',
+          // `code` is the OpenAI-shaped machine-readable field; the two counters are additive, so a
+          // client can render "20/20" without parsing the message.
+          code: 'conversation_limit_exceeded',
+          rounds: historyRounds,
+          max_rounds: config.maxConversationRounds,
+        },
+      });
+    }
+
     const externalSystemCount = messages.length - nonSystemMessages.length;
     if (externalSystemCount > 0) {
       console.log(

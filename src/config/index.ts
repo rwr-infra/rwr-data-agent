@@ -29,6 +29,13 @@ function positiveIntEnv(name: string, fallback: number): number {
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
 }
 
+/** Same as `positiveIntEnv`, but `0` is a meaningful value (used as "no limit") rather than
+ *  garbage that falls back to the default. Negative and non-numeric input still fall back. */
+function nonNegativeIntEnv(name: string, fallback: number): number {
+  const raw = parseInt(process.env[name] ?? '', 10);
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : fallback;
+}
+
 export const config = {
   // ── LLM (the only required external service) ──────────────────────────────
   // SILICONFLOW_* is still honoured as a fallback so pre-existing .env files keep working.
@@ -121,6 +128,16 @@ export const config = {
    */
   apiToken: process.env.API_TOKEN ?? '',
   maxContextTokens: parseInt(process.env.MAX_CONTEXT_TOKENS ?? '500000', 10),
+  /**
+   * Cap on how many rounds a single conversation may carry. A "round" is one user turn plus its
+   * answer, counted off the non-system messages the client replays — so the 21st question of a
+   * session is rejected with 400 rather than served, and the user starts a new chat.
+   *
+   * This is a conversation-length limit, not a rate limit: it bounds how far a single thread can
+   * grow, which is what actually drives cost here (the whole history is re-sent every turn, and
+   * the tool loop re-sends it once per step on top of that). `0` disables the check.
+   */
+  maxConversationRounds: nonNegativeIntEnv('MAX_CONVERSATION_ROUNDS', 20),
   // Cap on generated output tokens (reasoning + answer share this budget). Bounds long
   // enumerations/comparisons; raise if answers get truncated. DeepSeek-V4 allows up to 384K.
   llmMaxOutputTokens: parseInt(process.env.LLM_MAX_OUTPUT_TOKENS ?? '32768', 10),

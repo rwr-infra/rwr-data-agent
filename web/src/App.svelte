@@ -6,7 +6,7 @@
   import { getInitialTheme, toggleTheme } from './lib/theme.js';
   import type { Message, DisplayItem, Session, TokenBreakdown, CandidateView, TurnStat } from './lib/types.js';
   import { estimateTokens, stripMarkdown } from './lib/utils.js';
-  import { authHeaders, captureTokenFromUrl } from './lib/api.js';
+  import { authHeaders, captureTokenFromUrl, fetchLimits } from './lib/api.js';
   import { resetLocalState } from './lib/reset.js';
   import * as sessionStore from './lib/sessionStore.js';
   import Header from './components/Header.svelte';
@@ -47,6 +47,10 @@
   // Fallback until the first `finish` event reports the server's own MAX_CONTEXT_TOKENS. Hardcoding
   // it alone would put the gate and the bar's denominator out of step with the server config.
   let maxContext = $state(500000);
+  // Conversation-round cap (MAX_CONVERSATION_ROUNDS). Mirrors `maxContext`: a fallback that matches
+  // the server default, replaced by the real figure from `GET /v1/limits` at mount. `0` = unlimited,
+  // and the indicator hides itself then.
+  let maxRounds = $state(20);
   let pendingRecallId: string | null = $state(null);
   let prefillText = $state('');
   let toast = $state<{ message: string; visible: boolean }>({ message: '', visible: false });
@@ -192,9 +196,9 @@
     document.documentElement.lang = tr.htmlLang;
   });
 
-  onMount(async () => {
-    // Before anything hits /v1: persist a ?token= if the operator supplied one.
-    captureTokenFromUrl();
+  /** Restore the most recent session, or open an empty one. Split out of `onMount` because an async
+   *  `onMount` callback may not return a cleanup function — Svelte only awaits it. */
+  async function restoreLatestSession() {
     sessions = await sessionStore.getAllSessions();
     if (sessions.length > 0) {
       const latest = sessions[0];
@@ -213,6 +217,16 @@
     } else {
       await newSession();
     }
+  }
+
+  onMount(() => {
+    // Before anything hits /v1: persist a ?token= if the operator supplied one.
+    captureTokenFromUrl();
+    // Not awaited: the round cap only feeds an indicator, so session restore must not wait on it.
+    void fetchLimits().then((limits) => {
+      if (typeof limits?.maxConversationRounds === 'number') maxRounds = limits.maxConversationRounds;
+    });
+    void restoreLatestSession();
 
     const onVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
@@ -237,6 +251,11 @@
   function handleInputChange(text: string) {
     currentInputText = text;
   }
+
+  // Rounds consumed by this conversation. One user message = one round, which is exactly how the
+  // server counts the replayed history (`ceil(nonSystemMessages / 2)`), so the indicator and the
+  // 400 it prevents stay in step.
+  let roundsUsed = $derived(history.filter((m) => m.role === 'user').length);
 
   let effectiveContextUsed = $derived(
     contextUsed > 0
@@ -305,6 +324,15 @@
     if (!text || loading) return;
 
     if (!isRetry) {
+      // Round cap, checked client-side so the user gets a localized note instead of the server's
+      // 400 body. A retry re-sends an existing round and is deliberately exempt.
+      if (maxRounds > 0 && roundsUsed >= maxRounds) {
+        showWelcome = false;
+        displayItems.push({ type: 'message', role: 'error', content: tr.roundsOver(maxRounds), id: uid() });
+        displayItems = displayItems;
+        return;
+      }
+
       const checkBase = contextUsed > 0 ? contextUsed : estimateHistoryTokens();
       if (checkBase + estimateTokens(text) >= maxContext) {
         showWelcome = false;
@@ -414,8 +442,11 @@
               const icon = !event.done ? '\uD83D\uDD27' : failed ? '\u2715' : '\u2713';
               const text = event.summary ?? event.toolName ?? 'tool';
               const step = { icon, text, ok: event.done ? event.ok !== false : undefined, durationMs: event.durationMs };
-              if (currentTraceIdx >= 0 && displayItems[currentTraceIdx]?.type === 'tool-trace') {
-                displayItems[currentTraceIdx].steps.push(step);
+              // Bound to a local so the `type === 'tool-trace'` check narrows the push below —
+              // re-indexing the array would throw the narrowing away.
+              const trace = currentTraceIdx >= 0 ? displayItems[currentTraceIdx] : undefined;
+              if (trace?.type === 'tool-trace') {
+                trace.steps.push(step);
                 displayItems = [...displayItems];
               } else {
                 displayItems.push({ type: 'tool-trace', steps: [step], id: uid() });
@@ -693,6 +724,8 @@
     {loading}
     contextUsed={effectiveContextUsed}
     maxContext={maxContext}
+    {roundsUsed}
+    {maxRounds}
     breakdown={lastBreakdown}
     {maxMode}
     onmaxtoggle={handleMaxModeToggle}
