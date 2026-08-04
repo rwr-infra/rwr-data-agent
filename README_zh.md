@@ -1,5 +1,11 @@
 # Running With Rifles AI Agent
 
+[![Docker 镜像体积](https://img.shields.io/docker/image-size/zhaozisong0/rwr-data-agent/latest?logo=docker&label=image%20size)](https://hub.docker.com/r/zhaozisong0/rwr-data-agent)
+[![CI](https://github.com/rwr-infra/rwr-data-agent/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/rwr-infra/rwr-data-agent/actions/workflows/ci.yml)
+[![Docker 镜像版本](https://img.shields.io/docker/v/zhaozisong0/rwr-data-agent?sort=semver&logo=docker&label=version)](https://hub.docker.com/r/zhaozisong0/rwr-data-agent/tags)
+[![Docker 拉取量](https://img.shields.io/docker/pulls/zhaozisong0/rwr-data-agent?logo=docker)](https://hub.docker.com/r/zhaozisong0/rwr-data-agent)
+[![许可证](https://img.shields.io/github/license/rwr-infra/rwr-data-agent)](./LICENSE)
+
 [English](/README.md)
 
 > **⚠️ 早期阶段提示**：本项目处于早期开发阶段，版本可能不稳定，随时可能发生破坏性更新。

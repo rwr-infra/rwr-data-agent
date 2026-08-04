@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch or PR makes the in-flight run obsolete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Lint, typecheck, build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Node 24 matches the Dockerfile's node:24-slim, so green here means the
+      # image build sees the same compiler and module-resolution behaviour.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      # web/ is a separate workspace with its own lockfile and Svelte/Vite
+      # toolchain; the root `build` script calls into it via `web:build`.
+      - name: Install web
+        run: npm ci --prefix web
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # `npm run format:check` is not a gate: 28 tracked files currently fail it,
+      # and AGENTS.md lists only lint + typecheck as required. Add a step here
+      # once `npm run format` has been run across the tree.
+
+      # tsc emit + vite build. Catches what `--noEmit` cannot: emit-only errors
+      # and the entire Svelte/Tailwind half of the build.
+      - name: Build
+        run: npm run build
+
+      # `npm run eval` / `eval:agent` are deliberately absent: the retrieval
+      # harness needs the game files under DATA_DIR (gitignored, ~24k files) and
+      # the agent harness spends real LLM quota and is non-deterministic. Both
+      # stay local-only — see AGENTS.md "Testing".
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build only — no registry login, no push. docker-publish.yml owns
+      # publishing on release; this job exists so a broken Dockerfile surfaces on
+      # the PR instead of at tag time. It shares the same Actions layer cache, so
+      # the release build reuses these layers.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: production
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

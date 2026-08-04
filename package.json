@@ -29,7 +29,7 @@
     "fastify"
   ],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "dependencies": {
     "@ai-sdk/openai-compatible": "^2.0.47",
     "@fastify/cors": "^11.2.0",
