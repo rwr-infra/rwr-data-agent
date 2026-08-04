@@ -372,12 +372,51 @@ export async function chatRoutes(app: FastifyInstance) {
       { asType: 'generation' },
     );
 
+    // No `Connection` header: connection-specific fields are forbidden in HTTP/2 (RFC 9113 §8.2.2),
+    // and a proxy that forwards one verbatim makes the whole response malformed to the browser.
     reply.raw.writeHead(200, {
       'Content-Type': 'text/plain; charset=utf-8',
       'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
     });
+
+    // The client is gone as soon as the socket closes — a closed tab, a proxy that reset the stream.
+    // Without this the tool loop runs to its 100-step cap generating an answer nobody will read.
+    const abort = new AbortController();
+    let clientGone = false;
+    const onClientGone = () => {
+      if (clientGone) return;
+      clientGone = true;
+      abort.abort();
+    };
+    // `reply.raw`, not `request.raw`: the incoming request closes as soon as its body has been read,
+    // measurably while the response is still streaming, so guarding on that would abort every healthy
+    // turn the moment it started. The response's own 'close' fires either once the body was flushed
+    // (`writableFinished`) or when the connection died under it — exactly the distinction needed.
+    // `writableEnded` is not enough: it only means `end()` was called, not that anything got out.
+    reply.raw.on('close', () => {
+      if (!reply.raw.writableFinished) onClientGone();
+    });
+    // A raw stream gets none of Fastify's error handling: an unhandled 'error' on a destroyed socket
+    // is an uncaught exception, which would take the process — and every other live stream — down.
+    reply.raw.on('error', onClientGone);
+
+    /** Write one NDJSON event line, unless the socket is already gone. */
+    const emit = (event: Record<string, unknown>) => {
+      if (clientGone || reply.raw.destroyed || reply.raw.writableEnded) return;
+      reply.raw.write(JSON.stringify(event) + '\n');
+      (reply.raw as unknown as { flush?: () => void }).flush?.();
+    };
+
+    // Heartbeat, so a silent phase never looks like a dead upstream to whatever sits in front of the
+    // app (see `streamHeartbeatMs`). The first ping goes out immediately: it also forces a buffering
+    // proxy to commit the response head instead of holding it until the first real delta. Disabling
+    // the heartbeat suppresses that one too — `0` means a stream carrying nothing but real events.
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
+    if (config.streamHeartbeatMs > 0) {
+      emit({ type: 'ping' });
+      heartbeat = setInterval(() => emit({ type: 'ping' }), config.streamHeartbeatMs);
+    }
 
     let llmError: Error | null = null;
     try {
@@ -389,6 +428,7 @@ export async function chatRoutes(app: FastifyInstance) {
           messages: llmMessages,
           maxOutputTokens: maxTokens,
           providerOptions: buildLlmProviderOptions(),
+          abortSignal: abort.signal,
           schema,
           onFinish: ({ object, usage }) => {
             const outputText = JSON.stringify(object).slice(0, 500);
@@ -407,9 +447,7 @@ export async function chatRoutes(app: FastifyInstance) {
         let lastObject: unknown = null;
         for await (const chunk of result.partialObjectStream) {
           lastObject = chunk;
-          const data = JSON.stringify({ type: 'json-delta', jsonDelta: chunk });
-          reply.raw.write(data + '\n');
-          (reply.raw as unknown as { flush?: () => void }).flush?.();
+          emit({ type: 'json-delta', jsonDelta: chunk });
         }
 
         const [usage, finishReason] = await Promise.all([result.usage, result.finishReason]);
@@ -428,7 +466,7 @@ export async function chatRoutes(app: FastifyInstance) {
         );
         const resolved = resolveUsage(usage, usage, basis);
         const breakdown = buildBreakdown(basis, resolved);
-        const finishData = JSON.stringify({
+        emit({
           type: 'finish',
           stopReason: finishReason === 'length' ? 'output-limit' : 'completed',
           usage: {
@@ -440,8 +478,6 @@ export async function chatRoutes(app: FastifyInstance) {
             breakdown,
           },
         });
-        reply.raw.write(finishData + '\n');
-        (reply.raw as unknown as { flush?: () => void }).flush?.();
       } else {
         const tools = await getAgentTools(packageScope);
         const toolDefTokens = measureToolDefTokens(tools);
@@ -461,10 +497,6 @@ export async function chatRoutes(app: FastifyInstance) {
             inputTokens.system -
             toolDefTokens -
             maxTokens;
-          const onEvent = (event: Record<string, unknown>) => {
-            reply.raw.write(JSON.stringify(event) + '\n');
-            (reply.raw as unknown as { flush?: () => void }).flush?.();
-          };
           const result = await runBestOfN({
             model: getProvider().chatModel(turnModelId),
             judgeModel: getProvider().chatModel(judgeModelId),
@@ -483,7 +515,8 @@ export async function chatRoutes(app: FastifyInstance) {
             shaperBudgetTokens,
             disclosureMeta,
             disclosureThreshold: config.toolDisclosureThreshold,
-            onEvent,
+            abortSignal: abort.signal,
+            onEvent: emit,
             startObservation: (name: string, input?: unknown) => {
               // One generation observation per candidate and one for the judge, so N runs do not
               // collapse into a single telemetry blob. The cast widens the update patch type to
@@ -505,7 +538,7 @@ export async function chatRoutes(app: FastifyInstance) {
             },
           });
           chainObs.otelSpan.setAttribute('langfuse.trace.output', result.answer.slice(0, 500));
-          const finishData = JSON.stringify({
+          emit({
             type: 'finish',
             stopReason: result.stopReason,
             usage: {
@@ -517,8 +550,6 @@ export async function chatRoutes(app: FastifyInstance) {
               breakdown: agg.breakdown,
             },
           });
-          reply.raw.write(finishData + '\n');
-          (reply.raw as unknown as { flush?: () => void }).flush?.();
         } else {
           // Tool results are replayed in full; the shaper only sheds them if a step's prompt would
           // otherwise overflow the window. The system prompt, tool definitions and the output
@@ -539,6 +570,7 @@ export async function chatRoutes(app: FastifyInstance) {
             system: systemPrompt,
             messages: llmMessages,
             maxOutputTokens: maxTokens,
+            abortSignal: abort.signal,
             ...(tools
               ? {
                   tools,
@@ -639,41 +671,31 @@ export async function chatRoutes(app: FastifyInstance) {
               const delta = p.text ?? p.textDelta ?? p.delta ?? '';
               if (delta) {
                 reasoningText += delta;
-                reply.raw.write(
-                  JSON.stringify({ type: 'reasoning-delta', textDelta: delta }) + '\n',
-                );
-                (reply.raw as unknown as { flush?: () => void }).flush?.();
+                emit({ type: 'reasoning-delta', textDelta: delta });
               }
             } else if (p.type === 'text-delta' || p.type === 'text') {
               const delta = p.text ?? p.textDelta ?? p.delta ?? '';
               if (delta) {
                 answerText += delta;
-                reply.raw.write(JSON.stringify({ type: 'text-delta', textDelta: delta }) + '\n');
-                (reply.raw as unknown as { flush?: () => void }).flush?.();
+                emit({ type: 'text-delta', textDelta: delta });
               }
             } else if (p.type === 'tool-call') {
               toolCallCount++;
               const summary = summarizeToolInput(p.toolName, p.input);
-              reply.raw.write(
-                JSON.stringify({ type: 'tool-step', toolName: p.toolName, summary }) + '\n',
-              );
-              (reply.raw as unknown as { flush?: () => void }).flush?.();
+              emit({ type: 'tool-step', toolName: p.toolName, summary });
             } else if (p.type === 'tool-result') {
               // The runtime envelope turns thrown tools into ordinary results carrying `error`, so
               // success has to be read off the output shape rather than the stream part type.
               const failed = isToolFailure(p.output);
               if (failed) toolFailureCount++;
-              reply.raw.write(
-                JSON.stringify({
-                  type: 'tool-step',
-                  toolName: p.toolName,
-                  done: true,
-                  ok: !failed,
-                  durationMs: durationOf(p.toolCallId),
-                  summary: summarizeToolResult(p.toolName, p.output),
-                }) + '\n',
-              );
-              (reply.raw as unknown as { flush?: () => void }).flush?.();
+              emit({
+                type: 'tool-step',
+                toolName: p.toolName,
+                done: true,
+                ok: !failed,
+                durationMs: durationOf(p.toolCallId),
+                summary: summarizeToolResult(p.toolName, p.output),
+              });
             } else if (p.type === 'tool-error') {
               // Failures that never reach `execute` — schema validation, unknown tool name. The model
               // still receives them as tool results, so this must close the UI's trace line and must
@@ -681,19 +703,16 @@ export async function chatRoutes(app: FastifyInstance) {
               toolFailureCount++;
               const message = p.error instanceof Error ? p.error.message : String(p.error);
               console.warn(`[chat] tool-error ${p.toolName ?? '?'} — ${message}`);
-              reply.raw.write(
-                JSON.stringify({
-                  type: 'tool-step',
-                  toolName: p.toolName,
-                  done: true,
-                  ok: false,
-                  durationMs: durationOf(p.toolCallId),
-                  // The SDK's message appends the full tool inventory, which is useful to the model but
-                  // just noise in a one-line trace entry.
-                  summary: message.split('. Available tools:')[0],
-                }) + '\n',
-              );
-              (reply.raw as unknown as { flush?: () => void }).flush?.();
+              emit({
+                type: 'tool-step',
+                toolName: p.toolName,
+                done: true,
+                ok: false,
+                durationMs: durationOf(p.toolCallId),
+                // The SDK's message appends the full tool inventory, which is useful to the model but
+                // just noise in a one-line trace entry.
+                summary: message.split('. Available tools:')[0],
+              });
             } else if (p.type === 'error') {
               throw p.error;
             }
@@ -740,7 +759,7 @@ export async function chatRoutes(app: FastifyInstance) {
           );
           const resolved = resolveUsage(totalUsage, lastStepUsage, basis);
           const breakdown = buildBreakdown(basis, resolved);
-          const finishData = JSON.stringify({
+          emit({
             type: 'finish',
             stopReason,
             usage: {
@@ -752,24 +771,32 @@ export async function chatRoutes(app: FastifyInstance) {
               breakdown,
             },
           });
-          reply.raw.write(finishData + '\n');
-          (reply.raw as unknown as { flush?: () => void }).flush?.();
         }
       }
     } catch (err) {
       llmError = err as Error;
-      console.error(`[chat] LLM stream error: ${llmError.message}`);
-      const errData = JSON.stringify({ type: 'error', error: llmError.message });
-      reply.raw.write(errData + '\n');
+      // A client that walked away aborts the SDK stream, which lands here as an AbortError. That is
+      // not a failure of the turn and there is nobody left to send an `error` frame to.
+      if (clientGone) {
+        console.warn(`[chat] Client disconnected mid-stream, generation aborted`);
+      } else {
+        console.error(`[chat] LLM stream error: ${llmError.message}`);
+        emit({ type: 'error', error: llmError.message });
+      }
     } finally {
+      if (heartbeat) clearInterval(heartbeat);
       genObs.end();
       chainObs.end();
       if (config.langfuseEnabled) {
         await flushLangfuse();
       }
-      reply.raw.end();
+      if (!reply.raw.destroyed && !reply.raw.writableEnded) reply.raw.end();
       const elapsed = Date.now() - startTime;
-      if (llmError) {
+      if (clientGone) {
+        console.log(
+          `[chat] ABORTED | ${elapsed}ms | mode=${useStructured ? 'structured' : maxMode ? 'max' : 'text'} | client disconnected`,
+        );
+      } else if (llmError) {
         console.log(
           `[chat] FAILED | ${elapsed}ms | mode=${useStructured ? 'structured' : maxMode ? 'max' : 'text'} | error=${llmError.message}`,
         );

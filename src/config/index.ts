@@ -176,6 +176,21 @@ export const config = {
    */
   toolTimeoutMs: parseInt(process.env.TOOL_TIMEOUT_MS ?? '15000', 10),
 
+  // ── Streaming ─────────────────────────────────────────────────────────────
+  /**
+   * Interval between `{"type":"ping"}` keep-alive lines on the chat stream. A turn is silent for as
+   * long as its slowest phase — a cold first step, a tool call, the best-of-N judge — and whatever
+   * sits in front of the app reads that silence as a stalled origin. The reset lands *after* the
+   * 200 has gone out, so it reaches the browser as `ERR_HTTP2_PROTOCOL_ERROR` mid-answer rather
+   * than as a status code. The default is deliberately under the tightest such timeout seen in
+   * practice — Tencent EdgeOne's "HTTP response timeout" is 15s out of the box. `0` disables it.
+   *
+   * Guarded rather than raw `parseInt`: an unparseable value would come out NaN, which fails the
+   * `> 0` check and silently turns the heartbeat off — reintroducing exactly the failure it exists
+   * to prevent, with no signal at all.
+   */
+  streamHeartbeatMs: nonNegativeIntEnv('STREAM_HEARTBEAT_MS', 10000),
+
   // ── Session memory ────────────────────────────────────────────────────────
   summaryIntervalTurns: parseInt(process.env.SUMMARY_INTERVAL_TURNS ?? '3', 10),
   summaryModel: process.env.SUMMARY_MODEL ?? process.env.LLM_MODEL ?? 'deepseek-v4-flash',

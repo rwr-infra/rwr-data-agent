@@ -69,6 +69,11 @@ export interface BestOfNOptions {
   disclosureThreshold: number;
   /** Write one NDJSON event line (plus flush). Shared by all candidates and the judge. */
   onEvent: (event: Record<string, unknown>) => void;
+  /**
+   * Aborts every candidate loop and the judge at once — wired to the HTTP request, so a client that
+   * disconnects stops N parallel agent loops instead of paying for answers nobody reads.
+   */
+  abortSignal?: AbortSignal;
   /** Optional Langfuse child observation factory; each candidate and the judge get their own. */
   startObservation?: (name: string, input?: unknown) => ChildObservation;
 }
@@ -229,6 +234,7 @@ async function runCandidate(
       system: options.systemPrompt,
       messages: options.llmMessages,
       maxOutputTokens: options.maxOutputTokens,
+      abortSignal: options.abortSignal,
       ...(options.tools
         ? {
             tools: options.tools,
@@ -417,6 +423,7 @@ async function runJudge(
       system: options.systemPrompt,
       messages: [{ role: 'user', content: prompt }],
       maxOutputTokens: options.maxOutputTokens,
+      abortSignal: options.abortSignal,
       providerOptions: buildLlmProviderOptions(),
       onFinish: ({ text, totalUsage }) => {
         obs?.update({

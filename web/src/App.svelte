@@ -377,6 +377,50 @@
     // Candidate-close events received so far; when all N have closed the judge phase begins.
     let closedCount = 0;
 
+    /** Create the assistant bubble on the first delta of any kind. */
+    const ensureAiItem = () => {
+      if (aiItemIdx >= 0) return;
+      if (firstChunkTime === 0) firstChunkTime = performance.now();
+      thinking = false;
+      streaming = true;
+      displayItems.push({ type: 'message', role: 'ai', content: '', id: uid() });
+      aiItemIdx = displayItems.length - 1;
+      displayItems = displayItems;
+    };
+
+    const render = () => {
+      if (aiItemIdx < 0) return;
+      displayItems[aiItemIdx] = {
+        ...displayItems[aiItemIdx],
+        type: 'message',
+        role: 'ai',
+        content: fullContent,
+        reasoning: fullReasoning || undefined,
+      };
+      displayItems = displayItems;
+    };
+
+    // Rendering is what makes a backgrounded tab dangerous: every delta re-renders the whole markdown
+    // answer, and a hidden tab's main thread is throttled hard enough that `reader.read()` stops
+    // draining the response. The HTTP/2 flow-control window then fills, the CDN in front can no longer
+    // write to the client, and it kills the stream as a stalled origin (EdgeOne's HTTP response
+    // timeout is 15s) — that is what surfaced as ERR_HTTP2_PROTOCOL_ERROR on returning to the tab.
+    // rAF callbacks never run while hidden, so this coalesces into one repaint on return while the
+    // read loop keeps draining in the meantime.
+    let rafPending = false;
+    const paint = () => {
+      if (!document.hidden) {
+        render();
+        return;
+      }
+      if (rafPending) return;
+      rafPending = true;
+      requestAnimationFrame(() => {
+        rafPending = false;
+        render();
+      });
+    };
+
     try {
       const res = await fetch('/v1/chat/completions', {
         method: 'POST',
@@ -418,35 +462,16 @@
             if (event.type === 'reasoning-delta') {
               const r = event.textDelta ?? '';
               if (r) {
-                if (firstChunkTime === 0) {
-                  firstChunkTime = performance.now();
-                  thinking = false;
-                  streaming = true;
-                  displayItems.push({ type: 'message', role: 'ai', content: '', id: uid() });
-                  aiItemIdx = displayItems.length - 1;
-                  displayItems = displayItems;
-                }
+                ensureAiItem();
                 fullReasoning += r;
-                if (aiItemIdx >= 0) {
-                  displayItems[aiItemIdx] = { ...displayItems[aiItemIdx], type: 'message', role: 'ai', content: fullContent, reasoning: fullReasoning };
-                  displayItems = displayItems;
-                }
+                paint();
               }
             } else if (event.type === 'text-delta') {
               const content = event.textDelta ?? '';
               if (content) {
-                if (aiItemIdx < 0) {
-                  if (firstChunkTime === 0) firstChunkTime = performance.now();
-                  thinking = false;
-                  streaming = true;
-                  displayItems.push({ type: 'message', role: 'ai', content: '', id: uid() });
-                  aiItemIdx = displayItems.length - 1;
-                  displayItems = displayItems;
-                }                fullContent += content;
-                if (aiItemIdx >= 0) {
-                  displayItems[aiItemIdx] = { ...displayItems[aiItemIdx], type: 'message', role: 'ai', content: fullContent, reasoning: fullReasoning || undefined };
-                  displayItems = displayItems;
-                }
+                ensureAiItem();
+                fullContent += content;
+                paint();
               }
             } else if (event.type === 'tool-step') {
               // `ok` is absent on the opening step and false when the tool returned an error \u2014 a
@@ -574,11 +599,26 @@
       stopTimer();
       maxModeTotal = 0;
       judgePhase = false;
-      if (!isRetry) {
+      // A turn that already streamed part of an answer keeps its user message: the partial reply is
+      // pushed onto `history` below, and dropping the question would leave two assistant turns in a
+      // row — a malformed history that the next request replays to the model.
+      if (!isRetry && !fullContent) {
         history.pop();
+        // The assistant bubble exists as soon as *any* delta arrives, reasoning included, so a break
+        // that produced only reasoning leaves a bubble with no matching `history` turn. Retrying from
+        // it would then delete the *previous* turn's assistant message and re-send a history missing
+        // this question, so the empty bubble has to go with the rolled-back turn.
+        if (aiItemIdx >= 0) {
+          displayItems.splice(aiItemIdx, 1);
+          aiItemIdx = -1;
+        }
       }
-      const errorMsg = (err.message?.includes('Failed to fetch') ? tr.netError : tr.reqFailed) + (err.message ?? '');
-      displayItems.push({ type: 'message', role: 'error', content: errorMsg, id: uid() });
+      if (fullContent) {
+        displayItems.push({ type: 'meta', text: tr.streamInterrupted, id: uid() });
+      } else {
+        const errorMsg = (err.message?.includes('Failed to fetch') ? tr.netError : tr.reqFailed) + (err.message ?? '');
+        displayItems.push({ type: 'message', role: 'error', content: errorMsg, id: uid() });
+      }
       displayItems = displayItems;
       if (isRetry) {
         showToast(tr.retryFailed);
@@ -590,6 +630,9 @@
     stopTimer();
     maxModeTotal = 0;
     judgePhase = false;
+    // Final state goes in even while hidden: `paint()` may have deferred the last deltas to a rAF
+    // that will not fire until the tab comes back, and the turn is over — one render, not per-delta.
+    render();
 
     if (fullContent) {
       history.push({ role: 'assistant', content: fullContent, stats: turnStat });

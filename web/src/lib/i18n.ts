@@ -47,6 +47,7 @@ export interface Translations {
   roundsOver: (max: number) => string;
   stopStepLimit: string;
   stopOutputLimit: string;
+  streamInterrupted: string;
   allPackages: string;
   ctxOver: string;
   reqFailed: string;
@@ -121,6 +122,7 @@ const i18n: Record<Lang, Translations> = {
     roundsOver: (max) => `本次会话已达 ${max} 轮上限，请新建对话后继续提问`,
     stopStepLimit: '⚠ 工具调用已达步数上限，模型未产出最终答案。请缩小问题范围或换用更具体的关键词重试。',
     stopOutputLimit: '⚠ 回答已达输出 token 上限被截断。可提高 LLM_MAX_OUTPUT_TOKENS，或把问题拆成几次提问。',
+    streamInterrupted: '⚠ 连接中断，回答未写完。上面是已收到的部分内容，可点重试重新生成。',
     allPackages: '全部数据包',
     ctxOver: '上下文已达上限，请刷新页面开始新对话',
     reqFailed: '请求失败: ',
@@ -198,6 +200,7 @@ const i18n: Record<Lang, Translations> = {
     roundsOver: (max) => `This conversation hit the ${max}-round limit — start a new one to keep asking`,
     stopStepLimit: '⚠ Hit the tool-call step limit without producing a final answer. Narrow the question or retry with more specific terms.',
     stopOutputLimit: '⚠ Answer was cut off at the output token limit. Raise LLM_MAX_OUTPUT_TOKENS, or split the question into several turns.',
+    streamInterrupted: '⚠ Connection dropped before the answer finished. What arrived is kept above — use retry to regenerate.',
     allPackages: 'All packages',
     ctxOver: 'Context limit reached, please refresh to start a new conversation',
     reqFailed: 'Request failed: ',
