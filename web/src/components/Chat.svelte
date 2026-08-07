@@ -122,7 +122,10 @@
         {/if}
       </div>
     {:else if item.type === 'message'}
-      <div class="flex flex-col animate-fade-in"
+      <!-- `group` sits on the whole block, as in the AI branch: hovering the bubble reveals the
+           actions. On the button row alone it would only respond to a pointer already over the
+           invisible buttons. -->
+      <div class="group flex flex-col animate-fade-in"
         class:items-end={item.role === 'user'}
         class:items-start={item.role !== 'user'}
         class:opacity-50={isDimmed(i)}
@@ -130,24 +133,20 @@
       >
         <Message content={item.content} type={item.role} />
         {#if item.role === 'user'}
-          <div class="group">
-            <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 sm:group-hover:opacity-100 transition-opacity mt-1 mb-2 justify-end">
-              <button class="btn btn-ghost btn-xs" onclick={() => oncopy(item.id)} title={tr.copyText}>
-                {@render copyIcon()}
-              </button>
-              <button class="btn btn-ghost btn-xs" onclick={() => onrecall(item.turnId)} title={tr.recall} disabled={loading}>
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
-              </button>
-            </div>
+          <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 sm:group-hover:opacity-100 transition-opacity mt-1 mb-2 justify-end">
+            <button class="btn btn-ghost btn-xs" onclick={() => oncopy(item.id)} title={tr.copyText}>
+              {@render copyIcon()}
+            </button>
+            <button class="btn btn-ghost btn-xs" onclick={() => onrecall(item.turnId)} title={tr.recall} disabled={loading}>
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
+            </button>
           </div>
         {/if}
         {#if item.role === 'error'}
-          <div class="group">
-            <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 sm:group-hover:opacity-100 transition-opacity mt-1 mb-2">
-              <button class="btn btn-ghost btn-xs" onclick={() => oncopy(item.id)} title={tr.copyText}>
-                {@render copyIcon()}
-              </button>
-            </div>
+          <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 sm:group-hover:opacity-100 transition-opacity mt-1 mb-2">
+            <button class="btn btn-ghost btn-xs" onclick={() => oncopy(item.id)} title={tr.copyText}>
+              {@render copyIcon()}
+            </button>
           </div>
         {/if}
       </div>

@@ -563,6 +563,9 @@
               if (r) {
                 if (reasonIdx < 0) {
                   beginStreaming();
+                  // Same reason as the tool-step branch: deltas deferred by a hidden tab live only
+                  // in the cursors, so flush them into the text block before releasing it.
+                  render();
                   textIdx = -1;
                   textSeg = null;
                   const seg: Extract<TurnSegment, { kind: 'reasoning' }> = { kind: 'reasoning', text: '' };
@@ -582,6 +585,9 @@
               if (content) {
                 if (textIdx < 0) {
                   beginStreaming();
+                  // Same reason as above, in the other direction: flush the reasoning block before
+                  // its cursor goes.
+                  render();
                   reasonIdx = -1;
                   reasonSeg = null;
                   const seg: Extract<TurnSegment, { kind: 'text' }> = { kind: 'text', text: '' };
