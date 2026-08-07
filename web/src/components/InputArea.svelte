@@ -53,6 +53,10 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
+    // IME (e.g. Rime) commits the candidate with Enter; that keydown must not send the message.
+    // Safari fires this keydown after compositionend with isComposing already false, but keeps
+    // keyCode 229 — hence the extra check.
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       submit();
