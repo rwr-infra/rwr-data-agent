@@ -17,9 +17,9 @@ export interface Translations {
   htmlLang: string;
   welcomeTitle: string;
   welcomeDesc: string;
-  exWeapons: string;
-  exM4a1: string;
-  exExact: string;
+  exCompare: string;
+  exSearch: string;
+  exTrace: string;
   placeholder: string;
   send: string;
   thinking: string;
@@ -92,10 +92,10 @@ const i18n: Record<Lang, Translations> = {
     htmlLang: 'zh-CN',
     welcomeTitle: 'Running With Rifles 数据查询',
     welcomeDesc: '基于 RAG 的游戏数据 AI 助手，支持武器、兵种、载具、阵营等数据查询',
-    exWeapons: '有哪些武器？',
-    exM4a1: 'M4A1 的属性',
-    exExact: '精确查询 M4A1',
-    placeholder: '输入查询，如：有哪些武器？',
+    exCompare: '对比 M4A1 和 AK47 的属性',
+    exSearch: '哪些载具可以运兵？',
+    exTrace: 'M16A4 继承自哪个模板？',
+    placeholder: '输入查询，如：你有什么能力？',
     send: '发送',
     thinking: '思考中',
     searching: '搜索中',
@@ -170,10 +170,10 @@ const i18n: Record<Lang, Translations> = {
     htmlLang: 'en',
     welcomeTitle: 'Running With Rifles Data Query',
     welcomeDesc: 'RAG-based game data AI assistant — weapons, soldiers, vehicles, factions & more',
-    exWeapons: 'What weapons?',
-    exM4a1: 'M4A1 stats',
-    exExact: 'Exact lookup M4A1',
-    placeholder: 'Enter query, e.g.: What weapons?',
+    exCompare: 'Compare M4A1 and AK47 stats',
+    exSearch: 'Which vehicles can carry troops?',
+    exTrace: 'What template does M16A4 inherit from?',
+    placeholder: 'Enter query, e.g.: What can you do?',
     send: 'Send',
     thinking: 'Thinking',
     searching: 'Searching',
