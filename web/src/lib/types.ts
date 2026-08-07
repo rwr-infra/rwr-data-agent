@@ -4,7 +4,31 @@ export interface Message {
   /** Per-turn stats from the turn's `finish` event, attached so the meta line and the breakdown
    *  survive a reload. Absent on old sessions and on user messages. */
   stats?: TurnStat;
+  /** The turn's blocks in arrival order — text / reasoning / tool calls interleaved exactly as the
+   *  agent produced them. Assistant messages only, and absent on sessions stored before the
+   *  timeline UI, which fall back to a single bubble. */
+  segments?: TurnSegment[];
+  /** Groups a user message with the assistant blocks it produced. Retry / recall / copy all key on
+   *  it, since one turn is many display items. Absent on old sessions — rebuilt on load. */
+  turnId?: string;
 }
+
+/** One block of a turn, in arrival order. This is the persisted shape of the live timeline. */
+export type TurnSegment =
+  | { kind: 'text'; text: string }
+  | { kind: 'reasoning'; text: string }
+  | {
+      kind: 'tool';
+      /** `toolCallId` from the stream — pairs the opening event with its closing one. */
+      callId: string;
+      toolName: string;
+      /** Argument summary, from the opening `tool-step`. */
+      input?: string;
+      /** Result summary, from the closing `tool-step`. */
+      output?: string;
+      ok?: boolean;
+      durationMs?: number;
+    };
 
 /** Per-turn statistics as reported by `finish.usage`, kept on the assistant message. */
 export interface TurnStat {
@@ -64,12 +88,29 @@ export interface CandidateView {
   answer: string;
 }
 
+/**
+ * One rendered block. A turn is a *sequence* of these — every tool call and every stretch of text
+ * between two tool calls is its own block, in arrival order — so `turnId` is what still ties them
+ * together for retry / recall / copy.
+ */
 export type DisplayItem =
-  | { type: 'message'; role: 'user' | 'ai' | 'error'; content: string; id: string; reasoning?: string }
-  | { type: 'meta'; text: string; id: string }
-  | { type: 'tool-trace'; steps: ToolStep[]; id: string }
-  | { type: 'candidate-trace'; candidate: number; total: number; steps: ToolStep[]; done?: boolean; ok?: boolean; id: string }
-  | { type: 'candidate-panel'; candidates: CandidateView[]; kind?: 'synthesis' | 'fallback'; id: string };
+  | { type: 'message'; role: 'user' | 'ai' | 'error'; content: string; id: string; turnId: string }
+  | { type: 'reasoning'; text: string; id: string; turnId: string }
+  | {
+      type: 'tool-call';
+      callId: string;
+      toolName: string;
+      input?: string;
+      output?: string;
+      /** Absent while the call is still running; false when the tool returned an error. */
+      ok?: boolean;
+      durationMs?: number;
+      id: string;
+      turnId: string;
+    }
+  | { type: 'meta'; text: string; id: string; turnId: string }
+  | { type: 'candidate-trace'; candidate: number; total: number; steps: ToolStep[]; done?: boolean; ok?: boolean; id: string; turnId: string }
+  | { type: 'candidate-panel'; candidates: CandidateView[]; kind?: 'synthesis' | 'fallback'; id: string; turnId: string };
 
 export interface MetaInfo {
   ttfb: string | number;

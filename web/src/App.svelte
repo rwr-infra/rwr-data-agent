@@ -4,7 +4,7 @@
   import { getInitialLang, t, toggleLang } from './lib/i18n.js';
   import type { Theme } from './lib/theme.js';
   import { getInitialTheme, toggleTheme } from './lib/theme.js';
-  import type { Message, DisplayItem, Session, TokenBreakdown, CandidateView, TurnStat } from './lib/types.js';
+  import type { Message, DisplayItem, Session, TokenBreakdown, CandidateView, TurnStat, TurnSegment } from './lib/types.js';
   import { estimateTokens, stripMarkdown } from './lib/utils.js';
   import { authHeaders, captureTokenFromUrl, fetchLimits } from './lib/api.js';
   import { resetLocalState } from './lib/reset.js';
@@ -54,7 +54,11 @@
   // Until `/v1/limits` answers, `maxRounds` is a guess. Gating on it would reject a valid question
   // on a server configured for more rounds (or for none), so both the gate and the indicator wait.
   let limitsLoaded = $state(false);
-  let pendingRecallId: string | null = $state(null);
+  let pendingRecallTurnId: string | null = $state(null);
+  // Id of the block still receiving deltas — the streaming caret and the live reasoning header hang
+  // off it. Null between blocks (e.g. while a tool runs), which is what stops the caret from
+  // blinking on a segment that is already finished.
+  let activeBlockId: string | null = $state(null);
   let prefillText = $state('');
   let toast = $state<{ message: string; visible: boolean }>({ message: '', visible: false });
   let toastTimer: ReturnType<typeof setTimeout>;
@@ -71,26 +75,84 @@
   let nextId = 0;
   function uid(): string { return `m${nextId++}`; }
 
-  function buildDisplayItems(msgs: Message[]): DisplayItem[] {
+  // turnIds outlive the page: they are persisted with the session, while `uid()` restarts at m0 on
+  // every load — a counter id stored in one run would eventually collide with one minted in the
+  // next, and retry / recall / copy would silently operate on two unrelated turns at once.
+  function newTurnId(): string {
+    return typeof crypto?.randomUUID === 'function'
+      ? `t-${crypto.randomUUID()}`
+      : `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  /** The display blocks of one stored message — the replayed timeline for assistant messages with
+   *  segments, a single bubble otherwise, plus the meta line rebuilt from the attached stats. */
+  function messageItems(m: Message, turnId: string): DisplayItem[] {
     const items: DisplayItem[] = [];
-    for (const m of msgs) {
+    if (m.role === 'assistant' && m.segments?.length) {
+      // Replay the recorded timeline: text / reasoning / tool calls in the order they arrived.
+      for (const seg of m.segments) {
+        if (seg.kind === 'text') {
+          items.push({ type: 'message', role: 'ai', content: seg.text, id: uid(), turnId });
+        } else if (seg.kind === 'reasoning') {
+          items.push({ type: 'reasoning', text: seg.text, id: uid(), turnId });
+        } else {
+          items.push({
+            type: 'tool-call',
+            callId: seg.callId,
+            toolName: seg.toolName,
+            input: seg.input,
+            output: seg.output,
+            ok: seg.ok,
+            durationMs: seg.durationMs,
+            id: uid(),
+            turnId,
+          });
+        }
+      }
+    } else {
+      // User messages, and assistant messages from before segments were recorded.
       items.push({
-        type: 'message' as const,
+        type: 'message',
         role: (m.role === 'assistant' ? 'ai' : m.role) as 'user' | 'ai',
         content: m.content,
         id: uid(),
+        turnId,
       });
-      // Restored turns re-render their meta line (TTFB / total / tokens / steps) from the stats
-      // attached to the assistant message, so a reload does not lose the per-turn numbers.
-      if (m.role === 'assistant' && m.stats) {
-        items.push({
-          type: 'meta',
-          text: tr.metaFormat(m.stats.ttfb, m.stats.total, m.stats.inTokens, m.stats.outTokens, m.stats.steps),
-          id: uid(),
-        });
-      }
+    }
+
+    // Restored turns re-render their meta line (TTFB / total / tokens / steps) from the stats
+    // attached to the assistant message, so a reload does not lose the per-turn numbers.
+    if (m.role === 'assistant' && m.stats) {
+      items.push({
+        type: 'meta',
+        text: tr.metaFormat(m.stats.ttfb, m.stats.total, m.stats.inTokens, m.stats.outTokens, m.stats.steps),
+        id: uid(),
+        turnId,
+      });
     }
     return items;
+  }
+
+  function buildDisplayItems(msgs: Message[]): DisplayItem[] {
+    const items: DisplayItem[] = [];
+    // Sessions stored before the timeline UI carry no `turnId`. A question and the answer that
+    // followed it are one turn, so an id minted for a user message is handed to the assistant
+    // message after it — otherwise retry could not find the question to re-send.
+    let pendingTurnId: string | null = null;
+    for (const m of msgs) {
+      if (!m.turnId) {
+        m.turnId = m.role === 'user' ? newTurnId() : (pendingTurnId ?? newTurnId());
+      }
+      if (m.role === 'user') pendingTurnId = m.turnId;
+      items.push(...messageItems(m, m.turnId));
+    }
+    return items;
+  }
+
+  /** Drop every assistant-side block of a turn; the user bubble stays. Shared by the retry scrub
+   *  and the error rollback so the two can never diverge on what survives. */
+  function stripTurnBlocks(items: DisplayItem[], turnId: string): DisplayItem[] {
+    return items.filter((it) => it.turnId !== turnId || (it.type === 'message' && it.role === 'user'));
   }
 
   /** Restore the context bar from the last turn's stats: real context occupancy, server max, and
@@ -333,15 +395,25 @@
     await sendMessageInternal(text, false);
   }
 
-  async function sendMessageInternal(text: string, isRetry: boolean) {
+  async function sendMessageInternal(text: string, isRetry: boolean, retryTurnId?: string) {
     if (!text || loading) return;
+
+    // Every block this turn produces carries the same `turnId`. A retry re-runs an existing turn, so
+    // it keeps that turn's id and its user bubble.
+    const turnId = retryTurnId ?? newTurnId();
+
+    // Where this turn's question sits in `history`. A retried turn may sit mid-conversation: the
+    // request must end at its question — replaying later turns after it would ask the model to
+    // answer a question that already has answers below it — and the new answer must go back in at
+    // the same position, not at the end.
+    let qIdx = -1;
 
     if (!isRetry) {
       // Round cap, checked client-side so the user gets a localized note instead of the server's
       // 400 body. A retry re-sends an existing round and is deliberately exempt.
       if (limitsLoaded && maxRounds > 0 && roundsUsed >= maxRounds) {
         showWelcome = false;
-        displayItems.push({ type: 'message', role: 'error', content: tr.roundsOver(maxRounds), id: uid() });
+        displayItems.push({ type: 'message', role: 'error', content: tr.roundsOver(maxRounds), id: uid(), turnId });
         displayItems = displayItems;
         return;
       }
@@ -349,18 +421,25 @@
       const checkBase = contextUsed > 0 ? contextUsed : estimateHistoryTokens();
       if (checkBase + estimateTokens(text) >= maxContext) {
         showWelcome = false;
-        displayItems.push({ type: 'message', role: 'error', content: tr.ctxOver, id: uid() });
+        displayItems.push({ type: 'message', role: 'error', content: tr.ctxOver, id: uid(), turnId });
         displayItems = displayItems;
         return;
       }
 
       loading = true;
       showWelcome = false;
-      displayItems.push({ type: 'message', role: 'user', content: text, id: uid() });
+      displayItems.push({ type: 'message', role: 'user', content: text, id: uid(), turnId });
       displayItems = displayItems;
-      history.push({ role: 'user', content: text });
+      history.push({ role: 'user', content: text, turnId });
+      qIdx = history.length - 1;
     } else {
       loading = true;
+      qIdx = history.findIndex((m) => m.turnId === turnId && m.role === 'user');
+      if (qIdx < 0) {
+        // The question was rolled back out of `history` by an earlier failure — put it back.
+        history.push({ role: 'user', content: text, turnId });
+        qIdx = history.length - 1;
+      }
     }
 
     thinking = true;
@@ -368,35 +447,54 @@
 
     const t0 = performance.now();
     let firstChunkTime = 0;
-    let fullContent = '';
-    let fullReasoning = '';
-    let aiItemIdx = -1;
-    let currentTraceIdx = -1;
+    // The turn's blocks in arrival order. Persisted with the assistant message, so a reload replays
+    // the same timeline instead of collapsing it back into one bubble. The answer text itself is
+    // derived from these — there is deliberately no separate accumulator to drift out of sync.
+    const segments: TurnSegment[] = [];
+    // What the turn answered so far: the text blocks, joined the same way `handleCopyTurn` joins
+    // them on screen — a tool call splits blocks, and gluing them back without a separator would
+    // feed the model merged words and broken markdown on every later request.
+    const answerText = () =>
+      segments.flatMap((s) => (s.kind === 'text' && s.text.length > 0 ? [s.text] : [])).join('\n\n');
+    // Fallback call ids for a backend too old to send `toolCallId`: minted once per opening event.
+    // Never derive these from `displayItems.length` — pushing the card changes it.
+    let toolSeq = 0;
+    // Cursors into the block currently accumulating deltas. A tool call closes both, so the next
+    // delta opens a fresh block below the tool card — that is the whole point of the rewrite.
+    // Indices stay valid because blocks are only ever appended.
+    let textIdx = -1;
+    let textSeg: Extract<TurnSegment, { kind: 'text' }> | null = null;
+    let reasonIdx = -1;
+    let reasonSeg: Extract<TurnSegment, { kind: 'reasoning' }> | null = null;
     // Stats of this turn, attached to the assistant message at the end so they survive a reload.
     let turnStat: TurnStat | undefined;
     // Candidate-close events received so far; when all N have closed the judge phase begins.
     let closedCount = 0;
 
-    /** Create the assistant bubble on the first delta of any kind. */
-    const ensureAiItem = () => {
-      if (aiItemIdx >= 0) return;
+    /** Shared side effects of the first block of any kind: TTFB, and swapping the indicator out. */
+    const beginStreaming = () => {
       if (firstChunkTime === 0) firstChunkTime = performance.now();
       thinking = false;
       streaming = true;
-      displayItems.push({ type: 'message', role: 'ai', content: '', id: uid() });
-      aiItemIdx = displayItems.length - 1;
-      displayItems = displayItems;
+    };
+
+    const closeBlocks = () => {
+      textIdx = -1;
+      textSeg = null;
+      reasonIdx = -1;
+      reasonSeg = null;
+      activeBlockId = null;
     };
 
     const render = () => {
-      if (aiItemIdx < 0) return;
-      displayItems[aiItemIdx] = {
-        ...displayItems[aiItemIdx],
-        type: 'message',
-        role: 'ai',
-        content: fullContent,
-        reasoning: fullReasoning || undefined,
-      };
+      if (textIdx >= 0 && textSeg) {
+        const it = displayItems[textIdx];
+        if (it?.type === 'message') displayItems[textIdx] = { ...it, content: textSeg.text };
+      }
+      if (reasonIdx >= 0 && reasonSeg) {
+        const it = displayItems[reasonIdx];
+        if (it?.type === 'reasoning') displayItems[reasonIdx] = { ...it, text: reasonSeg.text };
+      }
       displayItems = displayItems;
     };
 
@@ -431,8 +529,9 @@
         },
         body: JSON.stringify({
           model: 'rwr-agent',
-          // `stats` is client-side only — strip it before the wire.
-          messages: history.map(({ role, content }) => ({ role, content })),
+          // `stats` is client-side only — strip it before the wire. A retry sends the conversation
+          // only up to its own question: the old answer and every later turn stay out of the request.
+          messages: history.slice(0, qIdx + 1).map(({ role, content }) => ({ role, content })),
           ...(selectedMod ? { mod: selectedMod } : {}),
           ...(maxMode ? { mode: 'max' } : {}),
         }),
@@ -462,33 +561,92 @@
             if (event.type === 'reasoning-delta') {
               const r = event.textDelta ?? '';
               if (r) {
-                ensureAiItem();
-                fullReasoning += r;
+                if (reasonIdx < 0) {
+                  beginStreaming();
+                  // Same reason as the tool-step branch: deltas deferred by a hidden tab live only
+                  // in the cursors, so flush them into the text block before releasing it.
+                  render();
+                  textIdx = -1;
+                  textSeg = null;
+                  const seg: Extract<TurnSegment, { kind: 'reasoning' }> = { kind: 'reasoning', text: '' };
+                  segments.push(seg);
+                  reasonSeg = seg;
+                  const id = uid();
+                  displayItems.push({ type: 'reasoning', text: '', id, turnId });
+                  reasonIdx = displayItems.length - 1;
+                  activeBlockId = id;
+                  displayItems = displayItems;
+                }
+                if (reasonSeg) reasonSeg.text += r;
                 paint();
               }
             } else if (event.type === 'text-delta') {
               const content = event.textDelta ?? '';
               if (content) {
-                ensureAiItem();
-                fullContent += content;
+                if (textIdx < 0) {
+                  beginStreaming();
+                  // Same reason as above, in the other direction: flush the reasoning block before
+                  // its cursor goes.
+                  render();
+                  reasonIdx = -1;
+                  reasonSeg = null;
+                  const seg: Extract<TurnSegment, { kind: 'text' }> = { kind: 'text', text: '' };
+                  segments.push(seg);
+                  textSeg = seg;
+                  const id = uid();
+                  displayItems.push({ type: 'message', role: 'ai', content: '', id, turnId });
+                  textIdx = displayItems.length - 1;
+                  activeBlockId = id;
+                  displayItems = displayItems;
+                }
+                if (textSeg) textSeg.text += content;
                 paint();
               }
             } else if (event.type === 'tool-step') {
-              // `ok` is absent on the opening step and false when the tool returned an error \u2014 a
-              // failed call must still close its line, otherwise it reads as still running.
-              const failed = event.done && event.ok === false;
-              const icon = !event.done ? '\uD83D\uDD27' : failed ? '\u2715' : '\u2713';
-              const text = event.summary ?? event.toolName ?? 'tool';
-              const step = { icon, text, ok: event.done ? event.ok !== false : undefined, durationMs: event.durationMs };
-              // Bound to a local so the `type === 'tool-trace'` check narrows the push below —
-              // re-indexing the array would throw the narrowing away.
-              const trace = currentTraceIdx >= 0 ? displayItems[currentTraceIdx] : undefined;
-              if (trace?.type === 'tool-trace') {
-                trace.steps.push(step);
-                displayItems = [...displayItems];
+              // A tool call is its own block, and it closes whatever text/reasoning block came
+              // before it \u2014 so what the model writes after the result opens a *new* block below the
+              // card. That is what keeps the rendered order equal to the real timeline.
+              // `ok` is absent on the opening event and false when the tool returned an error: a
+              // failed call must still close its card, otherwise it reads as still running.
+              if (!event.done) {
+                beginStreaming();
+                // Deltas deferred by a hidden tab live only in the cursors \u2014 flush them into the
+                // block before dropping it, or it stays an empty bubble for the whole session.
+                render();
+                closeBlocks();
+                const callId: string = event.toolCallId ?? `${turnId}-call-${toolSeq++}`;
+                const toolName: string = event.toolName ?? 'tool';
+                segments.push({ kind: 'tool', callId, toolName, input: event.summary });
+                displayItems.push({ type: 'tool-call', callId, toolName, input: event.summary, id: uid(), turnId });
+                displayItems = displayItems;
               } else {
-                displayItems.push({ type: 'tool-trace', steps: [step], id: uid() });
-                currentTraceIdx = displayItems.length - 1;
+                const ok: boolean = event.ok !== false;
+                // `toolCallId` pairs the closing event with its opening card. Without it (a backend
+                // old enough not to send it) the pair is this turn's still-open card: calls never
+                // overlap within a turn there, and a recomputed fallback id could never match the
+                // opening one anyway.
+                const idx = displayItems.findLastIndex(
+                  (it) => it.type === 'tool-call' && it.ok === undefined &&
+                    (event.toolCallId ? it.callId === event.toolCallId : it.turnId === turnId),
+                );
+                const card = idx >= 0 ? displayItems[idx] : undefined;
+                const closing = { ok, durationMs: event.durationMs as number | undefined, output: event.summary as string | undefined };
+                let callId: string;
+                if (card?.type === 'tool-call') {
+                  callId = card.callId;
+                  displayItems[idx] = { ...card, ...closing };
+                } else {
+                  // Nothing open to close: the opening event never arrived. Render the outcome
+                  // rather than dropping the call.
+                  callId = event.toolCallId ?? `${turnId}-call-${toolSeq++}`;
+                  displayItems.push({ type: 'tool-call', callId, toolName: event.toolName ?? 'tool', ...closing, id: uid(), turnId });
+                }
+                const seg = segments.findLast((s) => s.kind === 'tool' && s.callId === callId);
+                if (seg?.kind === 'tool') {
+                  Object.assign(seg, closing);
+                } else {
+                  segments.push({ kind: 'tool', callId, toolName: event.toolName ?? 'tool', ...closing });
+                }
                 displayItems = displayItems;
               }
             } else if (event.type === 'candidate-open') {
@@ -501,6 +659,7 @@
                 total: maxModeTotal,
                 steps: [],
                 id: uid(),
+                turnId,
               });
               displayItems = displayItems;
             } else if (event.type === 'candidate-step') {
@@ -539,6 +698,10 @@
               }
             } else if (event.type === 'candidates') {
               // All drafts are in: drop the live traces, show the collapsible raw-drafts panel.
+              // Filtering re-indexes the array, so flush any deferred deltas and drop the cursors
+              // first — they are positional and would point at the wrong block afterwards.
+              render();
+              closeBlocks();
               const traceIds = new Set(
                 displayItems.filter((it) => it.type === 'candidate-trace').map((it) => it.id),
               );
@@ -548,11 +711,17 @@
                 candidates: (event.list ?? []) as CandidateView[],
                 kind: event.kind,
                 id: uid(),
+                turnId,
               });
               displayItems = displayItems;
               maxModeTotal = 0;
               judgePhase = false;
             } else if (event.type === 'finish') {
+              // The turn is over: nothing is accumulating any more, so the caret stops blinking on
+              // whatever block was last. Flush deferred deltas first — dropping the cursors is what
+              // would otherwise turn the final render() below into a no-op on a hidden tab.
+              render();
+              closeBlocks();
               const usage = event.usage;
               if (usage) {
                 // `contextTokens` is what the *next* request will carry: the base prompt plus the
@@ -581,13 +750,13 @@
                 breakdown: usage?.breakdown ?? undefined,
               };
               if (usage?.breakdown) lastBreakdown = usage.breakdown;
-              displayItems.push({ type: 'meta', text: tr.metaFormat(ttfb, totalTime, inTokens, outTokens, usage?.breakdown?.steps), id: uid() });
+              displayItems.push({ type: 'meta', text: tr.metaFormat(ttfb, totalTime, inTokens, outTokens, usage?.breakdown?.steps), id: uid(), turnId });
               // Why the loop ended, when it was not a clean finish. The backend reports the reason,
               // not the wording, so it can be shown in the user's language.
               const stopNote = event.stopReason === 'step-limit' ? tr.stopStepLimit
                 : event.stopReason === 'output-limit' ? tr.stopOutputLimit
                 : null;
-              if (stopNote) displayItems.push({ type: 'meta', text: stopNote, id: uid() });
+              if (stopNote) displayItems.push({ type: 'meta', text: stopNote, id: uid(), turnId });
               displayItems = displayItems;
             }
           } catch {}
@@ -602,22 +771,27 @@
       // A turn that already streamed part of an answer keeps its user message: the partial reply is
       // pushed onto `history` below, and dropping the question would leave two assistant turns in a
       // row — a malformed history that the next request replays to the model.
-      if (!isRetry && !fullContent) {
-        history.pop();
-        // The assistant bubble exists as soon as *any* delta arrives, reasoning included, so a break
-        // that produced only reasoning leaves a bubble with no matching `history` turn. Retrying from
-        // it would then delete the *previous* turn's assistant message and re-send a history missing
-        // this question, so the empty bubble has to go with the rolled-back turn.
-        if (aiItemIdx >= 0) {
-          displayItems.splice(aiItemIdx, 1);
-          aiItemIdx = -1;
-        }
-      }
-      if (fullContent) {
-        displayItems.push({ type: 'meta', text: tr.streamInterrupted, id: uid() });
+      if (answerText()) {
+        displayItems.push({ type: 'meta', text: tr.streamInterrupted, id: uid(), turnId });
       } else {
+        // Blocks appear as soon as *any* delta arrives, reasoning and tool calls included, so a break
+        // that produced no answer text still leaves blocks with no matching `history` turn. Retrying
+        // from them would delete the *previous* turn's assistant message and re-send a history
+        // missing this question, so every assistant-side block of this turn goes with the rollback.
+        // The user bubble stays: the question is still on screen, just no longer in `history`.
+        displayItems = stripTurnBlocks(displayItems, turnId);
+        closeBlocks();
+        if (!isRetry) {
+          history.pop();
+        } else {
+          // A failed retry keeps the old answer in `history` (it is only replaced on success below)
+          // — put its blocks back on screen too, so the turn keeps its action bar and stays
+          // retryable instead of ending as an orphaned question.
+          const old = history.find((m) => m.turnId === turnId && m.role === 'assistant');
+          if (old) displayItems.push(...messageItems(old, turnId));
+        }
         const errorMsg = (err.message?.includes('Failed to fetch') ? tr.netError : tr.reqFailed) + (err.message ?? '');
-        displayItems.push({ type: 'message', role: 'error', content: errorMsg, id: uid() });
+        displayItems.push({ type: 'message', role: 'error', content: errorMsg, id: uid(), turnId });
       }
       displayItems = displayItems;
       if (isRetry) {
@@ -633,9 +807,25 @@
     // Final state goes in even while hidden: `paint()` may have deferred the last deltas to a rAF
     // that will not fire until the tab comes back, and the turn is over — one render, not per-delta.
     render();
+    closeBlocks();
 
-    if (fullContent) {
-      history.push({ role: 'assistant', content: fullContent, stats: turnStat });
+    const content = answerText();
+    if (content) {
+      // A tool call that ended the turn leaves an empty trailing text block behind; it would restore
+      // as an empty bubble, so it never reaches storage.
+      const kept = segments.filter((s) => s.kind === 'tool' || s.text.length > 0);
+      // A call whose closing event never arrived (stream broke mid-call) must not restore as
+      // "running" — `ok` is what closes the card, and nothing can ever close it after a reload.
+      for (const s of kept) {
+        if (s.kind === 'tool' && s.ok === undefined) s.ok = false;
+      }
+      const msg: Message = { role: 'assistant', content, stats: turnStat, segments: kept, turnId };
+      // A retried turn's answer replaces the old one *in place* — appending it would put the turn's
+      // answer after later turns' messages, a non-alternating history the model chokes on.
+      const oldIdx = history.findIndex((m) => m.turnId === turnId && m.role === 'assistant');
+      if (oldIdx >= 0) history.splice(oldIdx, 1, msg);
+      else if (isRetry) history.splice(qIdx + 1, 0, msg);
+      else history.push(msg);
     }
     loading = false;
     saveCurrentSession();
@@ -645,65 +835,52 @@
     sendMessage(q);
   }
 
-  async function handleRetry(aiMessageId: string) {
+  /** Re-run a turn: its assistant-side blocks go, the question stays and is sent again. */
+  async function handleRetry(turnId: string) {
     if (loading) return;
 
-    const aiIdx = displayItems.findIndex(it => it.id === aiMessageId);
-    if (aiIdx < 0) return;
-
-    let userContent = '';
-    for (let i = aiIdx - 1; i >= 0; i--) {
-      const item = displayItems[i];
-      if (item.type === 'message' && item.role === 'user') {
-        userContent = item.content;
-        break;
-      }
-    }
+    const userItem = displayItems.find(
+      (it) => it.type === 'message' && it.role === 'user' && it.turnId === turnId,
+    );
+    const userContent = userItem?.type === 'message' ? userItem.content : '';
     if (!userContent) return;
 
-    let removeEnd = aiIdx + 1;
-    while (removeEnd < displayItems.length && displayItems[removeEnd].type === 'meta') {
-      removeEnd++;
-    }
-    displayItems.splice(aiIdx, removeEnd - aiIdx);
-    displayItems = displayItems;
-
-    for (let i = history.length - 1; i >= 0; i--) {
-      if (history[i].role === 'assistant') {
-        history.splice(i, 1);
-        break;
-      }
-    }
-    history = history;
+    // Everything the assistant produced for this turn — text blocks, reasoning, tool cards, meta.
+    // The old answer stays in `history` until the retry actually produces a replacement: the
+    // request never includes it (it is sliced off at the question), and keeping it is what lets a
+    // failed retry restore the turn instead of leaving an orphaned question.
+    displayItems = stripTurnBlocks(displayItems, turnId);
 
     contextUsed = 0;
     lastBreakdown = undefined;
-    await sendMessageInternal(userContent, true);
+    await sendMessageInternal(userContent, true, turnId);
   }
 
-  function handleRecall(userMessageId: string) {
+  function handleRecall(turnId: string) {
     if (loading) return;
-    pendingRecallId = userMessageId;
+    pendingRecallTurnId = turnId;
   }
 
   function confirmRecall() {
-    if (!pendingRecallId) return;
+    if (!pendingRecallTurnId) return;
+    const turnId = pendingRecallTurnId;
 
-    const idx = displayItems.findIndex(it => it.id === pendingRecallId);
-    if (idx < 0) { pendingRecallId = null; return; }
+    const idx = displayItems.findIndex((it) => it.turnId === turnId);
+    if (idx < 0) { pendingRecallTurnId = null; return; }
 
     const item = displayItems[idx];
     const recalledContent = item.type === 'message' ? item.content : '';
 
-    displayItems.splice(idx);
-    displayItems = displayItems;
+    const removed = displayItems.slice(idx);
+    displayItems = displayItems.slice(0, idx);
 
-    history = displayItems
-      .filter((it): it is DisplayItem & { type: 'message' } => it.type === 'message' && (it.role === 'user' || it.role === 'ai'))
-      .map(it => ({
-        role: it.role === 'ai' ? 'assistant' : it.role,
-        content: it.content,
-      }));
+    // Truncate `history` by turn rather than rebuilding it from `displayItems`: one turn is now many
+    // display items, and folding them back would turn a single answer into several assistant
+    // messages. Keyed on the *removed turns* rather than sliced at the clicked one — a turn rolled
+    // back by an error is not in `history` at all, and slicing at it would silently keep every
+    // later turn as invisible context the user believes was rewound.
+    const removedTurnIds = new Set(removed.map((it) => it.turnId));
+    history = history.filter((m) => !m.turnId || !removedTurnIds.has(m.turnId));
 
     contextUsed = 0;
     lastBreakdown = undefined;
@@ -713,25 +890,15 @@
       showWelcome = true;
     }
 
-    pendingRecallId = null;
+    pendingRecallTurnId = null;
     saveCurrentSession();
   }
 
   function cancelRecall() {
-    pendingRecallId = null;
+    pendingRecallTurnId = null;
   }
 
-  function handleCopy(messageId: string, format: 'text' | 'markdown') {
-    const item = displayItems.find(it => it.id === messageId);
-    if (!item || item.type !== 'message') return;
-
-    let text: string;
-    if (format === 'markdown') {
-      text = item.content;
-    } else {
-      text = item.role === 'ai' ? stripMarkdown(item.content) : item.content;
-    }
-
+  function writeClipboard(text: string) {
     navigator.clipboard.writeText(text).then(() => {
       showToast(tr.copied);
     }).catch(() => {
@@ -745,6 +912,23 @@
       document.body.removeChild(ta);
       showToast(tr.copied);
     });
+  }
+
+  /** Single bubble — user questions and error notices, which are plain text either way. */
+  function handleCopy(messageId: string) {
+    const item = displayItems.find(it => it.id === messageId);
+    if (!item || item.type !== 'message') return;
+    writeClipboard(item.content);
+  }
+
+  /** A whole answer: every text block of the turn, joined. Tool cards and reasoning stay out. */
+  function handleCopyTurn(turnId: string, format: 'text' | 'markdown') {
+    const text = displayItems
+      .filter((it) => it.type === 'message' && it.role === 'ai' && it.turnId === turnId)
+      .map((it) => (it.type === 'message' ? it.content : ''))
+      .join('\n\n');
+    if (!text) return;
+    writeClipboard(format === 'markdown' ? text : stripMarkdown(text));
   }
 
   function handlePrefillConsumed() {
@@ -765,11 +949,13 @@
       searchingText={tr.searching}
       generatingText={tr.generating}
       {elapsed}
-      {pendingRecallId}
+      {pendingRecallTurnId}
+      {activeBlockId}
       {tr}
       onretry={handleRetry}
       onrecall={handleRecall}
       oncopy={handleCopy}
+      oncopyturn={handleCopyTurn}
       onconfirmrecall={confirmRecall}
       oncancelrecall={cancelRecall}
       {loading}

@@ -53,6 +53,10 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
+    // IME (e.g. Rime) commits the candidate with Enter; that keydown must not send the message.
+    // Safari fires this keydown after compositionend with isComposing already false, but keeps
+    // keyCode 229 — hence the extra check.
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       submit();
@@ -96,17 +100,25 @@
       oninput={handleInput}
       onkeydown={handleKeydown}
     ></textarea>
+    <!-- While a turn streams the button spins rather than just greying out: disabled alone reads as
+         "nothing to send", the spinner says "an answer is on its way". Still disabled — the send
+         path is closed either way. -->
     <button
       class="btn btn-primary btn-sm join-item shrink-0 self-end h-[44px] w-[44px]"
-      aria-label={tr.send}
-      title={tr.send}
+      aria-label={loading ? tr.thinking : tr.send}
+      title={loading ? tr.thinking : tr.send}
+      aria-busy={loading}
       disabled={loading || !inputText.trim()}
       onclick={submit}
     >
-      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 19V5" />
-        <path d="m5 12 7-7 7 7" />
-      </svg>
+      {#if loading}
+        <span class="loading loading-spinner loading-sm"></span>
+      {:else}
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 19V5" />
+          <path d="m5 12 7-7 7 7" />
+        </svg>
+      {/if}
     </button>
   </div>
 

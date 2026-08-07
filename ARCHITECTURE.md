@@ -114,10 +114,10 @@ sequenceDiagram
     F-->>C: {"type":"reasoning-delta"}
 
     M-->>F: tool call
-    F-->>C: {"type":"tool-step","toolName":"searchDocs","summary":"Search: ak47"}
+    F-->>C: {"type":"tool-step","toolCallId":"call_1","toolName":"searchDocs","summary":"Search: ak47"}
     F->>T: execute (deduped, deadlined)
     T-->>F: result or { error, hint }
-    F-->>C: {"type":"tool-step","done":true,"ok":true,"durationMs":142,"summary":"12 result(s)"}
+    F-->>C: {"type":"tool-step","toolCallId":"call_1","done":true,"ok":true,"durationMs":142,"summary":"12 result(s)"}
 
     Note over F,M: loop repeats until a text answer or the step limit
 
@@ -131,7 +131,7 @@ sequenceDiagram
 | `text-delta` | answer text |
 | `reasoning-delta` | model reasoning, rendered separately |
 | `json-delta` | partial object, structured mode only |
-| `tool-step` | opening (`summary`) then closing (`done`, `ok`, `durationMs`) |
+| `tool-step` | opening (`summary`) then closing (`done`, `ok`, `durationMs`), paired by `toolCallId` |
 | `finish` | `stopReason` (`completed` / `step-limit` / `output-limit`) + usage and its per-slice breakdown |
 | `error` | the stream itself broke — **not** used for tool failures or stop reasons |
 

@@ -12,8 +12,8 @@
   <h2 class="text-lg sm:text-xl font-semibold text-base-content">{tr.welcomeTitle}</h2>
   <p class="text-sm max-w-md leading-relaxed">{tr.welcomeDesc}</p>
   <div class="flex flex-wrap gap-2 justify-center mt-2">
-    <button class="btn btn-outline btn-sm" onclick={() => onask(tr.exWeapons)}>{tr.exWeapons}</button>
-    <button class="btn btn-outline btn-sm" onclick={() => onask(tr.exM4a1)}>{tr.exM4a1}</button>
-    <button class="btn btn-outline btn-sm" onclick={() => onask(tr.exExact)}>{tr.exExact}</button>
+    <button class="btn btn-outline btn-sm" onclick={() => onask(tr.exCompare)}>{tr.exCompare}</button>
+    <button class="btn btn-outline btn-sm" onclick={() => onask(tr.exSearch)}>{tr.exSearch}</button>
+    <button class="btn btn-outline btn-sm" onclick={() => onask(tr.exTrace)}>{tr.exTrace}</button>
   </div>
 </div>

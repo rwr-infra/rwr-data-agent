@@ -682,7 +682,7 @@ export async function chatRoutes(app: FastifyInstance) {
             } else if (p.type === 'tool-call') {
               toolCallCount++;
               const summary = summarizeToolInput(p.toolName, p.input);
-              emit({ type: 'tool-step', toolName: p.toolName, summary });
+              emit({ type: 'tool-step', toolCallId: p.toolCallId, toolName: p.toolName, summary });
             } else if (p.type === 'tool-result') {
               // The runtime envelope turns thrown tools into ordinary results carrying `error`, so
               // success has to be read off the output shape rather than the stream part type.
@@ -690,6 +690,7 @@ export async function chatRoutes(app: FastifyInstance) {
               if (failed) toolFailureCount++;
               emit({
                 type: 'tool-step',
+                toolCallId: p.toolCallId,
                 toolName: p.toolName,
                 done: true,
                 ok: !failed,
@@ -705,6 +706,7 @@ export async function chatRoutes(app: FastifyInstance) {
               console.warn(`[chat] tool-error ${p.toolName ?? '?'} — ${message}`);
               emit({
                 type: 'tool-step',
+                toolCallId: p.toolCallId,
                 toolName: p.toolName,
                 done: true,
                 ok: false,

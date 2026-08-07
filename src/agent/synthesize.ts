@@ -303,6 +303,7 @@ async function runCandidate(
         options.onEvent({
           type: 'candidate-step',
           candidate: i,
+          toolCallId: p.toolCallId,
           toolName: p.toolName,
           summary: summarizeToolInput(p.toolName, p.input),
         });
@@ -312,6 +313,7 @@ async function runCandidate(
         options.onEvent({
           type: 'candidate-step',
           candidate: i,
+          toolCallId: p.toolCallId,
           toolName: p.toolName,
           done: true,
           ok: !failed,
@@ -325,6 +327,7 @@ async function runCandidate(
         options.onEvent({
           type: 'candidate-step',
           candidate: i,
+          toolCallId: p.toolCallId,
           toolName: p.toolName,
           done: true,
           ok: false,

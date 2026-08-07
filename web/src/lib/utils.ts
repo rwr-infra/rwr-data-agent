@@ -14,6 +14,14 @@ export function estimateTokens(text: string): number {
   return Math.ceil(cjk / 1.5 + (text.length - cjk) / 4);
 }
 
+/** Live elapsed badge: seconds until one minute, then m:ss. Shared by the thinking indicator and
+ *  the reasoning-block header so the two can never show the same time in two formats. */
+export function formatElapsed(seconds: number): string {
+  return seconds < 60
+    ? `${seconds}s`
+    : `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
 export function stripMarkdown(md: string): string {
   return md
     .replace(/```[\s\S]*?```/g, (m) =>

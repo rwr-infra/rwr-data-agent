@@ -14,6 +14,22 @@
   animation: fadeIn 0.3s ease;
 }
 
+/* Shared <details> fold treatment — reasoning blocks, tool cards, candidate traces and the raw-
+   drafts panel all fold the same way: no native marker, an inline arrow that rotates on open.
+   (daisyUI's collapse absolutely positions its arrow, which overlaps labels this short.) */
+details.fold > summary {
+  list-style: none;
+}
+details.fold > summary::-webkit-details-marker {
+  display: none;
+}
+details.fold .fold-arrow {
+  transition: transform 0.15s ease;
+}
+details.fold[open] > summary .fold-arrow {
+  transform: rotate(90deg);
+}
+
 .drawer-backdrop {
   transition: opacity 0.3s ease;
 }
