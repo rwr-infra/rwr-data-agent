@@ -26,6 +26,9 @@ export interface Translations {
   searching: string;
   generating: string;
   reasoning: string;
+  toolRunning: string;
+  toolFailed: string;
+  toolResult: string;
   tokenBreakdown: string;
   bdInput: string;
   bdOutput: string;
@@ -101,6 +104,9 @@ const i18n: Record<Lang, Translations> = {
     searching: '搜索中',
     generating: '生成中',
     reasoning: '思考过程',
+    toolRunning: '调用中',
+    toolFailed: '调用失败',
+    toolResult: '结果',
     tokenBreakdown: 'Token 去向',
     bdInput: '输入',
     bdOutput: '输出',
@@ -179,6 +185,9 @@ const i18n: Record<Lang, Translations> = {
     searching: 'Searching',
     generating: 'Generating',
     reasoning: 'Reasoning',
+    toolRunning: 'Running',
+    toolFailed: 'Failed',
+    toolResult: 'Result',
     tokenBreakdown: 'Token usage',
     bdInput: 'Input',
     bdOutput: 'Output',

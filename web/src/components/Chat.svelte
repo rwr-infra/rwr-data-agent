@@ -2,6 +2,8 @@
   import type { DisplayItem } from '../lib/types.js';
   import type { Translations } from '../lib/i18n.js';
   import Message from './Message.svelte';
+  import ReasoningBlock from './ReasoningBlock.svelte';
+  import ToolCallCard from './ToolCallCard.svelte';
   import ThinkingIndicator from './ThinkingIndicator.svelte';
   import CandidatePanel from './CandidatePanel.svelte';
 
@@ -13,22 +15,26 @@
     searchingText: string;
     generatingText: string;
     elapsed: number;
-    pendingRecallId: string | null;
+    pendingRecallTurnId: string | null;
+    /** Id of the block still receiving deltas — it gets the caret / the live reasoning header. */
+    activeBlockId: string | null;
     tr: Translations;
     loading: boolean;
-    onretry: (id: string) => void;
-    onrecall: (id: string) => void;
-    oncopy: (id: string, format: 'text' | 'markdown') => void;
+    onretry: (turnId: string) => void;
+    onrecall: (turnId: string) => void;
+    oncopy: (id: string) => void;
+    oncopyturn: (turnId: string, format: 'text' | 'markdown') => void;
     onconfirmrecall: () => void;
     oncancelrecall: () => void;
   }
-  let { items, thinking, streaming, thinkingText, searchingText, generatingText, elapsed, pendingRecallId, tr, loading, onretry, onrecall, oncopy, onconfirmrecall, oncancelrecall }: Props = $props();
+  let { items, thinking, streaming, thinkingText, searchingText, generatingText, elapsed, pendingRecallTurnId, activeBlockId, tr, loading, onretry, onrecall, oncopy, oncopyturn, onconfirmrecall, oncancelrecall }: Props = $props();
 
-  let lastAiIdx = $derived(items.findLastIndex((it) => it.type === 'message' && it.role === 'ai'));
+  // The turn still streaming. Its action bar and meta line stay hidden until it finishes.
+  let liveTurnId = $derived(streaming ? items[items.length - 1]?.turnId : undefined);
 
   let recallStartIdx = $derived(
-    pendingRecallId
-      ? items.findIndex(it => it.id === pendingRecallId)
+    pendingRecallTurnId
+      ? items.findIndex(it => it.turnId === pendingRecallTurnId)
       : -1
   );
 
@@ -44,19 +50,33 @@
     return prev?.type === 'message' && prev.role === 'ai';
   }
 
-  function nextIsMeta(i: number): boolean {
-    return items[i + 1]?.type === 'meta';
-  }
-
   /** Text of the meta line that follows an AI message, or '' when there is none. */
   function metaTextAt(i: number): string {
     const next = items[i + 1];
     return next?.type === 'meta' ? next.text : '';
   }
 
+  /**
+   * The last AI text block of each turn — the action bar belongs to the turn, not to every block
+   * (text → tool → text …), so it hangs off the final one only. One reverse pass, recomputed when
+   * `items` changes; a per-row forward scan would make every streamed delta O(items × turn size).
+   */
+  let turnEndIds = $derived.by(() => {
+    const ids = new Set<string>();
+    const seen = new Set<string>();
+    for (let j = items.length - 1; j >= 0; j--) {
+      const it = items[j];
+      if (it.type === 'message' && it.role === 'ai' && !seen.has(it.turnId)) {
+        seen.add(it.turnId);
+        ids.add(it.id);
+      }
+    }
+    return ids;
+  });
+
   // A meta line that follows an AI message is rendered *inside* that message's block, so it must not
   // render again on its own. Filtering it out here (keeping the original index, which `prevWasAi` /
-  // `nextIsMeta` / `isDimmed` all key off) replaces what used to be an empty `{:else if}` branch.
+  // `isDimmed` key off) replaces what used to be an empty `{:else if}` branch.
   let rows = $derived(
     items
       .map((item, i) => ({ item, i }))
@@ -73,94 +93,96 @@
   });
 </script>
 
+{#snippet copyIcon()}
+  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+{/snippet}
+
+{#snippet aiActions(turnId: string)}
+  <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 sm:group-hover:opacity-100 transition-opacity mt-1 mb-2">
+    <button class="btn btn-ghost btn-xs" onclick={() => oncopyturn(turnId, 'text')} title={tr.copyText}>
+      {@render copyIcon()}
+    </button>
+    <button class="btn btn-ghost btn-xs font-bold text-xs" onclick={() => oncopyturn(turnId, 'markdown')} title={tr.copyMarkdown}>MD</button>
+    <button class="btn btn-ghost btn-xs" onclick={() => onretry(turnId)} title={tr.retry} disabled={loading}>
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
+    </button>
+  </div>
+{/snippet}
+
 <div class="flex-1 overflow-y-auto p-3 sm:p-6 flex flex-col gap-4" bind:this={chatEl}>
   {#each rows as { item, i } (item.id)}
-    {#if item.type === 'message' && item.role === 'ai' && nextIsMeta(i)}
-      <div class="group flex flex-col items-start animate-fade-in" class:opacity-50={isDimmed(i) || isDimmed(i + 1)} class:transition-opacity={isDimmed(i) || isDimmed(i + 1)}>
-        <Message content={item.content} type="ai" id={item.id} streaming={streaming && i === lastAiIdx} reasoning={item.reasoning} reasoningLabel={tr.reasoning} />
-        <div class="text-xs text-base-content/50 mt-0.5 animate-fade-in">{metaTextAt(i)}</div>
-        <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 sm:group-hover:opacity-100 transition-opacity mt-1 mb-2">
-          <button class="btn btn-ghost btn-xs" onclick={() => oncopy(item.id, 'text')} title={tr.copyText}>
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-          </button>
-          <button class="btn btn-ghost btn-xs font-bold text-xs" onclick={() => oncopy(item.id, 'markdown')} title={tr.copyMarkdown}>MD</button>
-          <button class="btn btn-ghost btn-xs" onclick={() => onretry(item.id)} title={tr.retry} disabled={loading}>
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
-          </button>
-        </div>
+    {#if item.type === 'message' && item.role === 'ai'}
+      <div class="group flex flex-col items-start animate-fade-in" class:opacity-50={isDimmed(i)} class:transition-opacity={isDimmed(i)}>
+        <Message content={item.content} type="ai" streaming={item.id === activeBlockId} />
+        {#if item.turnId !== liveTurnId && turnEndIds.has(item.id)}
+          {#if metaTextAt(i)}
+            <div class="text-xs text-base-content/50 mt-0.5 animate-fade-in">{metaTextAt(i)}</div>
+          {/if}
+          {@render aiActions(item.turnId)}
+        {/if}
       </div>
     {:else if item.type === 'message'}
-      {#if item.role === 'ai' && !nextIsMeta(i) && !(streaming && i === lastAiIdx)}
-        <div class="group flex flex-col items-start animate-fade-in" class:opacity-50={isDimmed(i)} class:transition-opacity={isDimmed(i)}>
-          <Message content={item.content} type="ai" id={item.id} reasoning={item.reasoning} reasoningLabel={tr.reasoning} />
-          <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 sm:group-hover:opacity-100 transition-opacity mt-1 mb-2">
-            <button class="btn btn-ghost btn-xs" onclick={() => oncopy(item.id, 'text')} title={tr.copyText}>
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-            </button>
-            <button class="btn btn-ghost btn-xs font-bold text-xs" onclick={() => oncopy(item.id, 'markdown')} title={tr.copyMarkdown}>MD</button>
-            <button class="btn btn-ghost btn-xs" onclick={() => onretry(item.id)} title={tr.retry} disabled={loading}>
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
-            </button>
+      <div class="flex flex-col animate-fade-in"
+        class:items-end={item.role === 'user'}
+        class:items-start={item.role !== 'user'}
+        class:opacity-50={isDimmed(i)}
+        class:transition-opacity={isDimmed(i)}
+      >
+        <Message content={item.content} type={item.role} />
+        {#if item.role === 'user'}
+          <div class="group">
+            <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 sm:group-hover:opacity-100 transition-opacity mt-1 mb-2 justify-end">
+              <button class="btn btn-ghost btn-xs" onclick={() => oncopy(item.id)} title={tr.copyText}>
+                {@render copyIcon()}
+              </button>
+              <button class="btn btn-ghost btn-xs" onclick={() => onrecall(item.turnId)} title={tr.recall} disabled={loading}>
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
+              </button>
+            </div>
           </div>
-        </div>
-      {:else}
-        <div class="flex flex-col animate-fade-in"
-          class:items-end={item.role === 'user'}
-          class:items-start={item.role !== 'user'}
-          class:opacity-50={isDimmed(i)}
-          class:transition-opacity={isDimmed(i)}
-        >
-          <Message content={item.content} type={item.role} id={item.id} streaming={streaming && i === lastAiIdx} reasoning={item.reasoning} reasoningLabel={tr.reasoning} thinkingLabel={tr.thinking} {elapsed} />
-          {#if item.role === 'user'}
-            <div class="group">
-              <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 sm:group-hover:opacity-100 transition-opacity mt-1 mb-2 justify-end">
-                <button class="btn btn-ghost btn-xs" onclick={() => oncopy(item.id, 'text')} title={tr.copyText}>
-                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-                </button>
-                <button class="btn btn-ghost btn-xs" onclick={() => onrecall(item.id)} title={tr.recall} disabled={loading}>
-                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
-                </button>
-              </div>
+        {/if}
+        {#if item.role === 'error'}
+          <div class="group">
+            <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 sm:group-hover:opacity-100 transition-opacity mt-1 mb-2">
+              <button class="btn btn-ghost btn-xs" onclick={() => oncopy(item.id)} title={tr.copyText}>
+                {@render copyIcon()}
+              </button>
             </div>
-          {/if}
-          {#if item.role === 'error'}
-            <div class="group">
-              <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 sm:group-hover:opacity-100 transition-opacity mt-1 mb-2">
-                <button class="btn btn-ghost btn-xs" onclick={() => oncopy(item.id, 'text')} title={tr.copyText}>
-                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-                </button>
-              </div>
-            </div>
-          {/if}
-        </div>
-      {/if}
-    {:else if item.type === 'meta' && !prevWasAi(i)}
+          </div>
+        {/if}
+      </div>
+    {:else if item.type === 'reasoning'}
+      <div class="flex flex-col items-start animate-fade-in" class:opacity-50={isDimmed(i)} class:transition-opacity={isDimmed(i)}>
+        <ReasoningBlock
+          text={item.text}
+          active={item.id === activeBlockId}
+          reasoningLabel={tr.reasoning}
+          thinkingLabel={tr.thinking}
+          {elapsed}
+        />
+      </div>
+    {:else if item.type === 'tool-call'}
+      <div class="flex flex-col items-start animate-fade-in w-full" class:opacity-50={isDimmed(i)} class:transition-opacity={isDimmed(i)}>
+        <ToolCallCard
+          toolName={item.toolName}
+          input={item.input}
+          output={item.output}
+          ok={item.ok}
+          durationMs={item.durationMs}
+          runningLabel={tr.toolRunning}
+          failedLabel={tr.toolFailed}
+          resultLabel={tr.toolResult}
+        />
+      </div>
+    {:else if item.type === 'meta'}
       <div class="flex flex-col items-start animate-fade-in" class:opacity-50={isDimmed(i)} class:transition-opacity={isDimmed(i)}>
         <div class="text-xs text-base-content/50">{item.text}</div>
       </div>
-    {:else if item.type === 'tool-trace'}
-      <div class="flex flex-col items-start animate-fade-in" class:opacity-50={isDimmed(i)} class:transition-opacity={isDimmed(i)}>
-        <details class="tool-trace group text-xs text-base-content/50">
-          <summary class="cursor-pointer select-none flex items-center gap-1 py-0.5">
-            <span class="tool-trace-arrow inline-block text-[0.65rem] leading-none transition-transform">▶</span>
-            <span class="group-open:hidden">{item.steps.length} tool call(s)</span>
-            <span class="hidden group-open:inline">Tool calls</span>
-          </summary>
-          <div class="flex flex-col gap-0.5 mt-0.5 pl-3 border-l border-base-300">
-            {#each item.steps as step}
-              <span class:text-error={step.ok === false}>
-                {step.icon} {step.text}
-                {#if step.durationMs != null}<span class="text-base-content/30">{step.durationMs}ms</span>{/if}
-              </span>
-            {/each}
-          </div>
-        </details>
-      </div>
     {:else if item.type === 'candidate-trace'}
       <div class="flex flex-col items-start animate-fade-in w-full max-w-[88vw] sm:max-w-none" class:opacity-50={isDimmed(i)} class:transition-opacity={isDimmed(i)}>
-        <details class="tool-trace group text-xs text-base-content/50" open>
+        <details class="fold group text-xs text-base-content/50" open>
           <summary class="cursor-pointer select-none flex items-center gap-1 py-0.5">
-            <span class="tool-trace-arrow inline-block text-[0.65rem] leading-none transition-transform">▶</span>
+            <span class="fold-arrow inline-block text-[0.65rem] leading-none">▶</span>
             <span class="font-medium text-base-content/60">{tr.candidateN(item.candidate + 1)} / {item.total}</span>
             {#if !item.done}
               <span class="animate-pulse text-primary">…</span>
@@ -189,7 +211,7 @@
       </div>
     {/if}
 
-    {#if pendingRecallId && item.id === pendingRecallId}
+    {#if pendingRecallTurnId && item.type === 'message' && item.role === 'user' && item.turnId === pendingRecallTurnId}
       <div class="self-start max-w-[80%] p-3 bg-primary/10 border border-primary rounded-lg flex items-center gap-3 text-sm text-base-content animate-fade-in">
         <span>{tr.recallConfirm}</span>
         <button class="btn btn-primary btn-xs" onclick={onconfirmrecall}>{tr.recallConfirmBtn}</button>
@@ -202,15 +224,3 @@
     <ThinkingIndicator {thinkingText} {searchingText} {generatingText} {elapsed} />
   {/if}
 </div>
-
-<style>
-  details.tool-trace > summary {
-    list-style: none;
-  }
-  details.tool-trace > summary::-webkit-details-marker {
-    display: none;
-  }
-  details.tool-trace[open] > summary .tool-trace-arrow {
-    transform: rotate(90deg);
-  }
-</style>

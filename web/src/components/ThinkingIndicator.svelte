@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { formatElapsed } from '../lib/utils.js';
 
   interface Props {
     thinkingText: string;
@@ -24,9 +25,7 @@
   });
 
   let current = $derived(phases[phase]);
-  let elapsedDisplay = $derived(
-    elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}`
-  );
+  let elapsedDisplay = $derived(formatElapsed(elapsed));
 </script>
 
 <div class="chat chat-start animate-fade-in" role="status" aria-live="polite" aria-label={thinkingText}>

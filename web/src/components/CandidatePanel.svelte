@@ -15,9 +15,9 @@
 </script>
 
 <div class="flex flex-col items-start animate-fade-in w-full max-w-[88vw] sm:max-w-none">
-  <details class="candidate-panel w-full" bind:open={open}>
+  <details class="fold w-full" bind:open={open}>
     <summary class="cursor-pointer select-none flex items-center gap-2 py-1 text-xs text-base-content/50">
-      <span class="candidate-panel-arrow inline-block text-[0.65rem] leading-none transition-transform">▶</span>
+      <span class="fold-arrow inline-block text-[0.65rem] leading-none">▶</span>
       <span class="font-medium">{tr.candidatesTitle} ({candidates.length})</span>
       {#if failedCount > 0}
         <span class="text-error">{failedCount} failed</span>
@@ -53,15 +53,3 @@
     </div>
   </details>
 </div>
-
-<style>
-  details.candidate-panel > summary {
-    list-style: none;
-  }
-  details.candidate-panel > summary::-webkit-details-marker {
-    display: none;
-  }
-  details.candidate-panel[open] > summary .candidate-panel-arrow {
-    transform: rotate(90deg);
-  }
-</style>

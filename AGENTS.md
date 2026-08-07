@@ -296,7 +296,7 @@ Diagrams for the request pipeline, the tool loop, the stream contract and the in
 ### Streaming format
 Custom **NDJSON**, not SSE. One JSON object per line, keyed by `type`: `text-delta`, `reasoning-delta`, `json-delta`, `tool-step`, `finish`, `error`. Treat these shapes as a contract with the Web UI — **extend with new optional fields, never repurpose an existing one.**
 
-- `tool-step` — emitted twice per call: opening (`toolName`, `summary`) and closing (`done: true`, `ok`, `durationMs`). `ok: false` marks a failed call; the UI must still close the trace line or a failure reads as still running.
+- `tool-step` — emitted twice per call: opening (`toolCallId`, `toolName`, `summary`) and closing (same `toolCallId`, `done: true`, `ok`, `durationMs`). `ok: false` marks a failed call; the UI must still close the card or a failure reads as still running. **`toolCallId` is the pairing key** — the UI renders one card per call and updates it in place. Against a backend old enough not to send it, the closing event pairs with the turn's still-open card (calls never overlap within a turn); a closing event with no open card at all still renders as a closed card — the outcome is shown rather than dropped. Opening carries the argument summary, closing the result summary; neither is the raw input/output, and neither should grow into it.
 - `finish` — `stopReason` is `completed` | `step-limit` | `output-limit`. `usage` separates **spend** from **occupancy**: `promptTokens`/`completionTokens` sum every step of the tool loop, while `contextTokens` is what the *next* request will carry (the tool transcript is excluded — it never survives the turn, and the UI gates sending on this number). `maxContextTokens` lets the UI follow server config. `breakdown` attributes the totals per slice, with `exact` listing which figures the provider reported verbatim.
 - `error` — the stream itself broke. **Not** used for tool failures (those are `tool-step` with `ok: false`) or for stop reasons (those are `finish.stopReason`). Never put user-facing prose here that the frontend could localize itself.
 
@@ -321,6 +321,12 @@ Before lowering it, note two causes worth fixing first, because they may remove 
 
 ### Frontend
 Svelte 5 + Vite + Tailwind 4 + daisyUI in `web/`, building into `public/` — treat `public/` as generated. `web/vite.config.ts` reads `PORT` from the repo-root `.env` via `loadEnv`, so the dev proxy always follows the backend port. The Header's dropdown is a package filter fed by `GET /v1/packages`; it hides itself when there is only one package.
+
+**A turn renders as many blocks, not one bubble.** Text, reasoning and each tool call are separate `DisplayItem`s appended in arrival order, so the rendered order equals the real timeline: a tool call closes the current text block, and whatever the model writes next opens a new one *below* the tool card. `turnId` is what still groups them — retry, recall and copy all key on it, never on an item index, and `history` carries the same id so a recall can truncate by turn instead of reconstructing itself from the rendered items (one answer would fold back into several assistant messages).
+
+The timeline is persisted: assistant `Message`s carry `segments: TurnSegment[]`, so a reload replays the same blocks. Sessions written before this exist without the field and fall back to a single bubble — `buildDisplayItems` branches on it, and there is no migration.
+
+Streaming state lives in two variables: `streaming` (the turn is live — its action bar and meta line stay hidden) and `activeBlockId` (the one block still receiving deltas — it gets the caret). While a tool runs, `activeBlockId` is null, which is what stops the caret from blinking on a block that already ended.
 
 ### Observability
 `src/observability/langfuse.ts` + `src/instrumentation.ts` — Langfuse OTel tracing wraps the chat chain (search / generation spans), gated by `LANGFUSE_ENABLED`.
