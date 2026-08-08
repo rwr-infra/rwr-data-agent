@@ -109,7 +109,8 @@
   </div>
 {/snippet}
 
-<div class="flex-1 overflow-y-auto p-3 sm:p-6 flex flex-col gap-4" bind:this={chatEl}>
+<div class="flex-1 overflow-y-auto" bind:this={chatEl}>
+  <div class="mx-auto w-full max-w-4xl px-4 sm:px-6 flex flex-col gap-4">
   {#each rows as { item, i } (item.id)}
     {#if item.type === 'message' && item.role === 'ai'}
       <div class="group flex flex-col items-start animate-fade-in" class:opacity-50={isDimmed(i)} class:transition-opacity={isDimmed(i)}>
@@ -178,29 +179,38 @@
         <div class="text-xs text-base-content/50">{item.text}</div>
       </div>
     {:else if item.type === 'candidate-trace'}
-      <div class="flex flex-col items-start animate-fade-in w-full max-w-[88vw] sm:max-w-none" class:opacity-50={isDimmed(i)} class:transition-opacity={isDimmed(i)}>
-        <details class="fold group text-xs text-base-content/50" open>
-          <summary class="cursor-pointer select-none flex items-center gap-1 py-0.5">
+      <div class="flex flex-col items-start animate-fade-in w-full max-w-2xl" class:opacity-50={isDimmed(i)} class:transition-opacity={isDimmed(i)}>
+        <details class="fold rounded-box bg-base-200 text-xs text-base-content/70 w-full" open>
+          <summary class="cursor-pointer select-none flex items-center gap-1.5 px-3 py-1.5">
             <span class="fold-arrow inline-block text-[0.65rem] leading-none">▶</span>
-            <span class="font-medium text-base-content/60">{tr.candidateN(item.candidate + 1)} / {item.total}</span>
+            <span class="font-medium truncate">{tr.candidateN(item.candidate + 1)} / {item.total}</span>
             {#if !item.done}
-              <span class="animate-pulse text-primary">…</span>
+              <span class="w-1.5 h-1.5 rounded-full bg-primary animate-pulse shrink-0 ml-auto" aria-hidden="true"></span>
             {:else if item.ok === false}
-              <span class="text-error">✕</span>
+              <svg class="shrink-0 ml-auto text-error" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
             {:else}
-              <span class="text-success">✓</span>
+              <svg class="shrink-0 ml-auto text-success" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
             {/if}
           </summary>
-          <div class="flex flex-col gap-0.5 mt-0.5 pl-3 border-l border-base-300">
-            {#each item.steps as step}
-              <span class:text-error={step.ok === false}>
-                {step.icon} {step.text}
-                {#if step.durationMs != null}<span class="text-base-content/30">{step.durationMs}ms</span>{/if}
-              </span>
-            {/each}
-            {#if !item.done}
-              <span class="animate-pulse">…</span>
-            {/if}
+          <div class="px-3 pb-2">
+            <div class="flex flex-col gap-0.5 mt-0.5 pl-3 border-l border-base-300">
+              {#each item.steps as step}
+                <span class="flex items-center gap-1.5" class:text-error={step.ok === false}>
+                  {#if step.ok === undefined}
+                    <span class="w-1.5 h-1.5 rounded-full bg-primary animate-pulse shrink-0" aria-hidden="true"></span>
+                  {:else if step.ok}
+                    <svg class="shrink-0 text-success" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                  {:else}
+                    <svg class="shrink-0 text-error" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                  {/if}
+                  <span class="min-w-0">{step.text}</span>
+                  {#if step.durationMs != null}<span class="text-base-content/30 shrink-0">{step.durationMs}ms</span>{/if}
+                </span>
+              {/each}
+              {#if !item.done}
+                <span class="animate-pulse text-base-content/30">…</span>
+              {/if}
+            </div>
           </div>
         </details>
       </div>
@@ -211,7 +221,7 @@
     {/if}
 
     {#if pendingRecallTurnId && item.type === 'message' && item.role === 'user' && item.turnId === pendingRecallTurnId}
-      <div class="self-start max-w-[80%] p-3 bg-primary/10 border border-primary rounded-lg flex items-center gap-3 text-sm text-base-content animate-fade-in">
+      <div class="self-start max-w-[80%] p-3 bg-primary/10 border border-primary rounded-box flex items-center gap-3 text-sm text-base-content animate-fade-in">
         <span>{tr.recallConfirm}</span>
         <button class="btn btn-primary btn-xs" onclick={onconfirmrecall}>{tr.recallConfirmBtn}</button>
         <button class="btn btn-ghost btn-xs" onclick={oncancelrecall}>{tr.recallCancelBtn}</button>
@@ -222,4 +232,5 @@
   {#if thinking}
     <ThinkingIndicator {thinkingText} {searchingText} {generatingText} {elapsed} />
   {/if}
+  </div>
 </div>

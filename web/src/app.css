@@ -2,7 +2,90 @@
 
 @plugin "@tailwindcss/typography";
 @plugin "daisyui" {
-  themes: light --default, dark --prefersdark;
+  themes: false;
+}
+
+/* Steel-blue brand themes. Theme names stay `light`/`dark`: `theme.ts` and stored
+   `localStorage['rwr-theme']` values are load-bearing and must not be renamed. */
+@plugin "daisyui/theme" {
+  name: "light";
+  default: true;
+  prefersdark: false;
+  color-scheme: light;
+  --color-base-100: oklch(0.99 0.005 250);
+  --color-base-200: oklch(0.97 0.010 250);
+  --color-base-300: oklch(0.93 0.012 250);
+  --color-base-content: oklch(0.27 0.030 255);
+  --color-primary: oklch(0.55 0.130 255);
+  --color-primary-content: oklch(0.99 0.010 250);
+  --color-secondary: oklch(0.62 0.100 230);
+  --color-secondary-content: oklch(0.99 0.010 250);
+  --color-accent: oklch(0.60 0.110 210);
+  --color-accent-content: oklch(0.99 0.010 250);
+  --color-neutral: oklch(0.40 0.020 255);
+  --color-neutral-content: oklch(0.98 0.010 250);
+  --color-info: oklch(0.70 0.120 230);
+  --color-info-content: oklch(0.99 0.010 250);
+  --color-success: oklch(0.62 0.150 150);
+  --color-success-content: oklch(0.99 0.010 250);
+  --color-warning: oklch(0.80 0.150 85);
+  --color-warning-content: oklch(0.27 0.050 85);
+  --color-error: oklch(0.60 0.200 25);
+  --color-error-content: oklch(0.99 0.010 250);
+  --radius-selector: 0.25rem;
+  --radius-field: 0.5rem;
+  --radius-box: 0.5rem;
+  --border: 1px;
+  --depth: 1;
+  --noise: 0;
+}
+
+@plugin "daisyui/theme" {
+  name: "dark";
+  default: false;
+  prefersdark: true;
+  color-scheme: dark;
+  --color-base-100: oklch(0.21 0.020 255);
+  --color-base-200: oklch(0.25 0.020 255);
+  --color-base-300: oklch(0.31 0.020 255);
+  --color-base-content: oklch(0.90 0.010 250);
+  --color-primary: oklch(0.70 0.120 255);
+  --color-primary-content: oklch(0.16 0.030 255);
+  --color-secondary: oklch(0.70 0.090 230);
+  --color-secondary-content: oklch(0.16 0.030 255);
+  --color-accent: oklch(0.70 0.100 210);
+  --color-accent-content: oklch(0.16 0.030 255);
+  --color-neutral: oklch(0.60 0.020 255);
+  --color-neutral-content: oklch(0.95 0.010 250);
+  --color-info: oklch(0.70 0.120 230);
+  --color-info-content: oklch(0.16 0.030 255);
+  --color-success: oklch(0.70 0.140 150);
+  --color-success-content: oklch(0.16 0.030 255);
+  --color-warning: oklch(0.80 0.140 85);
+  --color-warning-content: oklch(0.21 0.020 255);
+  --color-error: oklch(0.65 0.180 25);
+  --color-error-content: oklch(0.16 0.030 255);
+  --radius-selector: 0.25rem;
+  --radius-field: 0.5rem;
+  --radius-box: 0.5rem;
+  --border: 1px;
+  --depth: 1;
+  --noise: 0;
+}
+
+@theme {
+  /* Standardized system sans — professional, zero webfont cost. */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
+
+  /* Elevation scale (single, top-left light source). Replace ad-hoc shadow-lg/xl/shadow. */
+  --shadow-elevation-1: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-elevation-2: 0 4px 8px -2px rgb(0 0 0 / 0.10), 0 2px 4px -2px rgb(0 0 0 / 0.06);
+  --shadow-elevation-3: 0 12px 24px -6px rgb(0 0 0 / 0.18), 0 6px 12px -6px rgb(0 0 0 / 0.10);
+}
+
+html {
+  font-family: var(--font-sans);
 }
 
 @keyframes fadeIn {

@@ -110,7 +110,7 @@
     role="presentation"
   ></div>
   <div
-    class="drawer-panel fixed top-0 left-0 z-50 h-full w-[280px] max-w-[85vw] bg-base-100 border-r border-base-300 flex flex-col shadow-xl"
+    class="drawer-panel fixed top-0 left-0 z-50 h-full w-[280px] max-w-[85vw] bg-base-100 border-r border-base-300 flex flex-col shadow-elevation-3"
     ontouchstart={handleTouchStart}
     ontouchend={handleTouchEnd}
     role="dialog"
@@ -188,7 +188,7 @@
     {/if}
 
     <div class="px-3 py-2 flex items-center justify-between gap-2 {confirmingReset ? '' : 'border-t border-base-300'}">
-      <span class="text-xs text-base-content/40 shrink-0">{sessions.length} {tr.sessions.toLowerCase()}</span>
+      <span class="text-xs text-base-content/50 shrink-0">{sessions.length} {tr.sessions.toLowerCase()}</span>
       {#if confirmingReset}
         <div class="flex gap-1 shrink-0">
           <button class="btn btn-xs btn-error" onclick={handleResetConfirm}>{tr.resetConfirmBtn}</button>

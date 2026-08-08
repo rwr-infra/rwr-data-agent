@@ -83,10 +83,11 @@
   });
 </script>
 
-<div class="p-3 sm:p-4 border-t border-base-300 bg-base-200 flex flex-col gap-2 w-full max-w-full">
+<div class="border-t border-base-300 bg-base-200 w-full max-w-full">
   <!-- Note: no overflow-hidden here — the ContextBar's token-breakdown dropdown opens upward
        and would be clipped by it. Scrollbar safety comes from the `min-w-0` chains below and the
        app root's `h-dvh overflow-hidden`. -->
+  <div class="mx-auto w-full max-w-4xl px-4 sm:px-6 flex flex-col gap-2 py-3 sm:py-4">
   <!-- ChatGPT-style composer: the textarea and the Send button share one joined field, Send on
        the right — same on mobile. The button hugs the bottom as the textarea grows, and stays
        disabled until there is something to send. -->
@@ -174,12 +175,13 @@
           disabled={loading}
           onchange={() => onmaxtoggle?.()}
         />
-        <span class="text-xs text-base-content/60 select-none">{tr.maxMode}</span>
+        <span class="text-xs text-base-content/70 select-none">{tr.maxMode}</span>
       </label>
     </div>
   </div>
 
-  <div class="text-center text-xs text-base-content/40 select-none">{tr.aiDisclaimer}</div>
+  <div class="text-center text-xs text-base-content/30 select-none">{tr.aiDisclaimer}</div>
+  </div>
 </div>
 
 <style>
