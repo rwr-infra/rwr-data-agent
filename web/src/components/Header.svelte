@@ -46,12 +46,13 @@
   });
 </script>
 
-<div class="navbar bg-base-200 border-b border-base-300 px-3 sm:px-4 flex-wrap gap-y-2">
+<div class="navbar bg-base-200 border-b border-base-300 p-0">
+  <div class="mx-auto w-full max-w-4xl px-4 sm:px-6 flex flex-wrap items-center gap-x-3 gap-y-2">
   <div class="flex items-center gap-2 flex-1 min-w-0 order-1">
     <button class="btn btn-ghost btn-sm btn-circle shrink-0" onclick={ontogglemenu} aria-label={tr.sessions}>
       <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
     </button>
-    <h1 class="text-base sm:text-lg font-semibold truncate">RWR Data Agent</h1>
+    <h1 class="text-base sm:text-lg font-bold text-base-content truncate">RWR Data Agent</h1>
     <span class="badge badge-sm badge-ghost hidden sm:inline-flex shrink-0">{__APP_VERSION__}</span>
   </div>
   <div class="order-3 w-full sm:order-2 sm:w-auto">
@@ -94,5 +95,6 @@
       </svg>
     </label>
     <button class="btn btn-ghost btn-sm text-xs" onclick={ontogglelang}>{tr.langLabel}</button>
+  </div>
   </div>
 </div>

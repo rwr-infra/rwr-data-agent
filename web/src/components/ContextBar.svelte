@@ -63,7 +63,7 @@
 
 {#snippet slice(label: string, value: number, field: string)}
   <div class="flex justify-between pl-2">
-    <span class="text-base-content/60">{label}</span>
+    <span class="text-base-content/70">{label}</span>
     <span class="tabular-nums">{cell(value, field)}</span>
   </div>
 {/snippet}
@@ -71,15 +71,15 @@
 {#if breakdown}
   <div class="dropdown dropdown-hover dropdown-top w-full">
     <div tabindex="0" role="button" class="w-full cursor-help">{@render bar()}</div>
-    <div class="dropdown-content z-10 w-64 mb-1 rounded-lg border border-base-300 bg-base-100 p-3 text-xs shadow-lg">
+    <div class="dropdown-content z-10 w-64 mb-1 rounded-box border border-base-300 bg-base-100 p-3 text-xs shadow-elevation-2">
       <div class="mb-1 flex items-baseline justify-between gap-2">
-        <span class="font-semibold text-base-content/80">{tr.tokenBreakdown}</span>
+        <span class="font-semibold text-base-content/70">{tr.tokenBreakdown}</span>
         {#if breakdown.steps > 1}
-          <span class="text-base-content/40" title={tr.bdStepsHint(breakdown.steps)}>{tr.bdSteps(breakdown.steps)}</span>
+          <span class="text-base-content/50" title={tr.bdStepsHint(breakdown.steps)}>{tr.bdSteps(breakdown.steps)}</span>
         {/if}
       </div>
 
-      <div class="mt-0.5 flex justify-between text-base-content/40">
+      <div class="mt-0.5 flex justify-between text-base-content/50">
         <span>{tr.bdInput}</span><span class="tabular-nums">{fmt(inputTotal)}</span>
       </div>
       {#each inputRows as [label, value, field] (field)}
@@ -93,7 +93,7 @@
         </div>
       {/if}
 
-      <div class="mt-1 flex justify-between text-base-content/40">
+      <div class="mt-1 flex justify-between text-base-content/50">
         <span>{tr.bdOutput}</span><span class="tabular-nums">{fmt(outputTotal)}</span>
       </div>
       {#each outputRows as [label, value, field] (field)}

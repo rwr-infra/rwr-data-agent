@@ -668,10 +668,7 @@
                 (it) => it.type === 'candidate-trace' && it.candidate === c,
               );
               if (idx >= 0 && displayItems[idx]?.type === 'candidate-trace') {
-                const failed = event.done && event.ok === false;
-                const icon = !event.done ? '\uD83D\uDD27' : failed ? '\u2715' : '\u2713';
                 const step = {
-                  icon,
                   text: event.summary ?? event.toolName ?? 'tool',
                   ok: event.done ? event.ok !== false : undefined,
                   durationMs: event.durationMs,
@@ -990,7 +987,7 @@
   />
 
   {#if toast.visible}
-    <div class="fixed bottom-24 left-1/2 -translate-x-1/2 bg-base-200 border border-base-300 px-5 py-2 rounded-lg text-sm text-base-content z-50 shadow-lg animate-fade-in">
+    <div class="fixed bottom-24 left-1/2 -translate-x-1/2 bg-base-200 border border-base-300 px-5 py-2 rounded-box text-sm text-base-content z-50 shadow-elevation-2 animate-fade-in">
       {toast.message}
     </div>
   {/if}

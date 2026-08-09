@@ -23,6 +23,7 @@ docs/
 .cursor/
 .claude/
 .local/
+.agents/
 
 # Generated build artifacts (graph index, extracted docs)
 output/
