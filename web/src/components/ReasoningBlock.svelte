@@ -20,7 +20,10 @@
   let elapsedDisplay = $derived(formatElapsed(elapsed));
 </script>
 
-<details class="fold w-full max-w-2xl rounded-box bg-base-200 text-xs" open={active}>
+<!-- No `open` binding: the block stays collapsed by default, and once the user toggles it open the
+     browser owns that state. Binding `open` to `active` would both auto-expand every turn and snap
+     the block shut again the moment streaming ends, discarding a manual expand. -->
+<details class="fold w-full max-w-2xl rounded-box bg-base-200 text-xs">
   <summary class="flex items-center gap-1.5 px-3 py-1.5 cursor-pointer select-none font-medium text-base-content/70">
     <span class="fold-arrow inline-block text-[0.65rem] leading-none">▶</span>
     {#if active}

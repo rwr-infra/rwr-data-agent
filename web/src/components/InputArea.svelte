@@ -19,12 +19,12 @@
     prefillText?: string;
     onprefillconsumed?: () => void;
     /**
-     * True once the running turn has announced its id, which is the key the steer/stop side channel
-     * needs. False against a backend old enough not to send `turn-start`, and in the gap before the
-     * first frame arrives — the composer then behaves exactly as it did before steering existed.
+     * True once the running turn has announced its id, which is the key the stop side channel needs.
+     * False against a backend old enough not to send `turn-start`, and in the gap before the first
+     * frame arrives — the composer then shows the old disabled spinner instead of a Stop button that
+     * would 404.
      */
-    steerable?: boolean;
-    onsteer?: (text: string) => void;
+    stoppable?: boolean;
     onstop?: () => void;
   }
   let {
@@ -41,8 +41,7 @@
     oninputchange,
     prefillText = '',
     onprefillconsumed,
-    steerable = false,
-    onsteer,
+    stoppable = false,
     onstop,
   }: Props = $props();
 
@@ -75,18 +74,18 @@
   }
 
   /**
-   * Enter does the thing the composer is currently showing: start a turn, or — while one is running
-   * and steerable — add an instruction to it. Without a steerable turn the old behaviour stands:
-   * typing during a stream does nothing until it ends.
+   * A turn is exclusive: while one streams, nothing can be submitted. Typing is still allowed and
+   * the text is kept, so a question composed mid-answer is ready to send the moment the turn ends —
+   * it is simply not queued and not auto-sent, because a question written against a half-finished
+   * answer is usually not the question the user would ask against the finished one.
    */
   function submit() {
+    if (loading) return;
     const text = inputText.trim();
     if (!text) return;
-    if (loading && !steerable) return;
     inputText = '';
     if (textarea) textarea.style.height = 'auto';
-    if (loading) onsteer?.(text);
-    else onsend(text);
+    onsend(text);
   }
 
   $effect(() => {
@@ -119,28 +118,11 @@
       oninput={handleInput}
       onkeydown={handleKeydown}
     ></textarea>
-    <!-- Three states for the trailing control:
-         · idle           → Send.
-         · streaming, steerable → Steer (needs text) plus a Stop button. A running answer is no
-           longer a wall: the user can narrow it mid-flight or end it, which is the whole point of
-           the side channel.
-         · streaming, not steerable → the old spinner, disabled. That is the fallback against a
-           backend that never sent `turn-start`. -->
-    {#if loading && steerable}
-      <button
-        class="btn btn-primary btn-sm join-item shrink-0 self-end h-[44px] w-[44px]"
-        aria-label={tr.steer}
-        title={tr.steerHint}
-        disabled={!inputText.trim()}
-        onclick={submit}
-      >
-        <!-- Arrow-into-line: "add this to what is already running", distinct from the plain Send arrow. -->
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 19V9" />
-          <path d="m8 13 4-4 4 4" />
-          <path d="M5 5h14" />
-        </svg>
-      </button>
+    <!-- One control, two states — Send *becomes* Stop while a turn runs, so the same spot always
+         holds the only action available. The third state is the fallback: streaming but no turn id
+         yet (a backend that never sent `turn-start`, or the sub-second gap before the first frame),
+         where stopping would 404, so the old disabled spinner stands in. -->
+    {#if loading && stoppable}
       <button
         class="btn btn-error btn-outline btn-sm join-item shrink-0 self-end h-[44px] w-[44px]"
         aria-label={tr.stopTurn}

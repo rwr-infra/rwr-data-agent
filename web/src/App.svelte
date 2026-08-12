@@ -401,30 +401,6 @@
   }
 
   /**
-   * Add an instruction to the turn already streaming. It lands on the loop's next step — the
-   * current one is in flight with the provider, and cancelling it would throw away reasoning the
-   * user has already paid for. Everything found so far is kept.
-   *
-   * The `steer-applied` frame is what renders the confirmation, not this call: a 200 only means the
-   * server accepted it, while that frame means the loop actually carried it.
-   */
-  async function steerTurn(text: string) {
-    const id = serverTurnId;
-    if (!id) return;
-    try {
-      const res = await fetch('/v1/chat/steer', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ turnId: id, message: text }),
-      });
-      // 404 is the ordinary race — the turn finished between the click and the request landing.
-      if (!res.ok) showToast(tr.steerFailed);
-    } catch {
-      showToast(tr.steerFailed);
-    }
-  }
-
-  /**
    * End the running turn now. Whatever was generated stays on screen; the stream closes itself with
    * `stopReason: 'stopped'`, so there is nothing to tear down here.
    */
@@ -607,11 +583,15 @@
           try {
             const event = JSON.parse(line);
             if (event.type === 'turn-start') {
-              // First frame of the stream. Until it lands there is nothing to steer or stop.
+              // First frame of the stream. Until it lands there is nothing to stop.
               serverTurnId = typeof event.turnId === 'string' ? event.turnId : null;
             } else if (event.type === 'steer-applied') {
-              // The instruction reached the loop. Shown as its own timeline block so the answer
-              // above it stays readable as "what the model thought before being redirected".
+              // This composer never steers — it only stops. But `POST /v1/chat/steer` is a public
+              // side channel any client (or a curl) can hit against a turn id, so the frame is still
+              // rendered rather than silently dropped: a redirected answer that showed no reason for
+              // changing course would read as the model losing the thread.
+              // Its own timeline block, so the text above it stays readable as "what the model
+              // thought before being redirected".
               displayItems.push({
                 type: 'meta',
                 text: tr.steerApplied(String(event.message ?? '')),
@@ -1036,8 +1016,7 @@
     oninputchange={handleInputChange}
     {prefillText}
     onprefillconsumed={handlePrefillConsumed}
-    steerable={serverTurnId !== null}
-    onsteer={steerTurn}
+    stoppable={serverTurnId !== null}
     onstop={stopTurn}
   />
 
