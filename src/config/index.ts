@@ -183,8 +183,12 @@ export const config = {
    * lever on cost is retrieval breadth and the prompt's playbooks, not this number — lower it only
    * when an operator wants a hard ceiling and accepts truncated answers as the trade.
    *
-   * Hitting it is not a silent truncation: `finish.stopReason` reports `step-limit`, and the system
-   * prompt's instruction is to answer from the evidence already gathered.
+   * Hitting it is not a silent truncation, but `stopReason: 'step-limit'` is narrower than "the cap
+   * was reached": it is reported only when the loop stopped **with the model still asking for tools
+   * and no answer text written**. A turn that reached the cap having already produced an answer ends
+   * as `completed`, which is the honest reading — the user got an answer, it just stopped exploring.
+   * The system prompt's standing instruction is to answer from the evidence already gathered, so
+   * that second shape is the common one.
    */
   maxToolSteps: positiveIntEnv('MAX_TOOL_STEPS', 100),
 

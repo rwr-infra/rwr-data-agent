@@ -39,11 +39,14 @@ function watchSkillsDir(): void {
 export async function getSkills(): Promise<Skill[]> {
   if (loaded && !dirty) return cached;
 
+  // Cleared *before* the await. The watcher can fire while `loadSkills` is reading the directory;
+  // clearing afterwards would overwrite that signal, pinning the registry to the pre-change files
+  // until the operator happened to edit the directory a second time.
+  dirty = false;
   const result = await loadSkills({ dir: config.skillsDir });
   cached = result.skills;
   entries = result.entries;
   loaded = true;
-  dirty = false;
 
   const ok = entries.filter((e) => !e.error);
   if (entries.length > 0) {

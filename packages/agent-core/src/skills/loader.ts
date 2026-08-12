@@ -44,6 +44,18 @@ const SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
 
 /**
+ * Ceiling on a skill body, in characters (~4 to a token, so ~4K tokens).
+ *
+ * A skill body is injected verbatim into the system prompt of every turn it matches, and the route
+ * has a hard guard that rejects an oversized prompt with a 400. Without a cap here, one oversized
+ * file turns every question that trips its triggers into a failed request, and the error names the
+ * prompt rather than the file that inflated it. Refusing the skill at load time instead costs the
+ * operator that one playbook and says so on `GET /v1/tools`, which is where they are already
+ * looking when a skill misbehaves.
+ */
+const MAX_SKILL_BODY_CHARS = 16_000;
+
+/**
  * A deliberately tiny frontmatter reader: `key: value` lines, with `triggers` accepting either an
  * inline `[a, b]` list or `- item` lines beneath it.
  *
@@ -61,7 +73,10 @@ function parseFrontmatter(raw: string): { fields: Record<string, string[]>; body
   const match = FRONTMATTER.exec(raw);
   if (!match) return { fields: {}, body: raw };
 
-  const fields: Record<string, string[]> = {};
+  // Null prototype: the key pattern below admits `__proto__`, and on a plain object that write
+  // would replace the prototype instead of adding a field — after which `fields.name` and
+  // `fields.triggers` resolve through whatever landed there rather than reading as absent.
+  const fields: Record<string, string[]> = Object.create(null) as Record<string, string[]>;
   let currentKey: string | null = null;
 
   for (const line of match[1].split(/\r?\n/)) {
@@ -94,18 +109,31 @@ function parseSkill(raw: string, file: string): { skill: Skill; rawTriggers: str
     throw new Error(`invalid skill name ${JSON.stringify(name)}`);
   }
   const triggers = fields.triggers ?? [];
-  if (triggers.length === 0) {
+  // Normalize *before* the emptiness check, not after. `triggers:` lists reach here unfiltered from
+  // the dash-list branch, so a `- ""` line arrives as `['']` — length 1, passing a pre-normalization
+  // check, and then dropped by the filter. The skill would load with no triggers at all: never
+  // selected, and no error entry saying why, which is the exact failure the mandatory-triggers rule
+  // above exists to make loud.
+  const normalized = triggers.map((t) => t.trim().toLowerCase()).filter(Boolean);
+  if (normalized.length === 0) {
     throw new Error(
       'needs at least one trigger — a skill without triggers would be injected into every turn. ' +
         'Use `triggers: [word, another]` or a `-` list.',
     );
   }
   if (!body) throw new Error('has no body below the frontmatter');
+  if (body.length > MAX_SKILL_BODY_CHARS) {
+    throw new Error(
+      `body is ${body.length} characters, over the ${MAX_SKILL_BODY_CHARS} limit — it is injected ` +
+        'into the system prompt of every matching turn. Split it into narrower skills with ' +
+        'tighter triggers.',
+    );
+  }
 
   return {
     skill: {
       name,
-      triggers: triggers.map((t) => t.trim().toLowerCase()).filter(Boolean),
+      triggers: normalized,
       body,
       file,
     },

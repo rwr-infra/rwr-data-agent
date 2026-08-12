@@ -84,6 +84,17 @@ describe('isReverseLookup', () => {
   });
 
   /**
+   * Both aspects, or the English side is asymmetric: `referenced` matched from the start while
+   * `used` did not, so the same question phrased in the past tense fell through to `specific` and
+   * retrieved 30 documents instead of 12.
+   */
+  it('matches the completed aspect too', () => {
+    expect(isReverseLookup('which files used base_weapon')).toBe(true);
+    expect(isReverseLookup('what referenced bullet.projectile')).toBe(true);
+    expect(isReverseLookup('哪些文件用了 base_weapon')).toBe(true);
+  });
+
+  /**
    * Order is the whole trick: a forward lookup puts the interrogative *after* the verb. Matching on
    * the verb alone would drag "G36 使用什么弹药" onto `findReferences`, which answers the opposite
    * question.

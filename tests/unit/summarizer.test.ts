@@ -57,10 +57,22 @@ describe('summary store', () => {
     expect(getSummary('fresh')).toBeDefined();
   });
 
-  it('does not evict on read', () => {
+  /**
+   * The write sweep bounds memory, not retention: on an idle process — or one where some other
+   * session is the only writer — nothing runs it, and a summary past its TTL would still be handed
+   * back. These hold user conversation content keyed by a client-minted id, so the stated bound has
+   * to apply to what is returned, not only to what is stored.
+   */
+  it('expires a stale summary on read, with nothing else writing', () => {
     const now = Date.now();
     put('old', now - 7 * HOUR);
-    expect(getSummary('old')).toBeDefined();
+    expect(getSummary('old')).toBeUndefined();
+  });
+
+  it('keeps a summary inside the TTL', () => {
+    const now = Date.now();
+    put('warm', now - 1 * HOUR);
+    expect(getSummary('warm')).toBeDefined();
   });
 });
 

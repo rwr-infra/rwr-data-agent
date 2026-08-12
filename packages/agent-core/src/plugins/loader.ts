@@ -123,7 +123,12 @@ export async function loadToolPlugins<HOST>({
   host,
   reservedNames,
 }: LoadPluginsOptions<HOST>): Promise<LoadedPlugins> {
-  const tools: Record<string, Tool> = {};
+  // Null prototype, because `TOOL_NAME` admits `constructor`, `toString`, `valueOf` and
+  // `__proto__`. On a plain object the duplicate check below would read those off
+  // `Object.prototype` and reject the first plugin to use one as a phantom duplicate, and
+  // `tools['__proto__'] = …` would set the prototype instead of an own property — the tool would
+  // then vanish from the `{...tools}` spread in the host with no error entry recording the loss.
+  const tools: Record<string, Tool> = Object.create(null) as Record<string, Tool>;
   const entries: PluginEntry[] = [];
   const triggers = new Map<string, string[]>();
   const reserved = new Set(reservedNames);

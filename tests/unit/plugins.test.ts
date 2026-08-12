@@ -100,6 +100,25 @@ describe('loadToolPlugins — the rules a plugin cannot break', () => {
     expect(loaded.entries[1].error).toContain('duplicate tool name');
   });
 
+  /**
+   * The name pattern admits every one of these, and on a plain object they are not free names:
+   * `toString` and `constructor` read as already-taken off `Object.prototype`, so the first plugin to
+   * use one would be rejected as a duplicate of nothing; `__proto__` would not be stored as an own
+   * property at all, so the tool would vanish from the host's `{...tools}` spread with no error
+   * entry recording it. Names nobody sensible would pick — but a registry that mangles them is a
+   * registry that mangles them silently.
+   */
+  it.each(['toString', 'constructor', 'valueOf', '__proto__'])(
+    'registers %s as an ordinary tool name',
+    async (name) => {
+      await writePlugin('proto.js', specSource(name));
+      const loaded = await loadToolPlugins(host, BUILTINS);
+
+      expect(loaded.entries[0].error).toBeUndefined();
+      expect(Object.keys(loaded.tools)).toEqual([name]);
+    },
+  );
+
   it.each([
     ['an invalid tool name', specSource('not a valid name'), 'invalid tool name'],
     [

@@ -96,11 +96,37 @@ describe('loadSkills — validation', () => {
     expect(entries[0].error).toContain('at least one trigger');
   });
 
+  /**
+   * A trigger list that is non-empty on paper and empty after normalization is the worst of both:
+   * the file loads, so nothing reports a problem, and the skill can never be selected. Rejecting it
+   * is what keeps the rule above from having a silent hole.
+   */
+  it('rejects triggers that survive parsing but not normalization', async () => {
+    await write('blank-dash.md', `---\nname: blank-dash\ntriggers:\n  - ""\n  - '   '\n---\nbody`);
+    const { skills, entries } = await load();
+
+    expect(skills).toEqual([]);
+    expect(entries[0].error).toContain('at least one trigger');
+  });
+
   it('rejects an empty body', async () => {
     await write('empty.md', `---\nname: empty\ntriggers: [x]\n---\n`);
     const { skills, entries } = await load();
     expect(skills).toEqual([]);
     expect(entries[0].error).toContain('no body');
+  });
+
+  /**
+   * A skill body is injected verbatim into the system prompt of every matching turn, and the chat
+   * route rejects an oversized prompt with a 400. Capping at load time trades one unusable playbook
+   * for a working server, and says which file on `GET /v1/tools`.
+   */
+  it('rejects an oversized body', async () => {
+    await write('huge.md', `---\nname: huge\ntriggers: [x]\n---\n${'a'.repeat(16_001)}`);
+    const { skills, entries } = await load();
+
+    expect(skills).toEqual([]);
+    expect(entries[0].error).toContain('over the 16000 limit');
   });
 
   it('rejects an invalid name', async () => {

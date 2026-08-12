@@ -227,6 +227,10 @@ export async function getAgentTools(scope?: string): Promise<Record<string, Tool
   const cached = registries.get(cacheKey);
   if (cached && !dirty) return cached;
 
+  // Cleared before the await below, not after: the watcher can fire while `loadToolPlugins` reads
+  // the directory, and clearing afterwards would discard that signal and serve the pre-change
+  // plugins until something else marked the registry dirty again.
+  dirty = false;
   const builtin = buildBuiltinTools(scope) as unknown as Record<string, Tool>;
   builtinNames = Object.keys(builtin);
 
@@ -245,7 +249,6 @@ export async function getAgentTools(scope?: string): Promise<Record<string, Tool
     allNames: Object.keys(registry),
     pluginTriggers: triggers,
   });
-  dirty = false;
 
   const ok = entries.filter((e) => !e.error);
   if (ok.length > 0 || entries.length > 0) {

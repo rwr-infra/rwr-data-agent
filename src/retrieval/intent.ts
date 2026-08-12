@@ -54,9 +54,14 @@ const SCRIPT_PATTERNS = /angelscript|\.as\b|脚本|游戏模式|game mode|script
  * Detected as "an enumerating interrogative, then a reference verb". The **order** is what keeps a
  * forward lookup out: in "G36 使用什么弹药" the interrogative sits *after* the verb, so nothing
  * matches and the question stays a plain `specific`.
+ *
+ * Both aspects of every verb, in both languages. `used` is spelled out because `uses?` does not
+ * reach it, and the completed aspect is the natural way to ask this in English — "which files used
+ * base_weapon" is the same question as "which files use base_weapon". Chinese already covers it
+ * through `用了`.
  */
 const REVERSE_SUBJECT = /有哪些|哪些|什么|谁|which|who|what/i;
-const REVERSE_VERB = /引用|用到|使用|用了|reference[sd]?|uses?|using/i;
+const REVERSE_VERB = /引用|用到|使用|用了|reference[sd]?|use[sd]?|using/i;
 
 export function isReverseLookup(query: string): boolean {
   const subject = query.search(REVERSE_SUBJECT);

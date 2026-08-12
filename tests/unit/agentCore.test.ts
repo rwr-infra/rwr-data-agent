@@ -9,12 +9,17 @@ import { PROTOCOL_VERSION, createMemorySessionStore, encodeEvent } from '@rwr/ag
 
 describe('session store', () => {
   const HOUR = 60 * 60_000;
-  const at = (updatedAt: number) => ({ updatedAt, note: `t${updatedAt}` });
+  /**
+   * Ages are relative to the wall clock, not absolute like `at(1000)`, because the read path
+   * compares against `Date.now()` — a literal timestamp would be hours stale the moment it is
+   * written and every entry would read as expired.
+   */
+  const aged = (agoMs: number) => ({ updatedAt: Date.now() - agoMs, note: `age${agoMs}` });
 
   it('round-trips and deletes', () => {
     const store = createMemorySessionStore<{ updatedAt: number; note: string }>(HOUR);
-    store.set('a', at(1000));
-    expect(store.get('a')?.note).toBe('t1000');
+    store.set('a', aged(0));
+    expect(store.get('a')?.note).toBe('age0');
     expect(store.size()).toBe(1);
 
     store.delete('a');
@@ -25,32 +30,55 @@ describe('session store', () => {
   /**
    * The eviction is the reason this exists. Session ids come from the client, one per conversation,
    * and nothing ever tells the server a conversation was abandoned — a plain Map grows forever.
+   *
+   * Asserted through `size()`, not `get()`: `get` expires stale entries itself, so it would pass
+   * whether or not the write ever swept. Only the count can tell the two apart.
    */
-  it('evicts past the TTL, measured from each entry own timestamp', () => {
+  it('sweeps entries past the TTL on write', () => {
     const store = createMemorySessionStore<{ updatedAt: number; note: string }>(HOUR);
-    const now = 10 * HOUR;
 
-    store.set('stale', at(now - 3 * HOUR));
-    store.set('recent', at(now - 0.5 * HOUR));
-    // The sweep runs on write, keyed off the incoming entry's timestamp.
-    store.set('fresh', at(now));
+    store.set('stale', aged(3 * HOUR));
+    expect(store.size()).toBe(1);
 
-    expect(store.get('stale')).toBeUndefined();
+    // Keyed off the *incoming* entry's timestamp, so this write is already 2.5h past `stale` and
+    // sweeps it — the count stays at one rather than growing to two.
+    store.set('recent', aged(0.5 * HOUR));
+    expect(store.size()).toBe(1);
+
+    // Half an hour apart, inside the TTL: this one adds instead of replacing.
+    store.set('fresh', aged(0));
+    expect(store.size()).toBe(2);
     expect(store.get('recent')).toBeDefined();
     expect(store.get('fresh')).toBeDefined();
   });
 
-  it('does not evict on read', () => {
+  /**
+   * The write sweep bounds memory but not retention: nothing was written here after the entry aged
+   * out, and on an idle process nothing would be. A store whose TTL only applied to what it *keeps*
+   * would still hand this back.
+   */
+  it('expires a stale entry on read', () => {
     const store = createMemorySessionStore<{ updatedAt: number; note: string }>(HOUR);
-    store.set('old', at(0));
-    expect(store.get('old')).toBeDefined();
-    expect(store.get('old')).toBeDefined();
+    store.set('old', aged(2 * HOUR));
+    expect(store.size()).toBe(1);
+
+    expect(store.get('old')).toBeUndefined();
+    // Reported as a miss *and* dropped — a read that only hid it would leak on a busy process.
+    expect(store.size()).toBe(0);
+  });
+
+  it('keeps an entry inside the TTL across repeated reads', () => {
+    const store = createMemorySessionStore<{ updatedAt: number; note: string }>(HOUR);
+    store.set('warm', aged(0.5 * HOUR));
+    expect(store.get('warm')).toBeDefined();
+    expect(store.get('warm')).toBeDefined();
+    expect(store.size()).toBe(1);
   });
 
   it('keeps stores independent', () => {
     const a = createMemorySessionStore<{ updatedAt: number; note: string }>(HOUR);
     const b = createMemorySessionStore<{ updatedAt: number; note: string }>(HOUR);
-    a.set('k', at(1));
+    a.set('k', aged(0));
     expect(b.get('k')).toBeUndefined();
   });
 });
