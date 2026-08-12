@@ -22,7 +22,9 @@ export interface LanguageData {
 
 /** Narrow an XML node to an indexable object, or undefined if it is a leaf. */
 function asNode(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined;
+  return typeof value === 'object' && value !== null
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 /** fast-xml-parser types `parse()` as `any`; narrow it once at the boundary. */
@@ -105,7 +107,10 @@ async function loadTranslationFile(filePath: string, translations: TranslationMa
   extractTextsFromParsed(parsed, translations);
 }
 
-export async function loadLanguageData(languagesDir: string, language: string): Promise<LanguageData> {
+export async function loadLanguageData(
+  languagesDir: string,
+  language: string,
+): Promise<LanguageData> {
   const langDir = path.join(languagesDir, language);
   const translations: TranslationMap = {};
 
@@ -174,9 +179,12 @@ export function resolveI18n(
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
-function extractNameKeys(
-  doc: { type: string; key: string; data: unknown; flat_attributes: Record<string, unknown> },
-): string[] {
+function extractNameKeys(doc: {
+  type: string;
+  key: string;
+  data: unknown;
+  flat_attributes: Record<string, unknown>;
+}): string[] {
   const keys: string[] = [];
   const attrs = doc.flat_attributes;
 
@@ -204,7 +212,13 @@ function extractNameKeys(
 }
 
 export function getLocalizedName(
-  doc: { type: string; key: string; data: unknown; flat_attributes: Record<string, unknown>; i18n?: Record<string, Record<string, string>> },
+  doc: {
+    type: string;
+    key: string;
+    data: unknown;
+    flat_attributes: Record<string, unknown>;
+    i18n?: Record<string, Record<string, string>>;
+  },
   language: string,
 ): string | undefined {
   if (!doc.i18n?.[language]) return undefined;

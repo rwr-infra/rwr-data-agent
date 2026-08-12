@@ -28,7 +28,9 @@ export function clearParseCaches(): void {
 
 /** Narrow an XML node to an indexable object, or undefined if it is a leaf. */
 function asNode(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined;
+  return typeof value === 'object' && value !== null
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 /**
@@ -61,14 +63,21 @@ function toText(value: unknown): string {
 // ---------------------------------------------------------------------------
 
 const REPLACE_KEYS = new Set([
-  'specification', 'stance', 'modifier', 'target_factors',
-  'capacity', 'commonness', 'inventory', 'hud_icon', 'model',
-  'shield', 'weak_hand_hold', 'next_in_chain',
+  'specification',
+  'stance',
+  'modifier',
+  'target_factors',
+  'capacity',
+  'commonness',
+  'inventory',
+  'hud_icon',
+  'model',
+  'shield',
+  'weak_hand_hold',
+  'next_in_chain',
 ]);
 
-const APPEND_KEYS = new Set([
-  'tag', 'animation', 'sound', 'effect',
-]);
+const APPEND_KEYS = new Set(['tag', 'animation', 'sound', 'effect']);
 
 const MAX_INHERITANCE_DEPTH = 10;
 
@@ -87,7 +96,10 @@ async function expandCallIncludes(
     const attrs = (c ?? {}) as Record<string, unknown>;
     const refFile = attrs['@_file'] as string | undefined;
 
-    if (refFile && Object.keys(attrs).filter((k) => !k.startsWith('@_') && k !== '#text').length === 0) {
+    if (
+      refFile &&
+      Object.keys(attrs).filter((k) => !k.startsWith('@_') && k !== '#text').length === 0
+    ) {
       const refPath = path.resolve(sourceDir, refFile);
       if (visited.has(refPath)) continue;
       visited.add(refPath);
@@ -107,7 +119,12 @@ async function expandCallIncludes(
         }
       }
 
-      const subExpanded = await expandCallIncludes(includedCalls, path.dirname(refPath), depth + 1, visited);
+      const subExpanded = await expandCallIncludes(
+        includedCalls,
+        path.dirname(refPath),
+        depth + 1,
+        visited,
+      );
       expanded.push(...subExpanded);
     } else {
       expanded.push(c);
@@ -223,7 +240,10 @@ function extractText(obj: unknown, depth = 0): string {
     return String(obj);
   }
   if (Array.isArray(obj)) {
-    return obj.map((item) => extractText(item, depth)).filter(Boolean).join('\n');
+    return obj
+      .map((item) => extractText(item, depth))
+      .filter(Boolean)
+      .join('\n');
   }
   if (typeof obj === 'object') {
     const entries = Object.entries(obj as Record<string, unknown>);
@@ -299,7 +319,10 @@ function flattenAttributes(obj: unknown, prefix = ''): Record<string, unknown> {
   return result;
 }
 
-function getFlatValue(attrs: Record<string, unknown>, ...keys: string[]): string | number | undefined {
+function getFlatValue(
+  attrs: Record<string, unknown>,
+  ...keys: string[]
+): string | number | undefined {
   for (const k of keys) {
     if (k in attrs) {
       const v = attrs[k];
@@ -313,7 +336,10 @@ function getFlatValue(attrs: Record<string, unknown>, ...keys: string[]): string
 // Description builders
 // ---------------------------------------------------------------------------
 
-function describeWeapon(attrs: Record<string, unknown>, resolved?: Record<string, unknown>): string {
+function describeWeapon(
+  attrs: Record<string, unknown>,
+  resolved?: Record<string, unknown>,
+): string {
   const parts: string[] = [];
 
   const weaponClass = getFlatValue(attrs, 'class', 'weapon_class', 'specification.class');
@@ -323,7 +349,8 @@ function describeWeapon(attrs: Record<string, unknown>, resolved?: Record<string
   if (damage !== undefined) parts.push(`It deals ${damage} base damage per shot.`);
 
   const magazineSize = getFlatValue(attrs, 'magazine_size', 'specification.magazine_size');
-  if (magazineSize !== undefined) parts.push(`It has a magazine capacity of ${magazineSize} rounds.`);
+  if (magazineSize !== undefined)
+    parts.push(`It has a magazine capacity of ${magazineSize} rounds.`);
 
   const rpm = getFlatValue(attrs, 'rpm', 'specification.rpm');
   if (rpm !== undefined) parts.push(`Its rate of fire is ${rpm} rounds per minute.`);
@@ -348,20 +375,33 @@ function describeWeapon(attrs: Record<string, unknown>, resolved?: Record<string
 
   const carryInBack = getFlatValue(attrs, 'carry_in_back', 'specification.carry_in_back');
   if (carryInBack !== undefined) {
-    parts.push(carryInBack === '1' || carryInBack === 1 ? 'It can be carried on the back.' : 'It cannot be carried on the back.');
+    parts.push(
+      carryInBack === '1' || carryInBack === 1
+        ? 'It can be carried on the back.'
+        : 'It cannot be carried on the back.',
+    );
   }
 
   const nextInChain = resolved?.['next_in_chain'] ?? attrs['next_in_chain'];
   if (nextInChain !== undefined) {
     const chainArr = ensureArray(nextInChain as unknown);
     const chainKeys = chainArr
-      .map((c: unknown) => ((c as Record<string, unknown>)?.['@_key'] ?? (c as Record<string, unknown>)?.['key']))
+      .map(
+        (c: unknown) =>
+          (c as Record<string, unknown>)?.['@_key'] ?? (c as Record<string, unknown>)?.['key'],
+      )
       .filter(Boolean) as string[];
     const shareAmmoArr = chainArr
-      .map((c: unknown) => ((c as Record<string, unknown>)?.['@_share_ammo'] ?? (c as Record<string, unknown>)?.['share_ammo']))
+      .map(
+        (c: unknown) =>
+          (c as Record<string, unknown>)?.['@_share_ammo'] ??
+          (c as Record<string, unknown>)?.['share_ammo'],
+      )
       .filter(Boolean) as string[];
     if (chainKeys.length > 0) {
-      parts.push(`It can switch to the following weapon mode(s): ${chainKeys.join(', ')}. This represents an alternative fire mode such as an underbarrel grenade launcher or a skill variant.`);
+      parts.push(
+        `It can switch to the following weapon mode(s): ${chainKeys.join(', ')}. This represents an alternative fire mode such as an underbarrel grenade launcher or a skill variant.`,
+      );
     }
     if (shareAmmoArr.length > 0) {
       const anyShare = shareAmmoArr.some((v) => String(v) === '1');
@@ -381,13 +421,15 @@ function describeProjectile(attrs: Record<string, unknown>): string {
   if (damage !== undefined) parts.push(`This projectile deals ${damage} damage on impact.`);
 
   const timeToLive = getFlatValue(attrs, 'time_to_live', 'specification.time_to_live');
-  if (timeToLive !== undefined) parts.push(`It travels for up to ${timeToLive} seconds before expiring.`);
+  if (timeToLive !== undefined)
+    parts.push(`It travels for up to ${timeToLive} seconds before expiring.`);
 
   const speed = getFlatValue(attrs, 'speed', 'specification.speed');
   if (speed !== undefined) parts.push(`Its base speed is ${speed} m/s.`);
 
   const dragConstant = getFlatValue(attrs, 'drag_constant', 'specification.drag_constant');
-  if (dragConstant !== undefined) parts.push(`It has a drag constant of ${dragConstant}, affecting its trajectory.`);
+  if (dragConstant !== undefined)
+    parts.push(`It has a drag constant of ${dragConstant}, affecting its trajectory.`);
 
   const blastDamage = getFlatValue(attrs, 'blast_damage', 'specification.blast_damage');
   if (blastDamage !== undefined) parts.push(`Its explosion deals ${blastDamage} blast damage.`);
@@ -403,7 +445,11 @@ function describeProjectile(attrs: Record<string, unknown>): string {
 
   const canShootDown = getFlatValue(attrs, 'can_shoot_down', 'specification.can_shoot_down');
   if (canShootDown !== undefined) {
-    parts.push(canShootDown === '1' || canShootDown === 1 ? 'It can be shot down by enemy fire.' : 'It cannot be shot down.');
+    parts.push(
+      canShootDown === '1' || canShootDown === 1
+        ? 'It can be shot down by enemy fire.'
+        : 'It cannot be shot down.',
+    );
   }
 
   return parts.length > 0 ? parts.join(' ') : '';
@@ -446,7 +492,8 @@ function describeSoldier(attrs: Record<string, unknown>): string {
   if (spawnScore !== undefined) parts.push(`This soldier has a spawn score of ${spawnScore}.`);
 
   const squadSizeCap = getFlatValue(attrs, 'squad_size_xp_cap');
-  if (squadSizeCap !== undefined) parts.push(`The squad size XP cap for this soldier is ${squadSizeCap}.`);
+  if (squadSizeCap !== undefined)
+    parts.push(`The squad size XP cap for this soldier is ${squadSizeCap}.`);
 
   const copyFrom = getFlatValue(attrs, 'copy_from');
   if (copyFrom !== undefined) parts.push(`It is based on the soldier template "${copyFrom}".`);
@@ -464,7 +511,8 @@ function describeCall(attrs: Record<string, unknown>): string {
   if (name !== undefined) parts.push(`This call is named "${name}".`);
 
   const initiationComment = getFlatValue(attrs, 'initiation_comment1');
-  if (initiationComment !== undefined) parts.push(`When initiated, the operator says: "${initiationComment}".`);
+  if (initiationComment !== undefined)
+    parts.push(`When initiated, the operator says: "${initiationComment}".`);
 
   const type = getFlatValue(attrs, 'type');
   if (type !== undefined) parts.push(`Its call type is ${type}.`);
@@ -515,9 +563,11 @@ function extractDeathProtection(resolved?: Record<string, unknown>): DeathProtec
       const output = m['@_output_character_state'] ?? '';
       if (input === 'death' && output) {
         const sourceLabel =
-          cls === 'projectile_blast_result' ? 'explosion' :
-          cls === 'projectile_hit_result' ? 'bullet' :
-          'melee';
+          cls === 'projectile_blast_result'
+            ? 'explosion'
+            : cls === 'projectile_hit_result'
+              ? 'bullet'
+              : 'melee';
         results.push({
           source: sourceLabel,
           output: toText(output),
@@ -529,7 +579,10 @@ function extractDeathProtection(resolved?: Record<string, unknown>): DeathProtec
   return results;
 }
 
-function describeCarryItem(attrs: Record<string, unknown>, resolved?: Record<string, unknown>): string {
+function describeCarryItem(
+  attrs: Record<string, unknown>,
+  resolved?: Record<string, unknown>,
+): string {
   const parts: string[] = [];
 
   const name = getFlatValue(attrs, 'name');
@@ -556,12 +609,24 @@ function describeCarryItem(attrs: Record<string, unknown>, resolved?: Record<str
 
   const inStock = getFlatValue(attrs, 'commonness.in_stock', 'commonness.@_in_stock');
   if (inStock !== undefined) {
-    parts.push(inStock === '1' || inStock === 1 ? 'It is available in stock.' : 'It is not available in stock.');
+    parts.push(
+      inStock === '1' || inStock === 1
+        ? 'It is available in stock.'
+        : 'It is not available in stock.',
+    );
   }
 
-  const canRespawn = getFlatValue(attrs, 'commonness.can_respawn_with', 'commonness.@_can_respawn_with');
+  const canRespawn = getFlatValue(
+    attrs,
+    'commonness.can_respawn_with',
+    'commonness.@_can_respawn_with',
+  );
   if (canRespawn !== undefined) {
-    parts.push(canRespawn === '1' || canRespawn === 1 ? 'Players can respawn with it.' : 'Players cannot respawn with it.');
+    parts.push(
+      canRespawn === '1' || canRespawn === 1
+        ? 'Players can respawn with it.'
+        : 'Players cannot respawn with it.',
+    );
   }
 
   const transformOnConsume = getFlatValue(attrs, 'transform_on_consume');
@@ -570,9 +635,18 @@ function describeCarryItem(attrs: Record<string, unknown>, resolved?: Record<str
     if (deathProtections.length > 0) {
       const hasActive = deathProtections.some((p) => p.output !== 'death');
       if (hasActive) {
-        parts.push(`It provides armor protection. When taking a hit that would kill, the damage is mitigated instead (${deathProtections.filter((p) => p.output !== 'death').map((p) => `${p.source}: death→${p.output}`).join('; ')}). On each hit the armor degrades to the next state: "${transformOnConsume}". This chain represents the armor's remaining durability layers.`);
+        parts.push(
+          `It provides armor protection. When taking a hit that would kill, the damage is mitigated instead (${deathProtections
+            .filter((p) => p.output !== 'death')
+            .map((p) => `${p.source}: death→${p.output}`)
+            .join(
+              '; ',
+            )}). On each hit the armor degrades to the next state: "${transformOnConsume}". This chain represents the armor's remaining durability layers.`,
+        );
       } else {
-        parts.push(`When taking sufficient damage, it transforms into state "${transformOnConsume}" (final layer — death protection has expired).`);
+        parts.push(
+          `When taking sufficient damage, it transforms into state "${transformOnConsume}" (final layer — death protection has expired).`,
+        );
       }
     } else {
       parts.push(`When consumed or used, it transforms into "${transformOnConsume}".`);
@@ -582,7 +656,9 @@ function describeCarryItem(attrs: Record<string, unknown>, resolved?: Record<str
     if (deathProtections.length > 0) {
       const active = deathProtections.filter((p) => p.output !== 'death');
       if (active.length > 0) {
-        parts.push(`It provides protection: ${active.map((p) => `${p.source}: death→${p.output}`).join('; ')}.`);
+        parts.push(
+          `It provides protection: ${active.map((p) => `${p.source}: death→${p.output}`).join('; ')}.`,
+        );
       }
     }
   }
@@ -608,7 +684,8 @@ function describeCarryItem(attrs: Record<string, unknown>, resolved?: Record<str
     } else {
       const num = parseFloat(v);
       if (num > 0) parts.push(`It increases hit probability by ${v}.`);
-      else if (num < 0) parts.push(`It decreases hit probability by ${v} (negative = harder to hit).`);
+      else if (num < 0)
+        parts.push(`It decreases hit probability by ${v} (negative = harder to hit).`);
       else parts.push('It does not change hit probability.');
     }
   }
@@ -767,10 +844,21 @@ async function parseCallTree(
     const key = extractKey(attrs, `call_${i}`);
     const description = describeCall(flatAttrs);
     const raw = extractText(c, 0);
-    return makeStructuredDoc('call', key, 'Call', description, raw, filePath, modName, c, flatAttrs, {
-      name: attrs['@_name'],
-      initiation_comment1: attrs['@_initiation_comment1'],
-    });
+    return makeStructuredDoc(
+      'call',
+      key,
+      'Call',
+      description,
+      raw,
+      filePath,
+      modName,
+      c,
+      flatAttrs,
+      {
+        name: attrs['@_name'],
+        initiation_comment1: attrs['@_initiation_comment1'],
+      },
+    );
   });
 }
 
@@ -795,19 +883,44 @@ function parseFactionTree(
       const soldierName = extractKey(sAttrs, 'unknown_soldier');
       const description = describeSoldier(flatAttrs);
       const raw = extractText(s, 0);
-      docs.push(makeStructuredDoc('soldier', soldierName, 'Soldier', description, raw, filePath, modName, s, flatAttrs, {
-        faction: factionName,
-        spawn_score: sAttrs['@_spawn_score'],
-        copy_from: sAttrs['@_copy_from'],
-        squad_size_xp_cap: sAttrs['@_squad_size_xp_cap'],
-      }));
+      docs.push(
+        makeStructuredDoc(
+          'soldier',
+          soldierName,
+          'Soldier',
+          description,
+          raw,
+          filePath,
+          modName,
+          s,
+          flatAttrs,
+          {
+            faction: factionName,
+            spawn_score: sAttrs['@_spawn_score'],
+            copy_from: sAttrs['@_copy_from'],
+            squad_size_xp_cap: sAttrs['@_squad_size_xp_cap'],
+          },
+        ),
+      );
     }
 
     if (soldiers.length === 0) {
       const flatAttrs = flattenAttributes(factionAttrs);
       const description = describeSoldier(flatAttrs);
       const raw = extractText(factionAttrs, 0);
-      docs.push(makeStructuredDoc('faction', factionName, 'Faction', description, raw, filePath, modName, factionAttrs, flatAttrs));
+      docs.push(
+        makeStructuredDoc(
+          'faction',
+          factionName,
+          'Faction',
+          description,
+          raw,
+          filePath,
+          modName,
+          factionAttrs,
+          flatAttrs,
+        ),
+      );
     }
   }
 
@@ -818,7 +931,19 @@ function parseFactionTree(
       const fAttrs = asNode(f) ?? {};
       const rawFile = fAttrs['@_file'];
       const factionFile = typeof rawFile === 'string' ? rawFile : 'unknown';
-      docs.push(makeStructuredDoc('faction', factionFile, 'Faction reference', '', `file: ${factionFile}`, filePath, modName, f, flattenAttributes(f)));
+      docs.push(
+        makeStructuredDoc(
+          'faction',
+          factionFile,
+          'Faction reference',
+          '',
+          `file: ${factionFile}`,
+          filePath,
+          modName,
+          f,
+          flattenAttributes(f),
+        ),
+      );
     }
   }
 
@@ -837,7 +962,19 @@ function parseCharacterTree(
   const description = describeCharacter(flatAttrs);
   const raw = extractText(parsed, 0);
   const key = path.basename(filePath, '.character');
-  return [makeStructuredDoc('character', key, 'Character', description, raw, filePath, modName, parsed, flatAttrs)];
+  return [
+    makeStructuredDoc(
+      'character',
+      key,
+      'Character',
+      description,
+      raw,
+      filePath,
+      modName,
+      parsed,
+      flatAttrs,
+    ),
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -859,10 +996,23 @@ async function parseCarryItemTree(
     const key = extractKey(ci, `carry_item_${i}`);
     const description = describeCarryItem(flatAttrs, resolved);
     const raw = extractText(resolved, 0);
-    docs.push(makeStructuredDoc('carry_item', key, 'Carry Item', description, raw, filePath, modName, resolved, flatAttrs, {
-      name: ci['@_name'] ?? resolved['@_name'],
-      slot: ci['@_slot'] ?? resolved['@_slot'],
-    }));
+    docs.push(
+      makeStructuredDoc(
+        'carry_item',
+        key,
+        'Carry Item',
+        description,
+        raw,
+        filePath,
+        modName,
+        resolved,
+        flatAttrs,
+        {
+          name: ci['@_name'] ?? resolved['@_name'],
+          slot: ci['@_slot'] ?? resolved['@_slot'],
+        },
+      ),
+    );
   }
   return docs;
 }
@@ -910,7 +1060,17 @@ export async function parseXmlTree(
       const key = extractKey(attrs, `soldier_${i}`);
       const description = describeSoldier(flatAttrs);
       const raw = extractText(s, 0);
-      return makeStructuredDoc('soldier', key, 'Soldier', description, raw, filePath, modName, s, flatAttrs);
+      return makeStructuredDoc(
+        'soldier',
+        key,
+        'Soldier',
+        description,
+        raw,
+        filePath,
+        modName,
+        s,
+        flatAttrs,
+      );
     });
   }
 
@@ -926,9 +1086,26 @@ export async function parseXmlTree(
       const key = extractKey(w, `weapon_${i}`);
       const description = describeWeapon(flatAttrs, resolved);
       const raw = extractText(resolved, 0);
-      docs.push(makeStructuredDoc('weapon', key, 'Weapon', description, raw, filePath, modName, resolved, flatAttrs, {
-        weapon_class: w['@_weapon_class'] ?? w['@_class'] ?? resolved['@_weapon_class'] ?? resolved['@_class'],
-      }));
+      docs.push(
+        makeStructuredDoc(
+          'weapon',
+          key,
+          'Weapon',
+          description,
+          raw,
+          filePath,
+          modName,
+          resolved,
+          flatAttrs,
+          {
+            weapon_class:
+              w['@_weapon_class'] ??
+              w['@_class'] ??
+              resolved['@_weapon_class'] ??
+              resolved['@_class'],
+          },
+        ),
+      );
     }
     return docs;
   }
@@ -945,10 +1122,23 @@ export async function parseXmlTree(
     const key = extractKey(ci, path.basename(filePath, ext));
     const description = describeCarryItem(flatAttrs, resolved);
     const raw = extractText(resolved, 0);
-    return [makeStructuredDoc('carry_item', key, 'Carry Item', description, raw, filePath, modName, resolved, flatAttrs, {
-      name: ci['@_name'] ?? resolved['@_name'],
-      slot: ci['@_slot'] ?? resolved['@_slot'],
-    })];
+    return [
+      makeStructuredDoc(
+        'carry_item',
+        key,
+        'Carry Item',
+        description,
+        raw,
+        filePath,
+        modName,
+        resolved,
+        flatAttrs,
+        {
+          name: ci['@_name'] ?? resolved['@_name'],
+          slot: ci['@_slot'] ?? resolved['@_slot'],
+        },
+      ),
+    ];
   }
 
   const vehicleNodes = asNode(parsed['vehicles'])?.['vehicle'] ?? parsed['vehicle'];
@@ -960,7 +1150,17 @@ export async function parseXmlTree(
       const key = extractKey(attrs, `vehicle_${i}`);
       const description = describeVehicle(flatAttrs);
       const raw = extractText(v, 0);
-      return makeStructuredDoc('vehicle', key, 'Vehicle', description, raw, filePath, modName, v, flatAttrs);
+      return makeStructuredDoc(
+        'vehicle',
+        key,
+        'Vehicle',
+        description,
+        raw,
+        filePath,
+        modName,
+        v,
+        flatAttrs,
+      );
     });
   }
 
@@ -973,7 +1173,17 @@ export async function parseXmlTree(
       const key = extractKey(attrs, `projectile_${i}`);
       const description = describeProjectile(flatAttrs);
       const raw = extractText(p, 0);
-      return makeStructuredDoc('projectile', key, 'Projectile', description, raw, filePath, modName, p, flatAttrs);
+      return makeStructuredDoc(
+        'projectile',
+        key,
+        'Projectile',
+        description,
+        raw,
+        filePath,
+        modName,
+        p,
+        flatAttrs,
+      );
     });
   }
 
@@ -981,5 +1191,17 @@ export async function parseXmlTree(
   const description = `This is an XML configuration file.`;
   const raw = extractText(parsed, 0);
   const key = path.basename(filePath, ext);
-  return [makeStructuredDoc('script_chunk', key, 'XML Document', description, raw, filePath, modName, parsed, flatAttrs)];
+  return [
+    makeStructuredDoc(
+      'script_chunk',
+      key,
+      'XML Document',
+      description,
+      raw,
+      filePath,
+      modName,
+      parsed,
+      flatAttrs,
+    ),
+  ];
 }

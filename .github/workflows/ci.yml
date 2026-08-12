@@ -44,12 +44,21 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # Also runs svelte-check over web/ — vite build compiles .svelte without
+      # typechecking it, so the UI's type errors surface here or nowhere.
       - name: Typecheck
         run: npm run typecheck
 
-      # `npm run format:check` is not a gate: 28 tracked files currently fail it,
-      # and AGENTS.md lists only lint + typecheck as required. Add a step here
-      # once `npm run format` has been run across the tree.
+      # Now a gate: the tree was formatted in full, so any new failure is a diff
+      # that skipped `npm run format`, not inherited debt.
+      - name: Format check
+        run: npm run format:check
+
+      # Pure-function unit tests (vitest). No network, no LLM quota, no game data —
+      # the deterministic half of the regression net. The other half, `eval:agent`,
+      # stays local-only for the reasons below.
+      - name: Test
+        run: npm test
 
       # tsc emit + vite build. Catches what `--noEmit` cannot: emit-only errors
       # and the entire Svelte/Tailwind half of the build.

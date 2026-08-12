@@ -1,0 +1,14 @@
+{
+  // The root tsconfig builds `src/` into `dist/` and so pins `rootDir: ./src`. Test files live
+  // outside it, which would be an error there — and ESLint's `projectService` refuses to lint a
+  // TS file that belongs to no project. This is that project: same strictness, emits nothing.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["**/*.ts"]
+}

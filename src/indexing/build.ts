@@ -160,12 +160,16 @@ export async function buildIndexes(options: BuildIndexesOptions): Promise<BuildI
     if (verbose) {
       console.log(`[index] graph.json          -> ${resolvedGraphPath}`);
       console.log(`[index] script-symbols.json -> ${symbolsPath}`);
-      console.log(`[index] search-index        -> ${path.resolve(searchIndexPath)} (+ .ndjson body)`);
+      console.log(
+        `[index] search-index        -> ${path.resolve(searchIndexPath)} (+ .ndjson body)`,
+      );
       console.log(
         `[index] ${written} documents | ${graph.stats.nodes} nodes | ${graph.stats.edges} edges | ${graph.stats.files} files | ${symbols.length} script symbols`,
       );
       for (const p of summaries) {
-        console.log(`  ${p.name.padEnd(20)} ${String(p.count).padStart(7)} docs   ${p.displayName}`);
+        console.log(
+          `  ${p.name.padEnd(20)} ${String(p.count).padStart(7)} docs   ${p.displayName}`,
+        );
       }
     }
 

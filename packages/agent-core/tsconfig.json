@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "baseUrl": ".",
+    // The root config's `~/*` alias points at the app's src/. Inheriting it here would let a
+    // careless import reach straight back into the domain, which is the one thing this package
+    // exists to prevent.
+    "paths": {},
+    // Spelled out because `baseUrl` here shifts where the default typeRoots walk starts; without
+    // it every node builtin resolves to nothing and the errors blame a missing @types/node.
+    "types": ["node"]
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

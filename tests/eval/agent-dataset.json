@@ -115,5 +115,28 @@
     ],
     "notes": "The skill trait name, the 16s cooldown and the blast damage each live in a different file; only lookupWeaponSkill joins them, so a searchDocs-only answer should fail",
     "maxSteps": 8
+  },
+  {
+    "id": "agent-steer-narrow",
+    "query": "gkw_g36.weapon 的继承链是什么？逐层说明。",
+    "category": "steering",
+    "expectedTools": [],
+    "expectedKeys": [],
+    "notes": "Mid-stream steering. The question is deliberately one that converges on its own (a bounded inheritance walk) — the case is testing the side channel, not the model’s stamina on a 150-result enumeration, and an unbounded query made it fail for reasons that had nothing to do with steering. Asserts the side channel accepted it AND that the loop carried it (steer-applied), not just that the HTTP call returned 200.",
+    "steer": {
+      "afterToolSteps": 1,
+      "message": "只要最顶层的那个父类名字，其余全部省略。"
+    },
+    "maxSteps": 10
+  },
+  {
+    "id": "agent-stop-midstream",
+    "query": "gkw_g36.weapon 的继承链是什么？逐层说明。",
+    "category": "steering",
+    "expectedTools": [],
+    "expectedKeys": [],
+    "notes": "Mid-stream hard stop. The turn must close itself with stopReason=stopped rather than an error frame, and whatever was generated stays.",
+    "stopAfterToolSteps": 1,
+    "expectStopReason": "stopped"
   }
 ]

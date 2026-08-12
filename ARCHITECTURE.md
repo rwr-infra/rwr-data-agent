@@ -22,7 +22,7 @@ flowchart TD
 
     INTENT --> SUM["session summary<br/>x-session-id, in-process Map"]
     SUM --> REWRITE["buildSearchQuery<br/>history + summary + CN↔EN synonyms"]
-    REWRITE --> SEARCH["localSearch<br/>MiniSearch over key · name · i18n names · content<br/>topK 150 for enumeration, else 30"]
+    REWRITE --> SEARCH["localSearch<br/>MiniSearch over key · name · i18n names · content<br/>topK 5 exact key · 12 graph-answered / reverse lookup<br/>150 enumeration · else 30"]
     SEARCH --> PROMPT["buildUserPrompt<br/>context docs + question + instructions"]
 
     SKIP --> MODE
@@ -41,7 +41,7 @@ tool loop exists at all.
 ## 2. Tool loop
 
 `streamText` drives the loop: the model thinks, calls tools, observes structured results, and repeats
-until it produces a text answer or hits `stopWhen: stepCountIs(100)`. There is no free-text
+until it produces a text answer or hits `stopWhen: stepCountIs(MAX_TOOL_STEPS)` (default 100). There is no free-text
 `Thought:` / `Action:` protocol — the shape comes from the SDK's tool calling.
 
 Every step re-sends the whole prompt, which is why both the shaper and the accounting exist.
@@ -107,6 +107,7 @@ sequenceDiagram
     participant T as Tools
 
     C->>F: POST /v1/chat/completions
+    F-->>C: {"type":"turn-start","turnId":"…","protocolVersion":"1.1"}
     F->>F: search → buildUserPrompt
     F->>M: streamText(system, messages, tools)
 
@@ -121,6 +122,10 @@ sequenceDiagram
 
     Note over F,M: loop repeats until a text answer or the step limit
 
+    C->>F: POST /v1/chat/steer {turnId, "只保留 class=3"}
+    Note over F: sticky on the turn — re-sent on every later step.<br/>Route is public; the bundled UI only calls /stop.
+    F-->>C: {"type":"steer-applied","step":3,"message":"只保留 class=3"}
+
     M-->>F: text deltas
     F-->>C: {"type":"text-delta"}
     F-->>C: {"type":"finish","stopReason":"completed","usage":{…,"breakdown":{…}}}
@@ -128,11 +133,13 @@ sequenceDiagram
 
 | Line | Meaning |
 |---|---|
+| `turn-start` | first line: `turnId` (the steer/stop key) + `protocolVersion` |
 | `text-delta` | answer text |
 | `reasoning-delta` | model reasoning, rendered separately |
 | `json-delta` | partial object, structured mode only |
 | `tool-step` | opening (`summary`) then closing (`done`, `ok`, `durationMs`), paired by `toolCallId` |
-| `finish` | `stopReason` (`completed` / `step-limit` / `output-limit`) + usage and its per-slice breakdown |
+| `steer-applied` | a mid-stream instruction reached the loop — once per message, not per step |
+| `finish` | `stopReason` (`completed` / `step-limit` / `output-limit` / `stopped`) + usage and its per-slice breakdown |
 | `error` | the stream itself broke — **not** used for tool failures or stop reasons |
 
 `finish.usage` separates **spend** from **occupancy**: `promptTokens`/`completionTokens` sum every

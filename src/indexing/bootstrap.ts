@@ -71,7 +71,8 @@ interface StaleCheck {
 /** Why the on-disk index cannot be used as-is, or null if it is current. */
 async function staleReason(meta: IndexMeta | null): Promise<StaleCheck> {
   if (!meta) return { reason: 'index missing' };
-  if (meta.version !== INDEX_VERSION) return { reason: `index version ${meta.version} != ${INDEX_VERSION}` };
+  if (meta.version !== INDEX_VERSION)
+    return { reason: `index version ${meta.version} != ${INDEX_VERSION}` };
   if (meta.data_dir !== config.dataDir) return { reason: `index was built from ${meta.data_dir}` };
 
   try {
@@ -109,7 +110,12 @@ export async function ensureIndexes(): Promise<IndexStatus> {
   if (config.autoBuildIndex) {
     if (!(await dirExists(config.dataDir))) {
       if (!meta) {
-        status = { ready: false, rebuilt: false, building: false, reason: `data directory not found: ${config.dataDir}` };
+        status = {
+          ready: false,
+          rebuilt: false,
+          building: false,
+          reason: `data directory not found: ${config.dataDir}`,
+        };
         console.warn(`[index] ${status.reason} — set DATA_DIR to your RWR data folder.`);
         return status;
       }
@@ -117,7 +123,12 @@ export async function ensureIndexes(): Promise<IndexStatus> {
       check = await staleReason(meta);
     }
   } else if (!meta) {
-    status = { ready: false, rebuilt: false, building: false, reason: 'index missing and AUTO_BUILD_INDEX=false' };
+    status = {
+      ready: false,
+      rebuilt: false,
+      building: false,
+      reason: 'index missing and AUTO_BUILD_INDEX=false',
+    };
     console.warn('[index] No search index and auto-build is disabled. Run "npm run build:index".');
     return status;
   }
@@ -137,11 +148,17 @@ export async function ensureIndexes(): Promise<IndexStatus> {
       rebuilt = true;
       console.log(
         `[index] Built ${result.documents} documents from ${result.packages.length} package(s) in ${(
-          (Date.now() - start) / 1000
+          (Date.now() - start) /
+          1000
         ).toFixed(1)}s: ${result.packages.map((p) => p.name).join(', ')}`,
       );
     } catch (err) {
-      status = { ready: false, rebuilt: false, building: false, reason: `build failed: ${(err as Error).message}` };
+      status = {
+        ready: false,
+        rebuilt: false,
+        building: false,
+        reason: `build failed: ${(err as Error).message}`,
+      };
       console.warn(`[index] ${status.reason}`);
       return status;
     }

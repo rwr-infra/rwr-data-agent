@@ -119,7 +119,11 @@ function ambiguousEntry(key: string, packages: string[]) {
 function otherPackagesWithKey(graph: RwrGraph, key: string, exclude?: string): string[] {
   const lower = key.toLowerCase();
   return [
-    ...new Set(graph.nodes.filter((n) => n.key.toLowerCase() === lower && n.mod !== exclude).map((n) => n.mod)),
+    ...new Set(
+      graph.nodes
+        .filter((n) => n.key.toLowerCase() === lower && n.mod !== exclude)
+        .map((n) => n.mod),
+    ),
   ];
 }
 
@@ -129,8 +133,8 @@ function outOfScopeError(graph: RwrGraph, key: string, mod: string): Error {
   return new Error(
     elsewhere.length > 0
       ? `Node not found in package "${mod}": ${key} (it is defined in ${elsewhere.join(', ')} — ` +
-        `outside the package the user selected. Do not answer from there; tell the user it exists ` +
-        `in another package and ask whether to switch.)`
+          `outside the package the user selected. Do not answer from there; tell the user it exists ` +
+          `in another package and ask whether to switch.)`
       : `Node not found in package "${mod}": ${key}`,
   );
 }
@@ -272,14 +276,23 @@ export async function findReferences(key: string, mod?: string): Promise<Referen
   const nodeInfo = node ?? { key, type: 'unknown', file: '', mod: undefined as string | undefined };
 
   const globalReferencedBy = edgesTo(graph, key);
-  const scopedReferencedBy = mod ? globalReferencedBy.filter((e) => edgeInScope(e, mod)) : globalReferencedBy;
+  const scopedReferencedBy = mod
+    ? globalReferencedBy.filter((e) => edgeInScope(e, mod))
+    : globalReferencedBy;
   const allReferencedBy = scopedReferencedBy.map((e) => {
     const n = findNode(graph, e.from, e.mod ?? mod) ?? findNode(graph, e.from);
-    return { key: e.from, type: n?.type ?? 'unknown', file: n?.file ?? '', rel: e.rel, mod: n?.mod ?? e.mod };
+    return {
+      key: e.from,
+      type: n?.type ?? 'unknown',
+      file: n?.file ?? '',
+      rel: e.rel,
+      mod: n?.mod ?? e.mod,
+    };
   });
   const referencedBy = allReferencedBy.slice(0, 15);
   if (allReferencedBy.length > 15) {
-    (referencedBy as unknown as { _truncated?: string })._truncated = `${allReferencedBy.length - 15} more omitted`;
+    (referencedBy as unknown as { _truncated?: string })._truncated =
+      `${allReferencedBy.length - 15} more omitted`;
   }
 
   const allReferences = edgesFrom(graph, key, undefined, mod).map((e) => {
@@ -304,9 +317,13 @@ export async function findReferences(key: string, mod?: string): Promise<Referen
     references,
     ...(omitted > 0 ? { omittedFromOtherPackages: omitted } : {}),
     ...(missingInScope
-      ? { note: `"${key}" is not defined in package "${mod}". Counts above cover this package only.` }
+      ? {
+          note: `"${key}" is not defined in package "${mod}". Counts above cover this package only.`,
+        }
       : omitted > 0
-        ? { note: `${omitted} referring entities in other packages were excluded — the user selected "${mod}".` }
+        ? {
+            note: `${omitted} referring entities in other packages were excluded — the user selected "${mod}".`,
+          }
         : {}),
   };
 }
@@ -454,7 +471,9 @@ export async function listFiles(
     type,
     scope: mod,
     total: matched.length,
-    files: matched.slice(0, limit).map((n) => ({ file: n.file, type: n.type, key: n.key, name: n.name, mod: n.mod })),
+    files: matched
+      .slice(0, limit)
+      .map((n) => ({ file: n.file, type: n.type, key: n.key, name: n.name, mod: n.mod })),
     ...(omitted > 0
       ? {
           omittedFromOtherPackages: omitted,
@@ -482,7 +501,8 @@ export async function getScriptSymbols(file: string, mod?: string): Promise<Scri
   const fileBase = path.basename(file);
   // `s.mod` is absent on symbol files written before graph version 3 — those stay unfiltered.
   const matched = symbols.filter(
-    (s) => (s.file === fileBase || s.file === file) && (!mod || s.mod === undefined || s.mod === mod),
+    (s) =>
+      (s.file === fileBase || s.file === file) && (!mod || s.mod === undefined || s.mod === mod),
   );
 
   if (matched.length === 0) {
@@ -510,7 +530,10 @@ export interface NodeOutOfScope {
   note: string;
 }
 
-export async function getNode(key: string, mod?: string): Promise<GraphNode | NodeOutOfScope | null> {
+export async function getNode(
+  key: string,
+  mod?: string,
+): Promise<GraphNode | NodeOutOfScope | null> {
   const graph = await loadGraph();
   const node = findNode(graph, key, mod);
   if (node) return node;
@@ -589,7 +612,8 @@ export async function searchDocs(
       type: r.type,
       file: r.metadata.file_path ?? '',
       mod: r.metadata.mod_name,
-      snippet: r.content.length > SNIPPET_CHARS ? r.content.slice(0, SNIPPET_CHARS) + '…' : r.content,
+      snippet:
+        r.content.length > SNIPPET_CHARS ? r.content.slice(0, SNIPPET_CHARS) + '…' : r.content,
     })),
   };
 }

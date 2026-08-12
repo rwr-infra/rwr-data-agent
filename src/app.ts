@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import path from 'node:path';
 import { chatRoutes } from './api/routes/chat.js';
+import { steerRoutes } from './api/routes/steer.js';
 import { modelsRoutes } from './api/routes/models.js';
 import { healthRoutes } from './api/routes/health.js';
 import { packagesRoutes } from './api/routes/packages.js';
@@ -51,18 +52,22 @@ export async function buildApp() {
     if (!request.url.startsWith('/v1/chat')) return done();
     const index = getIndexStatus();
     if (index.ready) return done();
-    reply.status(503).header('retry-after', '30').send({
-      error: {
-        message: index.building
-          ? 'Index is still building — retry in a moment.'
-          : (index.reason ?? 'Index not ready'),
-        type: 'index_unavailable',
-      },
-    });
+    reply
+      .status(503)
+      .header('retry-after', '30')
+      .send({
+        error: {
+          message: index.building
+            ? 'Index is still building — retry in a moment.'
+            : (index.reason ?? 'Index not ready'),
+          type: 'index_unavailable',
+        },
+      });
     return;
   });
 
   await app.register(chatRoutes, { prefix: '/v1' });
+  await app.register(steerRoutes, { prefix: '/v1' });
   await app.register(modelsRoutes, { prefix: '/v1' });
   await app.register(packagesRoutes, { prefix: '/v1' });
   await app.register(toolsRoutes, { prefix: '/v1' });

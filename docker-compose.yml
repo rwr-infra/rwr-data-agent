@@ -12,6 +12,7 @@ services:
       DATA_DIR: /app/data
       OUTPUT_DIR: /app/output
       TOOLS_DIR: /app/tools.d
+      SKILLS_DIR: /app/skills.d
       # Cap the heap below the container limit. Left to itself V8 sizes the old space from the
       # *host's* RAM, so on a 2 GB box a full index build climbs until it is thrashing GC and
       # taking the whole machine with it. An explicit ceiling makes it collect instead.
@@ -31,3 +32,4 @@ services:
       - ./output:/app/output
       # Agent tool plugins. Read-only: they execute in-process with full privileges.
       - ./tools.d:/app/tools.d:ro
+      - ./skills.d:/app/skills.d:ro

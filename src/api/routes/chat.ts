@@ -13,14 +13,17 @@ import {
   classifyQuery,
   extractExactKey,
   isMetaQuery,
+  isReverseLookup,
   retrievalTopK,
 } from '../../retrieval/intent.js';
 import { EnumResultSchema, ComparisonResultSchema } from '../../types/schemas.js';
 import { getSummary, generateSummary, shouldGenerateSummary } from '../../memory/summarizer.js';
 import { getAgentTools as loadAgentTools, getToolDisclosureMeta } from '../../agent/toolDefs.js';
+import { getActiveSkills } from '../../agent/skills.js';
 import { createToolTranscriptShaper } from '../../agent/toolTranscript.js';
 import { selectActiveTools } from '../../agent/toolSelection.js';
 import { isToolFailure, repairToolCall } from '../../agent/toolRuntime.js';
+import { createTurn, endTurn, PROTOCOL_VERSION } from '@rwr/agent-core';
 import {
   aggregateBestOfN,
   buildBreakdown,
@@ -196,7 +199,10 @@ export async function chatRoutes(app: FastifyInstance) {
         console.log(`[chat] Meta query detected, skipping search`);
         results = [];
       } else {
-        const topK = retrievalTopK(queryCategory, exactKey !== null);
+        // "有哪些武器引用了 bullet.projectile" reads as an enumeration but is answered whole by a
+        // single `findReferences` call, so it gets the graph-intent breadth rather than 150 docs.
+        const reverseLookup = isReverseLookup(query);
+        const topK = retrievalTopK(queryCategory, exactKey !== null, reverseLookup);
         const searchObs = chainObs.startObservation(
           'search-pipeline',
           {
@@ -233,7 +239,7 @@ export async function chatRoutes(app: FastifyInstance) {
         const filters = packageScope ? { mod_name: packageScope } : {};
         results = await localSearch(query, filters, topK, enrichedQuery);
         console.log(
-          `[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (topK=${topK}, intent=${queryCategory}${packageScope ? `, mod=${packageScope}` : ''})`,
+          `[chat] Search returned ${results.length} result(s) in ${Date.now() - startTime}ms (topK=${topK}, intent=${queryCategory}${reverseLookup ? '/reverse' : ''}${packageScope ? `, mod=${packageScope}` : ''})`,
         );
 
         searchPath = 'local-index';
@@ -267,7 +273,13 @@ export async function chatRoutes(app: FastifyInstance) {
       budgetTokens: config.contextBudgetTokens,
       mod: packageScope,
     });
-    const systemPrompt = buildSystemPrompt(packageScope);
+    // Operator playbooks whose triggers this question hit. Never throws — a broken skills directory
+    // degrades to "no skills" rather than failing the turn.
+    const activeSkills = await getActiveSkills(query);
+    if (activeSkills.length > 0) {
+      console.log(`[chat] Skills applied: ${activeSkills.map((s) => s.name).join(', ')}`);
+    }
+    const systemPrompt = buildSystemPrompt(packageScope, activeSkills);
 
     const historyMessages = nonSystemMessages.slice(0, -1).map((m) => ({
       role: m.role as 'user' | 'assistant',
@@ -286,9 +298,7 @@ export async function chatRoutes(app: FastifyInstance) {
     // The judge follows the turn's model unless the operator pinned one via JUDGE_MODEL.
     const judgeModelId = config.judgeModelExplicit ? config.judgeModel : turnModelId;
 
-    console.log(
-      `[chat] LLM request | model=${turnModelId} | history=${historyMessages.length}`,
-    );
+    console.log(`[chat] LLM request | model=${turnModelId} | history=${historyMessages.length}`);
 
     const responseFormat =
       body.response_format?.type ?? (request.headers['x-response-format'] as string | undefined);
@@ -383,6 +393,9 @@ export async function chatRoutes(app: FastifyInstance) {
     // The client is gone as soon as the socket closes — a closed tab, a proxy that reset the stream.
     // Without this the tool loop runs to its 100-step cap generating an answer nobody will read.
     const abort = new AbortController();
+    // Registered so `POST /v1/chat/steer` and `/v1/chat/stop` can reach this turn while it streams.
+    // Released in the `finally` below; the registry's TTL sweep only covers a crash that skips it.
+    const turn = createTurn(abort);
     let clientGone = false;
     const onClientGone = () => {
       if (clientGone) return;
@@ -412,9 +425,13 @@ export async function chatRoutes(app: FastifyInstance) {
     // app (see `streamHeartbeatMs`). The first ping goes out immediately: it also forces a buffering
     // proxy to commit the response head instead of holding it until the first real delta. Disabling
     // the heartbeat suppresses that one too — `0` means a stream carrying nothing but real events.
+    // First line out: the turn's id, which is the key for the steer/stop side channel. It also
+    // commits the response head at a buffering proxy, the job the first heartbeat ping used to do
+    // alone — and it goes out even when the heartbeat is disabled.
+    emit({ type: 'turn-start', turnId: turn.id, protocolVersion: PROTOCOL_VERSION });
+
     let heartbeat: ReturnType<typeof setInterval> | null = null;
     if (config.streamHeartbeatMs > 0) {
-      emit({ type: 'ping' });
       heartbeat = setInterval(() => emit({ type: 'ping' }), config.streamHeartbeatMs);
     }
 
@@ -565,6 +582,10 @@ export async function chatRoutes(app: FastifyInstance) {
           // Tool execution time, reported by the SDK and keyed by tool call, so the UI can show it
           // without the timing ever entering the model's context.
           const toolDurations = new Map<string, number>();
+          // How many steering messages the stream has already announced. Injection is sticky —
+          // every message is re-appended on every later step — so this is what keeps the UI from
+          // getting one `steer-applied` per step for the same instruction.
+          let announcedSteering = 0;
           const result = streamText({
             model: getProvider().chatModel(turnModelId),
             system: systemPrompt,
@@ -574,7 +595,7 @@ export async function chatRoutes(app: FastifyInstance) {
             ...(tools
               ? {
                   tools,
-                  stopWhen: stepCountIs(100),
+                  stopWhen: stepCountIs(config.maxToolSteps),
                   prepareStep: ({
                     messages,
                     stepNumber,
@@ -582,10 +603,39 @@ export async function chatRoutes(app: FastifyInstance) {
                     messages: Record<string, unknown>[];
                     stepNumber: number;
                   }) => {
+                    // Steering the user sent mid-stream, appended after the whole replayed
+                    // transcript — so it lands past a complete tool-result block and never leaves
+                    // an assistant tool-call dangling.
+                    //
+                    // Re-appended in full on EVERY step, not drained once: the SDK rebuilds
+                    // `messages` from the original input plus its own accumulated response, so a
+                    // `prepareStep` rewrite only reaches that one outgoing request. Injecting once
+                    // leaves the instruction alive only if the provider happens to echo the model's
+                    // reasoning back — measured, see the spike in adr/0002.
+                    const steering = turn.steering();
+                    const withSteering =
+                      steering.length > 0
+                        ? [...messages, ...steering.map((content) => ({ role: 'user', content }))]
+                        : messages;
+                    for (let i = announcedSteering; i < steering.length; i++) {
+                      emit({
+                        type: 'steer-applied',
+                        turnId: turn.id,
+                        step: stepNumber,
+                        message: steering[i],
+                      });
+                    }
+                    announcedSteering = steering.length;
+
                     // The annotation above is the shaper's own message type, so no cast is needed;
                     // it is also contravariantly compatible with the SDK's `ModelMessage[]` (every
                     // ModelMessage is a Record<string, unknown>).
-                    const shaped = shaper.prepare(messages);
+                    const shaped = shaper.prepare(withSteering);
+                    // `prepare` reports "nothing to rewrite" as `{}`, which would make the SDK fall
+                    // back to its own message list and silently drop the steering just appended.
+                    // Once there is any, the messages have to be handed over explicitly.
+                    const stepState =
+                      steering.length > 0 ? { messages: shaped.messages ?? withSteering } : shaped;
                     // `stepNumber` is 0-based: the first LLM call is 0, later steps see the full
                     // registry again so a mid-loop tool is never locked out.
                     const active = selectActiveTools(
@@ -599,8 +649,8 @@ export async function chatRoutes(app: FastifyInstance) {
                         `[disclosure] step=${stepNumber} active=${active.length}/${disclosureMeta?.allNames.length} tools exposed`,
                       );
                     }
-                    if (active) return { ...shaped, activeTools: active } as never;
-                    return shaped as never;
+                    if (active) return { ...stepState, activeTools: active } as never;
+                    return stepState as never;
                   },
                   experimental_onToolCallFinish: ({ toolCall, durationMs }) => {
                     // The SDK reports fractional milliseconds; the UI only ever shows whole ones.
@@ -650,77 +700,108 @@ export async function chatRoutes(app: FastifyInstance) {
             toolDurations.delete(id);
             return ms;
           };
-          for await (const part of result.fullStream) {
-            const p = part as {
-              type: string;
-              text?: string;
-              textDelta?: string;
-              delta?: string;
-              error?: unknown;
-              toolName?: string;
-              toolCallId?: string;
-              input?: unknown;
-              output?: unknown;
-            };
-            if (process.env.DEBUG_AGENT === '1') {
-              console.log(
-                `[agent-stream] type=${p.type} toolName=${p.toolName ?? ''} hasText=${!!(p.text ?? p.textDelta ?? p.delta)}`,
-              );
-            }
-            if (p.type === 'reasoning-delta' || p.type === 'reasoning') {
-              const delta = p.text ?? p.textDelta ?? p.delta ?? '';
-              if (delta) {
-                reasoningText += delta;
-                emit({ type: 'reasoning-delta', textDelta: delta });
+          // `/v1/chat/stop` aborts the same controller a client disconnect uses, so the two have to
+          // be told apart: a user stop keeps everything generated so far and finishes the stream
+          // normally, while a disconnect has nobody left to finish it for.
+          //
+          // An abort does NOT reliably throw out of `fullStream` — measured, the SDK ends the
+          // iterator gracefully with `finishReason: 'other'` instead. So the throw is handled *and*
+          // the registry is consulted afterwards; relying on the catch alone reported a stopped
+          // turn as `completed`.
+          let streamThrew = false;
+          try {
+            for await (const part of result.fullStream) {
+              const p = part as {
+                type: string;
+                text?: string;
+                textDelta?: string;
+                delta?: string;
+                error?: unknown;
+                toolName?: string;
+                toolCallId?: string;
+                input?: unknown;
+                output?: unknown;
+              };
+              if (process.env.DEBUG_AGENT === '1') {
+                console.log(
+                  `[agent-stream] type=${p.type} toolName=${p.toolName ?? ''} hasText=${!!(p.text ?? p.textDelta ?? p.delta)}`,
+                );
               }
-            } else if (p.type === 'text-delta' || p.type === 'text') {
-              const delta = p.text ?? p.textDelta ?? p.delta ?? '';
-              if (delta) {
-                answerText += delta;
-                emit({ type: 'text-delta', textDelta: delta });
+              if (p.type === 'reasoning-delta' || p.type === 'reasoning') {
+                const delta = p.text ?? p.textDelta ?? p.delta ?? '';
+                if (delta) {
+                  reasoningText += delta;
+                  emit({ type: 'reasoning-delta', textDelta: delta });
+                }
+              } else if (p.type === 'text-delta' || p.type === 'text') {
+                const delta = p.text ?? p.textDelta ?? p.delta ?? '';
+                if (delta) {
+                  answerText += delta;
+                  emit({ type: 'text-delta', textDelta: delta });
+                }
+              } else if (p.type === 'tool-call') {
+                toolCallCount++;
+                const summary = summarizeToolInput(p.toolName, p.input);
+                emit({
+                  type: 'tool-step',
+                  toolCallId: p.toolCallId,
+                  toolName: p.toolName,
+                  summary,
+                });
+              } else if (p.type === 'tool-result') {
+                // The runtime envelope turns thrown tools into ordinary results carrying `error`, so
+                // success has to be read off the output shape rather than the stream part type.
+                const failed = isToolFailure(p.output);
+                if (failed) toolFailureCount++;
+                emit({
+                  type: 'tool-step',
+                  toolCallId: p.toolCallId,
+                  toolName: p.toolName,
+                  done: true,
+                  ok: !failed,
+                  durationMs: durationOf(p.toolCallId),
+                  summary: summarizeToolResult(p.toolName, p.output),
+                });
+              } else if (p.type === 'tool-error') {
+                // Failures that never reach `execute` — schema validation, unknown tool name. The model
+                // still receives them as tool results, so this must close the UI's trace line and must
+                // NOT throw: only a stream-level `error` may end the response.
+                toolFailureCount++;
+                const message = p.error instanceof Error ? p.error.message : String(p.error);
+                console.warn(`[chat] tool-error ${p.toolName ?? '?'} — ${message}`);
+                emit({
+                  type: 'tool-step',
+                  toolCallId: p.toolCallId,
+                  toolName: p.toolName,
+                  done: true,
+                  ok: false,
+                  durationMs: durationOf(p.toolCallId),
+                  // The SDK's message appends the full tool inventory, which is useful to the model but
+                  // just noise in a one-line trace entry.
+                  summary: message.split('. Available tools:')[0],
+                });
+              } else if (p.type === 'error') {
+                throw p.error;
               }
-            } else if (p.type === 'tool-call') {
-              toolCallCount++;
-              const summary = summarizeToolInput(p.toolName, p.input);
-              emit({ type: 'tool-step', toolCallId: p.toolCallId, toolName: p.toolName, summary });
-            } else if (p.type === 'tool-result') {
-              // The runtime envelope turns thrown tools into ordinary results carrying `error`, so
-              // success has to be read off the output shape rather than the stream part type.
-              const failed = isToolFailure(p.output);
-              if (failed) toolFailureCount++;
-              emit({
-                type: 'tool-step',
-                toolCallId: p.toolCallId,
-                toolName: p.toolName,
-                done: true,
-                ok: !failed,
-                durationMs: durationOf(p.toolCallId),
-                summary: summarizeToolResult(p.toolName, p.output),
-              });
-            } else if (p.type === 'tool-error') {
-              // Failures that never reach `execute` — schema validation, unknown tool name. The model
-              // still receives them as tool results, so this must close the UI's trace line and must
-              // NOT throw: only a stream-level `error` may end the response.
-              toolFailureCount++;
-              const message = p.error instanceof Error ? p.error.message : String(p.error);
-              console.warn(`[chat] tool-error ${p.toolName ?? '?'} — ${message}`);
-              emit({
-                type: 'tool-step',
-                toolCallId: p.toolCallId,
-                toolName: p.toolName,
-                done: true,
-                ok: false,
-                durationMs: durationOf(p.toolCallId),
-                // The SDK's message appends the full tool inventory, which is useful to the model but
-                // just noise in a one-line trace entry.
-                summary: message.split('. Available tools:')[0],
-              });
-            } else if (p.type === 'error') {
-              throw p.error;
             }
+          } catch (err) {
+            // Only a user stop is swallowed here. Anything else — including a client disconnect —
+            // still belongs to the outer handler.
+            if (!turn.stoppedByUser()) throw err;
+            streamThrew = true;
           }
 
-          const finishReason = await result.finishReason;
+          const stoppedByUser = turn.stoppedByUser();
+          if (stoppedByUser) {
+            console.log(
+              `[chat] turn=${turn.id} stopped by user after ${toolCallCount} tool call(s)`,
+            );
+          }
+
+          // Only a stream that actually threw leaves the SDK's promises rejected; one that ended
+          // gracefully still has real usage to report, and throwing it away would mark a perfectly
+          // measured turn as estimated.
+          const finishReason = streamThrew ? 'stop' : await result.finishReason;
           if (toolCallCount > 0) {
             console.log(
               `[chat] Agent used ${toolCallCount} tool call(s)` +
@@ -732,8 +813,10 @@ export async function chatRoutes(app: FastifyInstance) {
           // Why the loop ended, reported as a field on `finish` rather than as an `error` event: the
           // UI owns the wording (it is fully localized) and `error` stays reserved for a stream that
           // actually broke. `output-limit` was previously invisible — the answer just stopped.
-          let stopReason: 'completed' | 'step-limit' | 'output-limit' = 'completed';
-          if (finishReason === 'tool-calls' && answerText.trim().length === 0) {
+          let stopReason: 'completed' | 'step-limit' | 'output-limit' | 'stopped' = 'completed';
+          if (stoppedByUser) {
+            stopReason = 'stopped';
+          } else if (finishReason === 'tool-calls' && answerText.trim().length === 0) {
             stopReason = 'step-limit';
             console.warn('[chat] Agent step limit reached without a final answer');
             chainObs.update({ level: 'ERROR', statusMessage: 'Agent step limit reached' });
@@ -745,11 +828,9 @@ export async function chatRoutes(app: FastifyInstance) {
 
           // `totalUsage` sums every step of the tool loop; `usage` is the last step alone, which is
           // what still occupies the context window.
-          const [totalUsage, lastStepUsage, stepResults] = await Promise.all([
-            result.totalUsage,
-            result.usage,
-            result.steps,
-          ]);
+          const [totalUsage, lastStepUsage, stepResults] = streamThrew
+            ? ([undefined, undefined, []] as const)
+            : await Promise.all([result.totalUsage, result.usage, result.steps]);
           const basis = measureTurn(
             {
               ...inputTokens,
@@ -781,11 +862,21 @@ export async function chatRoutes(app: FastifyInstance) {
       // not a failure of the turn and there is nobody left to send an `error` frame to.
       if (clientGone) {
         console.warn(`[chat] Client disconnected mid-stream, generation aborted`);
+      } else if (turn.stoppedByUser()) {
+        // The text path finishes a stopped turn itself, with a `finish` carrying `stopped`. Reaching
+        // here means structured or max mode was aborted instead — there is no partial object or
+        // synthesised answer worth salvaging, but the client asked for this, so it is not an error.
+        console.log(`[chat] turn=${turn.id} stopped by user`);
+        emit({ type: 'finish', stopReason: 'stopped' });
       } else {
         console.error(`[chat] LLM stream error: ${llmError.message}`);
         emit({ type: 'error', error: llmError.message });
       }
     } finally {
+      // Before anything that can throw: a leaked entry keeps an AbortController (and the closure
+      // behind it) alive until the registry's TTL sweep, and answers steer requests for a turn that
+      // is already over.
+      endTurn(turn.id);
       if (heartbeat) clearInterval(heartbeat);
       genObs.end();
       chainObs.end();

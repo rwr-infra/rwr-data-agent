@@ -1,0 +1,24 @@
+{
+  "name": "@rwr/agent-core",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The reusable half of the RWR data agent: steering, session storage, the plugin host, and the NDJSON transport. Deliberately does NOT contain the agent loop — that is the AI SDK's ToolLoopAgent/streamText.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "ai": "^6.0.177"
+  }
+}

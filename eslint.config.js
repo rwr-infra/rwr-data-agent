@@ -18,8 +18,16 @@ const ALL = ['**/*.{ts,mts,cts,js,mjs,cjs}'];
  *    to `any` (a wall of no-unsafe-* false positives) and make lint results
  *    depend on whether `npm run build` has been run.
  *  - .d.ts files and plain-JS plugins gain nothing from type-aware rules.
+ *  - root config files belong to no tsconfig `include`, so projectService cannot
+ *    type them at all.
  */
-const UNTYPED = ['api/**/*.ts', 'types/**/*.d.ts', 'tools.d/**/*.js', 'eslint.config.js'];
+const UNTYPED = [
+  'api/**/*.ts',
+  'types/**/*.d.ts',
+  'tools.d/**/*.js',
+  'eslint.config.js',
+  'vitest.config.ts',
+];
 
 export default tseslint.config(
   // .gitignore is the single source of truth for ignores — ESLint 9+ no longer
@@ -62,6 +70,31 @@ export default tseslint.config(
   },
 
   { files: UNTYPED, extends: [tseslint.configs.disableTypeChecked] },
+
+  // packages/agent-core is only "reusable" if it does not know about this game. That claim is
+  // worth exactly as much as its enforcement: a directory that merely *looks* separate gets
+  // punctured the first time someone is in a hurry, and nobody notices until the day they try to
+  // reuse it. So the boundary is a lint error, not a convention.
+  {
+    files: ['packages/agent-core/**/*.ts'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              // Anything climbing out of the package: the app's src/, its config, its retrieval and
+              // ingestion layers, or the package's own published name (which would be a cycle).
+              group: ['**/src/**', '../../../*', '@rwr/*'],
+              message:
+                'agent-core must not import the RWR domain (config, retrieval, ingestion, indexing, game tools). ' +
+                'Whatever it needs, the domain passes in — see the host parameter on the plugin loader for the pattern.',
+            },
+          ],
+        },
+      ],
+    },
+  },
 
   // Must stay last: turns off formatting rules that conflict with Prettier and
   // adds no checks of its own.

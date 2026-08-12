@@ -69,7 +69,13 @@ export interface ToolHost {
    */
   scope?: string;
   /** Full-text search, filtered to `scope` unless `filters.mod_name` is set explicitly. */
-  search(query: string, filters?: SearchFilters, topK?: number, searchQuery?: string, offset?: number): Promise<SearchResult[]>;
+  search(
+    query: string,
+    filters?: SearchFilters,
+    topK?: number,
+    searchQuery?: string,
+    offset?: number,
+  ): Promise<SearchResult[]>;
   graph: ToolHostGraph;
   log(message: string): void;
 }

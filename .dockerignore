@@ -13,8 +13,15 @@
 !src
 !web
 
+# The agent-core workspace. `npm ci` needs its package.json present before it can link
+# node_modules/@rwr/agent-core, in BOTH stages — the root package depends on it by name.
+!packages
+
 # Production stage: agent tool plugins, mounted read-only at runtime.
 !tools.d
+
+# Skills: operator-editable prompt playbooks, mounted read-only at runtime.
+!skills.d
 
 # The re-admits above pull in whole directories, so drop the parts of them that
 # must never reach the builder: host-arch native modules and local build output.

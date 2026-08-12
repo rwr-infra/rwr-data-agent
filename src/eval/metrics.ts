@@ -88,9 +88,7 @@ function keyMatches(actual: string, expected: string): boolean {
 export function recallAtK(actualKeys: string[], expectedKeys: string[], k: number): number {
   if (expectedKeys.length === 0) return 1.0;
   const topK = actualKeys.slice(0, k);
-  const hits = expectedKeys.filter((ek) =>
-    topK.some((ak) => keyMatches(ak, ek)),
-  );
+  const hits = expectedKeys.filter((ek) => topK.some((ak) => keyMatches(ak, ek)));
   return hits.length / expectedKeys.length;
 }
 
@@ -98,9 +96,7 @@ export function precisionAtK(actualKeys: string[], expectedKeys: string[], k: nu
   if (expectedKeys.length === 0) return actualKeys.length === 0 ? 1.0 : 0.0;
   const topK = actualKeys.slice(0, k);
   if (topK.length === 0) return 0;
-  const hits = topK.filter((ak) =>
-    expectedKeys.some((ek) => keyMatches(ak, ek)),
-  );
+  const hits = topK.filter((ak) => expectedKeys.some((ek) => keyMatches(ak, ek)));
   return hits.length / topK.length;
 }
 
@@ -173,13 +169,15 @@ export function evaluateCase(
   const mrr = mrrAtK(returnedKeys, evalCase.expectedKeys, 10);
   const ndcg = ndcgAtK(returnedKeys, evalCase.expectedKeys, 10);
 
-  const typeCorrect = evalCase.expectedType === null
-    ? true
-    : results.length === 0 || results.some((r) => r.type === evalCase.expectedType);
+  const typeCorrect =
+    evalCase.expectedType === null
+      ? true
+      : results.length === 0 || results.some((r) => r.type === evalCase.expectedType);
 
   const emptyResult = results.length === 0;
 
-  const passed = rAtK >= 0.5 && (evalCase.expectedKeys.length === 0 ? emptyResult : !emptyResult) && typeCorrect;
+  const passed =
+    rAtK >= 0.5 && (evalCase.expectedKeys.length === 0 ? emptyResult : !emptyResult) && typeCorrect;
 
   const failureReason = classifyFailure(evalCase, results, rAtK);
 
@@ -207,7 +205,16 @@ export function evaluateCase(
 function computeBucketStats(results: EvalResult[]): BucketStats {
   const count = results.length;
   if (count === 0) {
-    return { count: 0, recallAt5: 0, precisionAt5: 0, mrrAt10: 0, ndcgAt10: 0, passed: 0, failed: 0, emptyResultRate: 0 };
+    return {
+      count: 0,
+      recallAt5: 0,
+      precisionAt5: 0,
+      mrrAt10: 0,
+      ndcgAt10: 0,
+      passed: 0,
+      failed: 0,
+      emptyResultRate: 0,
+    };
   }
   return {
     count,
@@ -264,7 +271,9 @@ export function summarizeResults(results: EvalResult[]): EvalSummary {
     buckets[`lang:${lang}`] = computeBucketStats(langResults);
   }
 
-  const lenBucket = groupByFallback(results, (r: EvalResult) => r.query.length <= 10 ? 'short' : r.query.length <= 30 ? 'medium' : 'long');
+  const lenBucket = groupByFallback(results, (r: EvalResult) =>
+    r.query.length <= 10 ? 'short' : r.query.length <= 30 ? 'medium' : 'long',
+  );
   for (const [len, lenResults] of Object.entries(lenBucket)) {
     buckets[`len:${len}`] = computeBucketStats(lenResults);
   }
@@ -296,7 +305,10 @@ export function summarizeResults(results: EvalResult[]): EvalSummary {
 function groupByFallback<T>(arr: T[], keyFn: ((item: T) => string) | string): Record<string, T[]> {
   const result: Record<string, T[]> = {};
   for (const item of arr) {
-    const key = typeof keyFn === 'function' ? keyFn(item) : (item as Record<string, unknown>)[keyFn] as string;
+    const key =
+      typeof keyFn === 'function'
+        ? keyFn(item)
+        : ((item as Record<string, unknown>)[keyFn] as string);
     if (!result[key]) result[key] = [];
     result[key].push(item);
   }

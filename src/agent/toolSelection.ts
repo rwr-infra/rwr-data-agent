@@ -31,10 +31,15 @@ export interface ToolDisclosureMeta {
  * - this is not the first step (`stepNumber > 0`) — once the loop is iterating the model may
  *   need any tool, and the token saving lives in the first call anyway.
  *
- * On the first step above the threshold: `coreNames` plus every plugin tool whose triggers
- * matched the query (case-insensitive substring; CJK works because it is just string
- * inclusion). Plugin tools that declared no `triggers` are absent from `pluginTriggers` and
- * therefore never hidden — disclosure is author opt-in.
+ * On the first step above the threshold, a tool stays exposed when any of these hold:
+ * - it is a built-in (`coreNames`),
+ * - it declared no `triggers` and so is absent from `pluginTriggers` — disclosure is author
+ *   opt-in, and a plugin that never opted in must not vanish the moment the registry grows,
+ * - one of its triggers matched the query (case-insensitive substring; CJK works because it is
+ *   just string inclusion).
+ *
+ * Filtering `allNames` rather than concatenating keeps the registry's own order and cannot emit
+ * a name that is not registered.
  */
 export function selectActiveTools(
   meta: ToolDisclosureMeta | undefined,
@@ -52,5 +57,8 @@ export function selectActiveTools(
   for (const [name, triggers] of meta.pluginTriggers) {
     if (triggers.some((t) => lower.includes(t))) triggered.add(name);
   }
-  return [...meta.coreNames, ...[...triggered].filter((name) => !meta.coreNames.includes(name))];
+  const core = new Set(meta.coreNames);
+  return meta.allNames.filter(
+    (name) => core.has(name) || !meta.pluginTriggers.has(name) || triggered.has(name),
+  );
 }

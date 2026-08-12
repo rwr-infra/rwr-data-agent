@@ -1,6 +1,7 @@
 import * as fsSync from 'fs';
 import { tool, type Tool } from 'ai';
 import { z } from 'zod';
+import { createReloadGate } from '@rwr/agent-core';
 import { config } from '../config/index.js';
 import {
   configureGraph,
@@ -43,19 +44,24 @@ export function buildBuiltinTools(scope?: string) {
     searchDocs: tool({
       description: scoped(
         'Full-text search over the game data index (the same index the pre-fetched context ' +
-        'came from). Matches Keys, English/Chinese localized names, and document content. ' +
-        'USE THIS FIRST whenever the pre-fetched context does not contain the item the user ' +
-        'asked about — retry with the bare item name, a Key fragment, an alias, or the ' +
-        'English/Chinese equivalent. Never tell the user an item does not exist without ' +
-        'having searched for it here.'),
+          'came from). Matches Keys, English/Chinese localized names, and document content. ' +
+          'USE THIS FIRST whenever the pre-fetched context does not contain the item the user ' +
+          'asked about — retry with the bare item name, a Key fragment, an alias, or the ' +
+          'English/Chinese equivalent. Never tell the user an item does not exist without ' +
+          'having searched for it here.',
+      ),
       inputSchema: z.object({
         query: z
           .string()
-          .describe('Search terms, e.g. "ak47", "AK-47 突击步枪", "gkw_ak". Short and specific beats a full sentence.'),
+          .describe(
+            'Search terms, e.g. "ak47", "AK-47 突击步枪", "gkw_ak". Short and specific beats a full sentence.',
+          ),
         type: z
           .string()
           .optional()
-          .describe('Optional node type filter (weapon, carry_item, projectile, call, character, script_chunk, …)'),
+          .describe(
+            'Optional node type filter (weapon, carry_item, projectile, call, character, script_chunk, …)',
+          ),
         limit: z.number().optional().describe('Max results, 1-30 (default 10)'),
       }),
       execute: async ({ query, type, limit }) => searchDocs(query, type, limit ?? 10, scope),
@@ -64,11 +70,12 @@ export function buildBuiltinTools(scope?: string) {
     getInheritanceChain: tool({
       description: scoped(
         'Trace the full inheritance chain of an entity (weapon, carry_item, etc.). ' +
-        'Returns parent chain (what this entity inherits from via file= attribute) ' +
-        'and children (what inherits from this entity). Use when the user asks about ' +
-        'inheritance, base files, parent templates, or "inherits from". Each layer reports ' +
-        'its own `mod`: a parent may physically live in another package, and that is where ' +
-        'the inherited value comes from — cite the package when it differs.'),
+          'Returns parent chain (what this entity inherits from via file= attribute) ' +
+          'and children (what inherits from this entity). Use when the user asks about ' +
+          'inheritance, base files, parent templates, or "inherits from". Each layer reports ' +
+          'its own `mod`: a parent may physically live in another package, and that is where ' +
+          'the inherited value comes from — cite the package when it differs.',
+      ),
       inputSchema: z.object({
         key: z.string().describe('The entity key (e.g., "m4a1.weapon", "K309.carry_item")'),
       }),
@@ -78,8 +85,9 @@ export function buildBuiltinTools(scope?: string) {
     findReferences: tool({
       description: scoped(
         'Find all entities that reference a given entity (reverse lookup). ' +
-        'Shows who points TO this entity via extends, fires, transforms_to, etc. ' +
-        'Use to answer "who uses this projectile", "which weapons reference this base".'),
+          'Shows who points TO this entity via extends, fires, transforms_to, etc. ' +
+          'Use to answer "who uses this projectile", "which weapons reference this base".',
+      ),
       inputSchema: z.object({
         key: z.string().describe('The entity key to find references for'),
       }),
@@ -89,8 +97,9 @@ export function buildBuiltinTools(scope?: string) {
     getTransformChain: tool({
       description: scoped(
         'Trace the degradation/consumption chain of a carry item (e.g., armor layers). ' +
-        'Items with transform_on_consume transform into another item when consumed. ' +
-        'Use to answer "how many armor layers does X have" or trace armor degradation.'),
+          'Items with transform_on_consume transform into another item when consumed. ' +
+          'Use to answer "how many armor layers does X have" or trace armor degradation.',
+      ),
       inputSchema: z.object({
         key: z.string().describe('The carry item key (e.g., "K309.carry_item")'),
       }),
@@ -100,23 +109,24 @@ export function buildBuiltinTools(scope?: string) {
     readSource: tool({
       description: scoped(
         'Read the raw source file content. Use to inspect exact XML attributes, ' +
-        'verify data, or read AngelScript source code. ' +
-        'Supports optional line range for large files. The result reports the owning `mod`, ' +
-        'and flags `outOfScope` when the file belongs to another package.'),
+          'verify data, or read AngelScript source code. ' +
+          'Supports optional line range for large files. The result reports the owning `mod`, ' +
+          'and flags `outOfScope` when the file belongs to another package.',
+      ),
       inputSchema: z.object({
         file: z.string().describe('Relative file path (e.g., "weapons/m4a1.weapon")'),
         startLine: z.number().optional().describe('Start line (1-indexed)'),
         endLine: z.number().optional().describe('End line (1-indexed)'),
       }),
-      execute: async ({ file, startLine, endLine }) =>
-        readSource(file, startLine, endLine, scope),
+      execute: async ({ file, startLine, endLine }) => readSource(file, startLine, endLine, scope),
     }),
 
     listFiles: tool({
       description: scoped(
         'List indexed files matching a glob pattern. Use to find files by name ' +
-        'when you do not know the exact key. Supports optional type filter. ' +
-        'Patterns use * as wildcard (e.g., "*m4*", "*.weapon").'),
+          'when you do not know the exact key. Supports optional type filter. ' +
+          'Patterns use * as wildcard (e.g., "*m4*", "*.weapon").',
+      ),
       inputSchema: z.object({
         pattern: z.string().describe('Glob pattern (e.g., "*m4*", "*.call")'),
         type: z
@@ -130,8 +140,9 @@ export function buildBuiltinTools(scope?: string) {
     getScriptSymbols: tool({
       description: scoped(
         'Get parsed AngelScript (.as) function/class/include signatures with line numbers. ' +
-        'Use to answer questions about game scripts, custom game modes, hooks, or mod logic. ' +
-        'Much better than reading the full script file for "what functions exist".'),
+          'Use to answer questions about game scripts, custom game modes, hooks, or mod logic. ' +
+          'Much better than reading the full script file for "what functions exist".',
+      ),
       inputSchema: z.object({
         file: z.string().describe('Relative .as file path (e.g., "scripts/start_1.as")'),
       }),
@@ -141,14 +152,14 @@ export function buildBuiltinTools(scope?: string) {
     getNode: tool({
       description: scoped(
         'Look up a single entity by its key. Returns basic info (type, file path, mod). ' +
-        'Use to resolve a key to its source file before calling readSource, ' +
-        'or to verify an entity exists.'),
+          'Use to resolve a key to its source file before calling readSource, ' +
+          'or to verify an entity exists.',
+      ),
       inputSchema: z.object({
         key: z.string().describe('The entity key to look up'),
       }),
       execute: async ({ key }) => getNode(key, scope),
     }),
-
   };
 }
 
@@ -163,25 +174,30 @@ export function buildBuiltinTools(scope?: string) {
  */
 const registries = new Map<string, Record<string, Tool>>();
 /**
- * Per-scope disclosure metadata, cached alongside `registries` and cleared on the same
- * `dirty` flag so a hot-reload cannot leave it stale. Populated only when a scope's
+ * Per-scope disclosure metadata, cached alongside `registries` and invalidated by the same
+ * generation counter so a hot-reload cannot leave it stale. Populated only when a scope's
  * registry is actually built; `getToolDisclosureMeta` returns `undefined` for scopes
  * nobody requested yet, which simply disables disclosure for them.
  */
 const disclosureMeta = new Map<string, ToolDisclosureMeta>();
 let pluginEntries: PluginEntry[] = [];
 let builtinNames: string[] = [];
-let dirty = true;
+
+/**
+ * Staleness lives in the gate, not in a `dirty` boolean here — see `createReloadGate` for why a
+ * boolean loses a race that two concurrent requests can reach.
+ */
+const reload = createReloadGate();
 let watching = false;
 let reloadTimer: NodeJS.Timeout | null = null;
 
 /** Mark the registry stale; the next getAgentTools() rebuilds it. */
 export function invalidateToolRegistry(): void {
-  dirty = true;
+  reload.invalidate();
 }
 
 /**
- * Watch the plugin directory. Changes only flip the `dirty` flag — the actual reload
+ * Watch the plugin directory. Changes only bump the generation counter — the actual reload
  * happens when the next request asks for tools, so an in-flight stream is never
  * swapped out from under itself.
  */
@@ -193,7 +209,7 @@ function watchPluginDir(): void {
       if (reloadTimer) clearTimeout(reloadTimer);
       reloadTimer = setTimeout(() => {
         console.log('[plugin] Change detected — tools will reload on the next request');
-        dirty = true;
+        reload.invalidate();
       }, 300);
     });
   } catch {
@@ -203,35 +219,61 @@ function watchPluginDir(): void {
 }
 
 /**
- * Built-in tools plus every successfully loaded plugin. Rebuilds when marked dirty.
+ * Built-in tools plus every successfully loaded plugin. Rebuilds when the generation has moved past
+ * what the cache holds.
  *
  * `scope` is the request's selected package: the returned tools — plugins included, through the
  * host — only ever see that package.
  */
 export async function getAgentTools(scope?: string): Promise<Record<string, Tool>> {
-  if (dirty) {
+  const stale = reload.isStale();
+  if (stale) {
     registries.clear();
     disclosureMeta.clear();
   }
   const cacheKey = scope ?? '';
   const cached = registries.get(cacheKey);
-  if (cached && !dirty) return cached;
+  if (cached && !stale) return cached;
 
+  // Captured before the await, and checked after: the watcher can fire while `loadToolPlugins` is
+  // reading the directory, and what comes back then describes a directory that no longer exists.
+  const loadingGeneration = reload.begin();
   const builtin = buildBuiltinTools(scope) as unknown as Record<string, Tool>;
   builtinNames = Object.keys(builtin);
 
-  const { tools: plugins, entries, triggers } = await loadToolPlugins(createToolHost(scope), builtinNames);
-  pluginEntries = entries;
+  const {
+    tools: plugins,
+    entries,
+    triggers,
+  } = await loadToolPlugins(createToolHost(scope), builtinNames);
   // One envelope over built-ins and plugins alike: duplicate guard, deadline, `{error, hint}` on
   // failure. Wrapped here rather than per request so the token-accounting cache keeps its key.
   const registry = instrumentTools({ ...builtin, ...plugins });
+
+  if (!reload.publish(loadingGeneration)) {
+    // The directory changed while we were reading it. Serve what we have — this request has to
+    // answer with *something*, and a set of tools one edit out of date beats an error — but publish
+    // nothing, so the next request reloads instead of inheriting it. Caching it here is the actual
+    // bug: it would pin the stale registry with the gate agreeing that it is current.
+    console.log('[plugin] Directory changed mid-load — this request keeps the pre-change tools');
+    return registry;
+  }
+  // Only the unscoped load writes the inventory. A factory receives the host and may branch on
+  // `host.scope` at *registration* time — returning different specs, or throwing for one package and
+  // not another — so a scoped load's entries describe that package, not the deployment. Letting them
+  // land here would make `GET /v1/tools` report whichever scoped request loaded last, labelled as
+  // global: wrong in the one place whose entire job is telling an operator what loaded.
+  //
+  // `builtinNames` needs no such guard — `buildBuiltinTools` varies the closures per scope, never
+  // the key set — and the inventory self-heals: `/v1/tools` forces an unscoped load of its own, and
+  // an invalidation clears every scope's registry, so the `''` key is always reloaded from disk.
+  if (scope === undefined) pluginEntries = entries;
   registries.set(cacheKey, registry);
   disclosureMeta.set(cacheKey, {
     coreNames: builtinNames,
     allNames: Object.keys(registry),
     pluginTriggers: triggers,
   });
-  dirty = false;
 
   const ok = entries.filter((e) => !e.error);
   if (ok.length > 0 || entries.length > 0) {
@@ -246,7 +288,12 @@ export async function getAgentTools(scope?: string): Promise<Record<string, Tool
 }
 
 /** Snapshot for GET /v1/tools. Does not trigger a load. */
-export function getToolInventory(): { builtin: string[]; plugins: PluginEntry[]; toolsDir: string; hotReload: boolean } {
+export function getToolInventory(): {
+  builtin: string[];
+  plugins: PluginEntry[];
+  toolsDir: string;
+  hotReload: boolean;
+} {
   return {
     builtin: builtinNames,
     plugins: pluginEntries,

@@ -71,7 +71,6 @@ export interface TokenBreakdown {
 }
 
 export interface ToolStep {
-  icon: string;
   text: string;
   /** Absent while the call is still running; false when the tool returned an error. */
   ok?: boolean;

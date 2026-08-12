@@ -6,8 +6,16 @@ import type { StructuredDocument } from '../types/index.js';
 
 /** Extensions parsed as XML — everything here goes through `parseXmlTree`. */
 export const XML_EXTS = new Set([
-  '.xml', '.call', '.character', '.weapon', '.projectile', '.carry_item',
-  '.base_weapon', '.animation_base', '.base', '.base_carry_item',
+  '.xml',
+  '.call',
+  '.character',
+  '.weapon',
+  '.projectile',
+  '.carry_item',
+  '.base_weapon',
+  '.animation_base',
+  '.base',
+  '.base_carry_item',
 ]);
 /** Extensions indexed as opaque text: one document each, no structure extracted. */
 export const PLAIN_TEXT_EXTS = new Set(['.ai', '.resources', '.models', '.name', '.text_lines']);

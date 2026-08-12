@@ -18,6 +18,14 @@
     oninputchange: (text: string) => void;
     prefillText?: string;
     onprefillconsumed?: () => void;
+    /**
+     * True once the running turn has announced its id, which is the key the stop side channel needs.
+     * False against a backend old enough not to send `turn-start`, and in the gap before the first
+     * frame arrives — the composer then shows the old disabled spinner instead of a Stop button that
+     * would 404.
+     */
+    stoppable?: boolean;
+    onstop?: () => void;
   }
   let {
     tr,
@@ -33,6 +41,8 @@
     oninputchange,
     prefillText = '',
     onprefillconsumed,
+    stoppable = false,
+    onstop,
   }: Props = $props();
 
   let inputText = $state('');
@@ -63,9 +73,16 @@
     }
   }
 
+  /**
+   * A turn is exclusive: while one streams, nothing can be submitted. Typing is still allowed and
+   * the text is kept, so a question composed mid-answer is ready to send the moment the turn ends —
+   * it is simply not queued and not auto-sent, because a question written against a half-finished
+   * answer is usually not the question the user would ask against the finished one.
+   */
   function submit() {
+    if (loading) return;
     const text = inputText.trim();
-    if (!text || loading) return;
+    if (!text) return;
     inputText = '';
     if (textarea) textarea.style.height = 'auto';
     onsend(text);
@@ -101,26 +118,40 @@
       oninput={handleInput}
       onkeydown={handleKeydown}
     ></textarea>
-    <!-- While a turn streams the button spins rather than just greying out: disabled alone reads as
-         "nothing to send", the spinner says "an answer is on its way". Still disabled — the send
-         path is closed either way. -->
-    <button
-      class="btn btn-primary btn-sm join-item shrink-0 self-end h-[44px] w-[44px]"
-      aria-label={loading ? tr.thinking : tr.send}
-      title={loading ? tr.thinking : tr.send}
-      aria-busy={loading}
-      disabled={loading || !inputText.trim()}
-      onclick={submit}
-    >
-      {#if loading}
-        <span class="loading loading-spinner loading-sm"></span>
-      {:else}
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 19V5" />
-          <path d="m5 12 7-7 7 7" />
+    <!-- One control, two states — Send *becomes* Stop while a turn runs, so the same spot always
+         holds the only action available. The third state is the fallback: streaming but no turn id
+         yet (a backend that never sent `turn-start`, or the sub-second gap before the first frame),
+         where stopping would 404, so the old disabled spinner stands in. -->
+    {#if loading && stoppable}
+      <button
+        class="btn btn-error btn-outline btn-sm join-item shrink-0 self-end h-[44px] w-[44px]"
+        aria-label={tr.stopTurn}
+        title={tr.stopTurnHint}
+        onclick={() => onstop?.()}
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+          <rect x="5" y="5" width="14" height="14" rx="2" />
         </svg>
-      {/if}
-    </button>
+      </button>
+    {:else}
+      <button
+        class="btn btn-primary btn-sm join-item shrink-0 self-end h-[44px] w-[44px]"
+        aria-label={loading ? tr.thinking : tr.send}
+        title={loading ? tr.thinking : tr.send}
+        aria-busy={loading}
+        disabled={loading || !inputText.trim()}
+        onclick={submit}
+      >
+        {#if loading}
+          <span class="loading loading-spinner loading-sm"></span>
+        {:else}
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 19V5" />
+            <path d="m5 12 7-7 7 7" />
+          </svg>
+        {/if}
+      </button>
+    {/if}
   </div>
 
   <!-- One full-width row: the usage stats on the left, Max-mode toggle on the right. On mobile

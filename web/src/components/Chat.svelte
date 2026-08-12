@@ -84,12 +84,44 @@
   );
 
   let chatEl: HTMLDivElement | undefined = $state();
+  let contentEl: HTMLDivElement | undefined = $state();
+
+  // Deliberately not `$state`: the scroll effect both reads and writes it, and a reactive read
+  // would make the user's own scroll re-run the effect that scrolls them back down.
+  let stick = true;
+
+  function scrollToBottom() {
+    if (chatEl) chatEl.scrollTop = chatEl.scrollHeight;
+  }
+
+  function handleScroll() {
+    if (!chatEl) return;
+    // Tolerance rather than an exact match: sub-pixel scrollHeight and momentum scrolling leave a
+    // few pixels of slack even when the view is visually pinned to the bottom.
+    stick = chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 48;
+  }
+
+  // Streaming rewrites the last block's text in place, so `items.length` never changes and a
+  // length-keyed effect only fires between blocks — the final answer would grow off-screen until
+  // the turn ends. Watching the content box's height catches every delta, and also the late layout
+  // shifts markdown produces (tables, code blocks, images) that no state dependency can see.
+  $effect(() => {
+    if (!contentEl) return;
+    const ro = new ResizeObserver(() => {
+      if (stick) scrollToBottom();
+    });
+    ro.observe(contentEl);
+    return () => ro.disconnect();
+  });
 
   $effect(() => {
-    items.length;
+    const last = items[items.length - 1];
     thinking;
     streaming;
-    if (chatEl) chatEl.scrollTop = chatEl.scrollHeight;
+    // A message the user just sent always snaps to the bottom; blocks the agent appends respect
+    // whether the user has scrolled up to read something.
+    if (last?.type === 'message' && last.role === 'user') stick = true;
+    if (stick) scrollToBottom();
   });
 </script>
 
@@ -109,8 +141,8 @@
   </div>
 {/snippet}
 
-<div class="flex-1 overflow-y-auto" bind:this={chatEl}>
-  <div class="mx-auto w-full max-w-4xl px-4 sm:px-6 flex flex-col gap-4">
+<div class="flex-1 overflow-y-auto" bind:this={chatEl} onscroll={handleScroll}>
+  <div class="mx-auto w-full max-w-4xl px-4 sm:px-6 pt-4 pb-8 sm:pb-10 flex flex-col gap-4" bind:this={contentEl}>
   {#each rows as { item, i } (item.id)}
     {#if item.type === 'message' && item.role === 'ai'}
       <div class="group flex flex-col items-start animate-fade-in" class:opacity-50={isDimmed(i)} class:transition-opacity={isDimmed(i)}>

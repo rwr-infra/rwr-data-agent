@@ -121,8 +121,7 @@ function renderContext(retrievedContext: SearchResult[]): string {
   const parts = [full.join('\n\n')];
   if (omitted.length > 0) {
     parts.push(
-      `…(${omitted.length} more, identity only)\n` +
-        omitted.map((r) => oneLiner(r)).join('\n'),
+      `…(${omitted.length} more, identity only)\n` + omitted.map((r) => oneLiner(r)).join('\n'),
     );
   }
   return parts.filter(Boolean).join('\n\n');

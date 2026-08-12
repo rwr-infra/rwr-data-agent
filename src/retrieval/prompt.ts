@@ -69,6 +69,11 @@ Follow these paths unless the question clearly calls for something else.
 3. \`readSource\` only on the layers that can carry the attribute in question — not every layer.
 4. Answer ordered by depth, citing each layer's file and what it contributes.
 
+**Reverse lookup / "what points at this"** — "有哪些武器引用了 X", "what references X", "who uses X"
+1. Resolve the target Key — from context, or \`searchDocs\`.
+2. \`findReferences\` on that Key. **One call returns the complete set**; searching for the referrers instead is how this question turns into dozens of wasted steps.
+3. If it returns nothing, say so — do not go hunting with \`searchDocs\` for a list the graph already answered.
+
 **AngelScript / game mode logic**
 1. Locate the script — \`listFiles\` with a \`*.as\` pattern, or \`searchDocs\` with \`type: script_chunk\`.
 2. \`getScriptSymbols\` for the function/class inventory with line numbers.
@@ -118,11 +123,34 @@ The user selected the package **${mod}**. Every tool is already restricted to it
 }
 
 /**
- * The system prompt for a request. Pass the selected package to append the scope constraint —
- * the same string must be used for both the LLM call and the token accounting.
+ * Operator-supplied playbooks that this question activated, appended verbatim.
+ *
+ * Placed **after** the package-scope section on purpose: scope is a hard constraint, and a skill is
+ * advice. Whatever an author writes, it arrives already framed as advice that the constraints above
+ * outrank — a skills directory is an extension point, not a way to edit the server's own rules.
  */
-export function buildSystemPrompt(mod?: string): string {
-  return mod ? SYSTEM_PROMPT + packageScopeSection(mod) : SYSTEM_PROMPT;
+function skillsSection(skills: readonly { name: string; body: string }[]): string {
+  if (skills.length === 0) return '';
+  const blocks = skills.map((s) => `#### ${s.name}\n${s.body}`).join('\n\n');
+  return `
+
+### Operator Playbooks
+Guidance for this kind of question, supplied by whoever runs this deployment. Follow it unless it conflicts with an instruction above — those win.
+
+${blocks}`;
+}
+
+/**
+ * The system prompt for a request. Pass the selected package to append the scope constraint, and
+ * the activated skills to append their playbooks — the same string must be used for both the LLM
+ * call and the token accounting, or the breakdown reports a prompt that was never sent.
+ */
+export function buildSystemPrompt(
+  mod?: string,
+  skills: readonly { name: string; body: string }[] = [],
+): string {
+  const base = mod ? SYSTEM_PROMPT + packageScopeSection(mod) : SYSTEM_PROMPT;
+  return base + skillsSection(skills);
 }
 
 const MAX_RESULT_CHARS = 2000;
@@ -162,7 +190,9 @@ export function buildUserPrompt(
   }
 
   if (options?.lowConfidence && results.length > 0) {
-    contextParts.push('[Low Confidence] The following documents were retrieved but may not closely match the query.');
+    contextParts.push(
+      '[Low Confidence] The following documents were retrieved but may not closely match the query.',
+    );
   }
 
   const budget = options?.budgetTokens ?? Infinity;
@@ -173,7 +203,10 @@ export function buildUserPrompt(
     // Once the budget is spent, everything after it is summarised — filling the remaining room with
     // whichever later document happens to be small would scramble the relevance order.
     if (summarised.length === 0) {
-      const content = r.content.length > MAX_RESULT_CHARS ? r.content.slice(0, MAX_RESULT_CHARS) + '…' : r.content;
+      const content =
+        r.content.length > MAX_RESULT_CHARS
+          ? r.content.slice(0, MAX_RESULT_CHARS) + '…'
+          : r.content;
       const block = `[Document ${i + 1}] Type: ${r.type}, Key: ${r.key}\n${content}`;
       const cost = estimateTokens(block);
       if (spent + cost <= budget) {
@@ -196,11 +229,12 @@ export function buildUserPrompt(
 
   const context = contextParts.join('\n\n---\n\n');
 
-  const instruction = results.length === 0
-    ? 'The pre-fetch returned no context documents. This does NOT mean the data is absent — call `searchDocs` now with the item name, then with name variants, then `listFiles` with a glob on the stem. Only report "not found" after those calls come back empty, and list which queries you tried.'
-    : options?.lowConfidence
-      ? 'The retrieved context has low confidence. Check Key fields, Localized Names, and document content — and call `searchDocs` with a better query (bare item name, Key fragment, other language) before drawing any conclusion. Do not answer "not found" without at least 2 failed tool calls.'
-      : `Answer the question using the context documents above. If the queried item is not in these documents, do NOT conclude it is missing — call \`searchDocs\` with the item name and variants, then \`listFiles\` with a glob, before saying anything about absence. Check Key fields (partial/abbreviated names), Localized Names, and document content for the queried term.`;
+  const instruction =
+    results.length === 0
+      ? 'The pre-fetch returned no context documents. This does NOT mean the data is absent — call `searchDocs` now with the item name, then with name variants, then `listFiles` with a glob on the stem. Only report "not found" after those calls come back empty, and list which queries you tried.'
+      : options?.lowConfidence
+        ? 'The retrieved context has low confidence. Check Key fields, Localized Names, and document content — and call `searchDocs` with a better query (bare item name, Key fragment, other language) before drawing any conclusion. Do not answer "not found" without at least 2 failed tool calls.'
+        : `Answer the question using the context documents above. If the queried item is not in these documents, do NOT conclude it is missing — call \`searchDocs\` with the item name and variants, then \`listFiles\` with a glob, before saying anything about absence. Check Key fields (partial/abbreviated names), Localized Names, and document content for the queried term.`;
 
   // The escalation above is about trying harder, not about looking wider — spelled out here
   // because "search again with variants" is otherwise an easy excuse to leave the package.

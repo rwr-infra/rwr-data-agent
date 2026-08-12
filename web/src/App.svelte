@@ -59,6 +59,11 @@
   // off it. Null between blocks (e.g. while a tool runs), which is what stops the caret from
   // blinking on a segment that is already finished.
   let activeBlockId: string | null = $state(null);
+  // The running turn's server-side id, from its `turn-start` frame. This is the key the steer/stop
+  // side channel needs; it is NOT the client's own `turnId`, which groups display blocks. Null while
+  // nothing is running, and against a backend old enough not to announce one — the composer then
+  // falls back to its pre-steering behaviour rather than offering a button that would 404.
+  let serverTurnId: string | null = $state(null);
   let prefillText = $state('');
   let toast = $state<{ message: string; visible: boolean }>({ message: '', visible: false });
   let toastTimer: ReturnType<typeof setTimeout>;
@@ -395,6 +400,25 @@
     await sendMessageInternal(text, false);
   }
 
+  /**
+   * End the running turn now. Whatever was generated stays on screen; the stream closes itself with
+   * `stopReason: 'stopped'`, so there is nothing to tear down here.
+   */
+  async function stopTurn() {
+    const id = serverTurnId;
+    if (!id) return;
+    try {
+      await fetch('/v1/chat/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ turnId: id }),
+      });
+    } catch {
+      // The stream is the source of truth for how the turn ended — a failed stop just means it
+      // keeps running, which the UI already shows.
+    }
+  }
+
   async function sendMessageInternal(text: string, isRetry: boolean, retryTurnId?: string) {
     if (!text || loading) return;
 
@@ -558,7 +582,24 @@
           if (!line.trim()) continue;
           try {
             const event = JSON.parse(line);
-            if (event.type === 'reasoning-delta') {
+            if (event.type === 'turn-start') {
+              // First frame of the stream. Until it lands there is nothing to stop.
+              serverTurnId = typeof event.turnId === 'string' ? event.turnId : null;
+            } else if (event.type === 'steer-applied') {
+              // This composer never steers — it only stops. But `POST /v1/chat/steer` is a public
+              // side channel any client (or a curl) can hit against a turn id, so the frame is still
+              // rendered rather than silently dropped: a redirected answer that showed no reason for
+              // changing course would read as the model losing the thread.
+              // Its own timeline block, so the text above it stays readable as "what the model
+              // thought before being redirected".
+              displayItems.push({
+                type: 'meta',
+                text: tr.steerApplied(String(event.message ?? '')),
+                id: uid(),
+                turnId,
+              });
+              displayItems = displayItems;
+            } else if (event.type === 'reasoning-delta') {
               const r = event.textDelta ?? '';
               if (r) {
                 if (reasonIdx < 0) {
@@ -752,6 +793,7 @@
               // not the wording, so it can be shown in the user's language.
               const stopNote = event.stopReason === 'step-limit' ? tr.stopStepLimit
                 : event.stopReason === 'output-limit' ? tr.stopOutputLimit
+                : event.stopReason === 'stopped' ? tr.stopStopped
                 : null;
               if (stopNote) displayItems.push({ type: 'meta', text: stopNote, id: uid(), turnId });
               displayItems = displayItems;
@@ -801,6 +843,8 @@
     stopTimer();
     maxModeTotal = 0;
     judgePhase = false;
+    // The turn is over on the server too, so steer/stop would 404 from here on.
+    serverTurnId = null;
     // Final state goes in even while hidden: `paint()` may have deferred the last deltas to a rAF
     // that will not fire until the tab comes back, and the turn is over — one render, not per-delta.
     render();
@@ -972,6 +1016,8 @@
     oninputchange={handleInputChange}
     {prefillText}
     onprefillconsumed={handlePrefillConsumed}
+    stoppable={serverTurnId !== null}
+    onstop={stopTurn}
   />
 
   <SessionDrawer

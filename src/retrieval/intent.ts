@@ -30,15 +30,44 @@ const ENUMERATION_PATTERNS =
  * comparison — it made "定义在哪个文件" a comparison, which then answered a file-location question
  * against the comparison schema. `哪个` only counts when a ranking word follows it.
  */
-const COMPARISON_WORDS = /对比|比较|区别|差异|\bvs\b|versus|\bbetter\b|difference between|compared (?:to|with)/i;
-const COMPARISON_RANKING = /哪(?:个|把|款|种|一个)[^，。？?！!]{0,8}(?:高|低|好|强|弱|大|小|快|慢|多|少|远|近|准|优|厉害)/;
+const COMPARISON_WORDS =
+  /对比|比较|区别|差异|\bvs\b|versus|\bbetter\b|difference between|compared (?:to|with)/i;
+const COMPARISON_RANKING =
+  /哪(?:个|把|款|种|一个)[^，。？?！!]{0,8}(?:高|低|好|强|弱|大|小|快|慢|多|少|远|近|准|优|厉害)/;
 const COMPARISON_PAIR = /和[^，。？?]{1,16}(?:相比|比起来|做对比|比一比)/;
 /** Answered by walking `extends` edges, so the graph tools carry the answer, not the prose. */
-const INHERITANCE_PATTERNS = /继承|父类|基类|基础文件|父文件|派生|模板|继承链|inherit|extends|parent file|base file|derive/i;
+const INHERITANCE_PATTERNS =
+  /继承|父类|基类|基础文件|父文件|派生|模板|继承链|inherit|extends|parent file|base file|derive/i;
 /** Wants a file location or the raw definition — resolve the entity, then read the file. */
-const SOURCE_PATTERNS = /源码|源文件|原始文件|哪个文件|文件在哪|定义在哪|哪里定义|source file|raw file|which file|defined in|file path/i;
+const SOURCE_PATTERNS =
+  /源码|源文件|原始文件|哪个文件|文件在哪|定义在哪|哪里定义|source file|raw file|which file|defined in|file path/i;
 /** AngelScript questions are served by the symbol index, not by full-text prose. */
 const SCRIPT_PATTERNS = /angelscript|\.as\b|脚本|游戏模式|game mode|script|函数签名|hook/i;
+
+/**
+ * A reverse lookup — "what points *at* this thing" — asks for a list, so it reads as an enumeration
+ * and used to be retrieved like one: topK 150. But the complete answer comes from a single
+ * `findReferences` call, so the prose only has to identify the target entity. Retrieving 150
+ * documents instead re-sent ~890K input tokens per turn and left the model searching in circles —
+ * the measured worst case ran 20 steps on one attempt and 41 on the next for the same question.
+ *
+ * Detected as "an enumerating interrogative, then a reference verb". The **order** is what keeps a
+ * forward lookup out: in "G36 使用什么弹药" the interrogative sits *after* the verb, so nothing
+ * matches and the question stays a plain `specific`.
+ *
+ * Both aspects of every verb, in both languages. `used` is spelled out because `uses?` does not
+ * reach it, and the completed aspect is the natural way to ask this in English — "which files used
+ * base_weapon" is the same question as "which files use base_weapon". Chinese already covers it
+ * through `用了`.
+ */
+const REVERSE_SUBJECT = /有哪些|哪些|什么|谁|which|who|what/i;
+const REVERSE_VERB = /引用|用到|使用|用了|reference[sd]?|use[sd]?|using/i;
+
+export function isReverseLookup(query: string): boolean {
+  const subject = query.search(REVERSE_SUBJECT);
+  if (subject < 0) return false;
+  return REVERSE_VERB.test(query.slice(subject));
+}
 
 /**
  * Node types that terminate a key. A query that is essentially one of these keys can skip query
@@ -52,7 +81,11 @@ export function classifyQuery(query: string): QueryCategory {
   // Enumeration and comparison are about the *shape of the answer*, so they win: "有哪些武器继承自 X"
   // still has to enumerate, even though it mentions inheritance.
   if (ENUMERATION_PATTERNS.test(query)) return 'enumeration';
-  if (COMPARISON_WORDS.test(query) || COMPARISON_RANKING.test(query) || COMPARISON_PAIR.test(query)) {
+  if (
+    COMPARISON_WORDS.test(query) ||
+    COMPARISON_RANKING.test(query) ||
+    COMPARISON_PAIR.test(query)
+  ) {
     return 'comparison';
   }
   if (SCRIPT_PATTERNS.test(query)) return 'script';
@@ -83,9 +116,19 @@ export function extractExactKey(query: string): string | null {
  * Enumeration needs breadth because the listing *is* the answer. Inheritance, source and script
  * questions only need enough context to resolve which entity is meant — the answer then comes from
  * the graph tools, so retrieving 30 documents of prose just inflates every step of the tool loop.
+ *
+ * A reverse lookup is the exception that hides inside `enumeration`: its answer is a list, but the
+ * list comes whole from `findReferences`, so it belongs with the graph-answered intents. It is
+ * passed separately rather than folded into `QueryCategory` on purpose — the category also picks
+ * the structured-output schema, and a reverse lookup still wants the enumeration schema.
  */
-export function retrievalTopK(category: QueryCategory, exactKey: boolean): number {
+export function retrievalTopK(
+  category: QueryCategory,
+  exactKey: boolean,
+  reverseLookup = false,
+): number {
   if (exactKey) return 5;
+  if (reverseLookup) return 12;
   switch (category) {
     case 'enumeration':
       return 150;
@@ -98,7 +141,8 @@ export function retrievalTopK(category: QueryCategory, exactKey: boolean): numbe
   }
 }
 
-const META_PATTERNS = /^(你是谁|你有什么能力|你好|你叫什么|介绍一下你自己|你是什么|who are you|what can you do|hello|hi\b|what are you|tell me about yourself|你的功能|你能做什么|你能干什么|你能帮什么)/i;
+const META_PATTERNS =
+  /^(你是谁|你有什么能力|你好|你叫什么|介绍一下你自己|你是什么|who are you|what can you do|hello|hi\b|what are you|tell me about yourself|你的功能|你能做什么|你能干什么|你能帮什么)/i;
 
 export function isMetaQuery(query: string): boolean {
   const trimmed = query.trim();
