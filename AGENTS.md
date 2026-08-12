@@ -27,7 +27,8 @@ The repo is an npm workspace. `packages/agent-core` (`@rwr/agent-core`) holds th
 
 Two consequences worth knowing before you build:
 
-- **The package builds first.** `npm run typecheck` and `npm run build` both start with `build:core`, because the root program resolves `@rwr/agent-core` through `node_modules` to the package's emitted `dist/*.d.ts`. Typechecking against a package that has never been built fails with "cannot find module".
+- **The package builds first — in every script that resolves it.** `lint`, `test`, `typecheck` and `build` all start with `build:core`, because the root program reaches `@rwr/agent-core` through `node_modules` to the package's *emitted* `dist/` — `.d.ts` for the type-aware tools, `.js` for vitest. Miss it in any one of them and that script fails on a tree where the package has never been built, in a way that names anything but the cause: `tsc` says "cannot find module", vitest says the import failed, and ESLint says nothing about modules at all — it reports several hundred `no-unsafe-*` errors in the *consumer* files, because `projectService` resolved the import to an error type and every use of it then looks unsafe. That last one is why this bullet lists the scripts individually: it cost a red CI run that read as a code-quality problem in `src/`.
+  - Adding a script that typechecks or imports the package means adding `build:core` to it too. If you ever want to drop the requirement, the only real fix is making the root program typecheck against the package's *source* (path mapping or project references) — but the root `tsconfig.json` pins `rootDir: ./src` for emit, so that is a build-layout change, not a one-liner.
 - **`private: true`, version `0.0.0`, not published.** The workspace gives the boundary its teeth today; publishing would additionally promise API stability, and the API has not been used by anyone yet. Publishing is one `package.json` edit away when it has.
 
 ## Critical Conventions
