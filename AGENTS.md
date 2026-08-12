@@ -1,6 +1,8 @@
 # AGENTS.md
 
 > This is the single source of truth for agent guidance in this repository. `CLAUDE.md` is a pointer to this file.
+>
+> **Decisions** — why things are the way they are, and what was deliberately rejected — live in `adr/`, alongside a glossary for the terms that are easy to conflate (`turn` vs `step`, spend vs occupancy, `package` vs `mod`, trigger vs skill). Like `docs/`, that directory is **gitignored and local-only**, so this file stays the single source of truth: anything a fresh clone must know belongs here, not only there.
 
 ## Project Overview
 
@@ -8,11 +10,31 @@ An AI agent over *Running With Rifles* game data. Fastify server, **OpenAI-compa
 
 **There is no database.** Postgres, pgvector, embeddings, reranking and the two-stage extract/embed pipeline were all removed — the only external service is the LLM endpoint.
 
+## Layout: `packages/agent-core` vs the app
+
+The repo is an npm workspace. `packages/agent-core` (`@rwr/agent-core`) holds the parts that are not about this game:
+
+| Module | What |
+|---|---|
+| `steering/` | The in-flight turn registry — `createTurn` / `steerTurn` / `stopTurn` / `endTurn` |
+| `session/` | `createMemorySessionStore(ttlMs)` — keyed per-session state that evicts |
+| `plugins/` | The plugin loader: discovery, validation, per-file failure isolation, trigger normalization |
+| `transport/` | `PROTOCOL_VERSION`, the NDJSON event union, `encodeEvent` |
+
+**The loop is deliberately not in it.** The AI SDK already ships one, and re-implementing it would buy nothing — see [Step budget](#step-budget-max_tool_steps-default-100) and the SDK's `ToolLoopAgent`.
+
+**The one architectural rule: `agent-core` may not import a domain module** (`config`, `retrieval/`, `ingestion/`, `indexing/`, `agent/tools.ts`). This is enforced by `@typescript-eslint/no-restricted-imports` in `eslint.config.js`, not by convention — the rule *is* the evidence that the package is reusable, and a directory that merely looks separate gets punctured the first time someone is in a hurry. Whatever the core needs, the domain passes in: `loadToolPlugins({ dir, host, reservedNames })` is the pattern, with `ToolHost` and `createToolHost` staying in `src/agent/plugins.ts`.
+
+Two consequences worth knowing before you build:
+
+- **The package builds first.** `npm run typecheck` and `npm run build` both start with `build:core`, because the root program resolves `@rwr/agent-core` through `node_modules` to the package's emitted `dist/*.d.ts`. Typechecking against a package that has never been built fails with "cannot find module".
+- **`private: true`, version `0.0.0`, not published.** The workspace gives the boundary its teeth today; publishing would additionally promise API stability, and the API has not been used by anyone yet. Publishing is one `package.json` edit away when it has.
+
 ## Critical Conventions
 
 - **ESM only** (`"type": "module"`, `NodeNext`). Relative imports carry `.js` extensions even in `.ts` sources. The `~/*` tsconfig alias exists but is unused — follow the relative-import style.
-- Strict TypeScript. No unit-test runner; `npm run eval` + curl smoke tests are the correctness net.
-- `npm run lint` (ESLint 10 flat config, `eslint.config.js`) and `npm run typecheck` (`tsc --noEmit`) are both green and both required. Type-aware rules (`recommendedTypeChecked`) apply to `src/`; `api/`, `types/`, `tools.d/` get syntax-layer checks only — `api/` imports from the gitignored `dist/`, so type-aware rules there would depend on having built first. `web/` has its own Svelte toolchain and is out of scope.
+- Strict TypeScript. Three nets, in ascending cost: `npm run test` (vitest, pure functions only — deterministic, no LLM), `npm run eval` (retrieval, no LLM), `npm run eval:agent` (real tool loop, spends quota). See [Testing](#testing).
+- `npm run lint` (ESLint 10 flat config, `eslint.config.js`), `npm run typecheck`, `npm run format:check`, `npm test` and `npm run build` are all green and all gated in CI. Type-aware ESLint rules (`recommendedTypeChecked`) apply to `src/`; `api/`, `types/`, `tools.d/` get syntax-layer checks only — `api/` imports from the gitignored `dist/`, so type-aware rules there would depend on having built first. `web/` is out of ESLint's scope (its own Svelte toolchain) but **not** out of typecheck's: `typecheck` ends with `npm run web:check` → `svelte-check`, because `vite build` compiles `.svelte` without typechecking it, so a UI type error surfaces there or nowhere.
 
 ## Developer Commands
 
@@ -26,13 +48,16 @@ npm start               # node dist/api/server.js
 npm run build:index     # rebuild graph + search indexes (also runs automatically at startup)
 npm run build:index:prod # same, from dist/ (no tsx)
 npm run validate:index  # smoke-test the 7 graph tools against the built index
+npm run test            # vitest over tests/unit/ — pure functions, no LLM calls, ~1s
+npm run test:watch      # same, in watch mode
 npm run eval            # retrieval eval harness → src/eval/run.ts (no LLM calls)
 npm run eval:agent      # tool-loop eval → src/eval/agent.ts (spends LLM quota)
 
 npm run lint            # eslint . --max-warnings 0
 npm run lint:fix        # same, with --fix
-npm run typecheck       # tsc --noEmit
-npm run format          # Prettier over src/ api/ types/ tools.d/
+npm run typecheck       # tsc --noEmit for src/, tsc -p tests, then svelte-check over web/
+npm run web:check       # svelte-check alone (needs `npm run web:install` first)
+npm run format          # Prettier over src/ types/ tools.d/ tests/ packages/
 npm run format:check    # same, check-only
 ```
 
@@ -172,7 +197,7 @@ Node `file` paths are relative to the **data root** (not the package dir), so on
 
 Every one of them takes an optional trailing `mod` (the request's selected package) — see [`body.mod` scopes the whole turn](#bodymod-scopes-the-whole-turn-not-just-retrieval).
 
-Wrapped as AI SDK `tool()` definitions in `toolDefs.ts` and passed to `streamText({ tools, stopWhen: stepCountIs(100) })`. Tool-call/result events stream to the frontend as `tool-step` NDJSON lines.
+Wrapped as AI SDK `tool()` definitions in `toolDefs.ts` and passed to `streamText({ tools, stopWhen: stepCountIs(MAX_TOOL_STEPS) })`. Tool-call/result events stream to the frontend as `tool-step` NDJSON lines.
 
 ### Tool execution envelope (src/agent/toolRuntime.ts)
 
@@ -216,6 +241,25 @@ export default function register(host) {
 - **No shadowing.** A plugin whose `name` matches a built-in is rejected, so an external file cannot hijack core behaviour.
 - **Hot reload** (`TOOLS_HOT_RELOAD`, defaults on outside production): `fs.watch` + 300ms debounce sets a dirty flag; the reload itself happens when the next request asks for tools, so an in-flight stream is never swapped. It works via `import(url + '?v=<mtime>')` — the ESM module cache cannot be purged, so each reload leaks the previous module. That is why it defaults off in production.
 - **`GET /v1/tools`** reports `{ builtin, plugins[], toolsDir, hotReload }` with per-file errors. Hot reload without this is undebuggable.
+
+## Skills (src/agent/skills.ts, SKILLS_DIR)
+
+The third extension point, next to built-in tools and `tools.d` plugins. A **tool** is an action the model can take; a **skill** is knowledge about *how* to act — a playbook for one mod's quirks, a house style for a class of question. Adding one is dropping a markdown file in `SKILLS_DIR` (default `./skills.d`), not editing the prompt in this repo, which is what makes skills the main carrier for domain knowledge in a self-hosted deployment.
+
+```markdown
+---
+name: inheritance-depth-order
+triggers: [继承, 父类, inherit, extends]
+---
+Order the answer by depth, cite each layer's file, and say which layer won.
+```
+
+- **Triggers are mandatory here — the opposite of a plugin tool, and deliberately so.** Hiding a tool from the first step costs the model an option it can still ask for on a later one. Prose has no such recovery: an always-on skill is paid for in *every* turn's context whether or not it is relevant. A skill declaring no triggers is a configuration error, recorded and skipped.
+- Matching is the same case-insensitive substring check as `triggers` on a plugin tool — one mental model for "when does my extension fire". CJK works because it is plain string inclusion.
+- Activated skills are appended to the system prompt **after** the package-scope section, framed as advice the constraints above outrank. A skills directory is an extension point, not a way to edit the server's own rules.
+- Frontmatter parsing is a deliberately tiny reader (`key: value`, with `triggers` accepting `[a, b]` or a `-` list) — not YAML. A dependency to parse six lines of metadata is a poor trade, and a partial YAML implementation that silently mis-parses an author's file is worse than one that understands two shapes.
+- Failure is per file, like plugins: a malformed skill is recorded on its `/v1/tools` entry and skipped. Hot reload shares `TOOLS_HOT_RELOAD` and the same timing rule — a change flips a dirty flag, the reload happens on the *next* request, so an in-flight turn never has its prompt swapped underneath it.
+- `GET /v1/tools` reports `skills[]` (with per-file errors) and `skillsDir` alongside the tool inventory.
 
 ### Progressive tool disclosure (`src/agent/toolSelection.ts`)
 
@@ -274,6 +318,8 @@ Diagrams for the request pipeline, the tool loop, the stream contract and the in
 | Route | Purpose |
 |---|---|
 | `POST /v1/chat/completions` | Main endpoint. Extra fields: `mod`, `response_format`, `mode` ('max' = best-of-N), `candidates` |
+| `POST /v1/chat/steer` | `{turnId, message}` → add an instruction to a *running* turn. See [Steering](#steering-a-running-turn-srcagentturnregistryts) |
+| `POST /v1/chat/stop` | `{turnId}` → end a running turn, keeping what it already produced |
 | `GET /v1/models` | Model list |
 | `GET /v1/packages` | Packages in the current index (`name`, `displayName`, `count`) |
 | `GET /v1/tools` | Tool inventory: built-ins, plugin entries with per-file errors, `toolsDir`, `hotReload` |
@@ -293,24 +339,58 @@ Diagrams for the request pipeline, the tool loop, the stream contract and the in
 10. Tools come from `getAgentTools()` (`src/agent/toolDefs.ts`), re-queried per request so hot-reloaded plugins take effect.
 11. `streamText` with graph tools, or `streamObject` with `EnumResultSchema`/`ComparisonResultSchema` (`src/types/schemas.ts`) when the query is enumeration/comparison **and** `response_format: json_object` (or `x-response-format`) is set.
 
-### Streaming format
-Custom **NDJSON**, not SSE. One JSON object per line, keyed by `type`: `text-delta`, `reasoning-delta`, `json-delta`, `tool-step`, `finish`, `error`. Treat these shapes as a contract with the Web UI — **extend with new optional fields, never repurpose an existing one.**
+### Steering a running turn (src/agent/turnRegistry.ts)
 
+A turn is one long-lived `POST /v1/chat/completions`, and its request body was consumed before the first token went out — so there is nowhere on that connection to say anything else. `POST /v1/chat/steer` and `POST /v1/chat/stop` are that "anything else", keyed by the `turnId` the stream announces in `turn-start`.
+
+`createTurn(abort)` registers the turn; the route keeps owning the `AbortController` and **must** call `endTurn(id)` in its `finally`. The registry's TTL sweep (30 min, lazy, on create) only covers a crash that skipped it.
+
+**Steering is sticky, not a queue.** Accepted messages accumulate and `prepareStep` re-appends *all* of them on *every* later step. This is not a style choice: the AI SDK rebuilds `messages` from the original input plus its own accumulated response on each step, so a `prepareStep` rewrite reaches only that one outgoing request. Measured — injecting once left the instruction alive only because the provider happened to echo the model's `reasoning_content` back. Caps: 8 messages per turn, 2000 chars each, because every one of them is re-sent on every step.
+
+Two ordering rules inside `prepareStep`:
+- **Append before `shaper.prepare()`.** The shaper's `replay[]` is what token accounting attributes against; injecting after it would leave the appended message off the books.
+- **Pass `messages` explicitly once there is any steering.** `shaper.prepare()` reports "nothing to rewrite" as `{}`, and the SDK then falls back to its own list — silently dropping the injection.
+
+`stopTurn` fires the same `AbortController` a client disconnect uses, so the two are told apart by `stoppedByUser()`: a user stop keeps everything generated and finishes with `stopReason: 'stopped'`; a disconnect has nobody left to finish for.
+
+**An abort does not reliably throw out of `fullStream`.** Measured: the SDK ended the iterator *gracefully* with `finishReason: 'other'`, so a `try/catch` around the loop never fired and the stopped turn reported `completed`. The stop reason therefore comes from asking the registry after the loop, not from catching. The catch is still needed for the case where it does throw — and that is the only case that skips `result.totalUsage` / `usage` / `steps`, because a gracefully-ended stream still has real usage that would otherwise be thrown away and reported as an estimate.
+
+⚠️ **Process-local, single-replica.** Behind more than one replica a steer request lands on a process that never heard of the turn and answers 404. Fixing that means shared state; until then this deployment stays one service.
+
+### Streaming format
+Custom **NDJSON**, not SSE — the OpenAI-shaped path is a naming coincidence, not a wire promise, and a real OpenAI client cannot read this stream. One JSON object per line, keyed by `type`: `turn-start`, `text-delta`, `reasoning-delta`, `json-delta`, `tool-step`, `steer-applied`, `finish`, `error`, `ping`. Treat these shapes as a contract with the Web UI — **extend with new optional fields, never repurpose an existing one.**
+
+- `turn-start` — first line of every stream: `turnId` (the steer/stop key) and `protocolVersion`. It also commits the response head at a buffering proxy, the job the first heartbeat ping used to do alone — so it goes out even when `STREAM_HEARTBEAT_MS=0`. A client that never sees one is talking to a pre-steering backend and must keep its old behaviour rather than offering buttons that would 404.
+- `steer-applied` — a steering message reached the loop: `turnId`, `step`, `message`. Emitted **once per message**, not once per step, even though the injection itself repeats on every later step.
 - `tool-step` — emitted twice per call: opening (`toolCallId`, `toolName`, `summary`) and closing (same `toolCallId`, `done: true`, `ok`, `durationMs`). `ok: false` marks a failed call; the UI must still close the card or a failure reads as still running. **`toolCallId` is the pairing key** — the UI renders one card per call and updates it in place. Against a backend old enough not to send it, the closing event pairs with the turn's still-open card (calls never overlap within a turn); a closing event with no open card at all still renders as a closed card — the outcome is shown rather than dropped. Opening carries the argument summary, closing the result summary; neither is the raw input/output, and neither should grow into it.
-- `finish` — `stopReason` is `completed` | `step-limit` | `output-limit`. `usage` separates **spend** from **occupancy**: `promptTokens`/`completionTokens` sum every step of the tool loop, while `contextTokens` is what the *next* request will carry (the tool transcript is excluded — it never survives the turn, and the UI gates sending on this number). `maxContextTokens` lets the UI follow server config. `breakdown` attributes the totals per slice, with `exact` listing which figures the provider reported verbatim.
+- `finish` — `stopReason` is `completed` | `step-limit` | `output-limit` | `stopped`. Clients **must** have a default branch: adding a value here is allowed by the contract, changing what one means is not. `usage` separates **spend** from **occupancy**: `promptTokens`/`completionTokens` sum every step of the tool loop, while `contextTokens` is what the *next* request will carry (the tool transcript is excluded — it never survives the turn, and the UI gates sending on this number). `maxContextTokens` lets the UI follow server config. `breakdown` attributes the totals per slice, with `exact` listing which figures the provider reported verbatim.
 - `error` — the stream itself broke. **Not** used for tool failures (those are `tool-step` with `ok: false`) or for stop reasons (those are `finish.stopReason`). Never put user-facing prose here that the frontend could localize itself.
 
-### Known gap: the step limit is unbounded in practice
-`stopWhen: stepCountIs(100)` is a runaway backstop, not a budget — so a single question has no real cost ceiling. `npm run eval:agent` measured 2–20 steps across its eight cases, and one case ("有哪些武器引用了 bullet.projectile", answerable by a single `findReferences` call) took **20 steps / 889K input tokens on one run and 41 steps / 2.5M on the next** — same question, 3× spread. Two eval cases carry step budgets they currently exceed for this reason.
+### Step budget (`MAX_TOOL_STEPS`, default 100)
 
-Before lowering it, note two causes worth fixing first, because they may remove the need:
-- "有哪些 X 引用了 Y" classifies as `enumeration` (topK 150) when it is a reverse lookup that wants `findReferences` and topK 12.
-- `SYSTEM_PROMPT` tells the model to work in 3–6 calls and settle absence in 4–6 attempts; measured runs reach 28–64. Either the constraint needs teeth or the wording needs to stop claiming a budget nothing enforces.
+`npm run eval:agent` once measured "有哪些武器引用了 bullet.projectile" — answerable by a single `findReferences` call — at **20 steps / 889K input tokens on one run and 41 steps / 2.5M on the next**. Same question, 3× spread.
+
+**The step cap is not the lever for that.** It stays at 100, the historical value, now behind `MAX_TOOL_STEPS` so an operator can lower it. A deep question needs the room: a reference or inheritance chain crossing several packages is *sequential* — each `readSource` depends on what the previous layer reported — and truncating it mid-walk yields a confidently wrong answer rather than a slow one.
+
+**Steps are not tool calls.** One step can fan out many parallel calls, and measured runs do: 15 calls in 9 steps, and 54 `getScriptSymbols` in a single step. A cap on steps therefore bounds round-trips, not work — which is why the two fixes below are what actually moved the numbers:
+
+1. **Reverse lookups no longer retrieve like enumerations.** `isReverseLookup()` (`src/retrieval/intent.ts`) drops "有哪些 X 引用了 Y" from topK 150 to 12, because `findReferences` returns that list whole. Detected as *an enumerating interrogative followed by a reference verb* — the **order** is load-bearing, since a forward lookup ("G36 使用什么弹药") puts the interrogative after the verb and must not match. It is passed to `retrievalTopK` separately rather than becoming a `QueryCategory`, because the category also picks the structured-output schema and a reverse lookup still wants the enumeration schema.
+   - This only bites the phrasings that do *not* reduce to one key. The eval's own "有哪些武器引用了 bullet.projectile？" already hit the exact-key fast path (topK 5) before the change — so the breadth was never that case's problem, which is why measuring before blaming mattered.
+2. **A `SYSTEM_PROMPT` playbook** points those questions at one `findReferences` call and tells the model not to go hunting with `searchDocs` afterwards.
+
+Measured after both, on the same non-deterministic harness (single runs, but well outside the previously observed ranges — and both finished on their own, not on the cap):
+
+| Case | Before | After |
+|---|---|---|
+| `agent-references` | 20–41 steps · 889K–2.5M in | **5 steps · 4 calls · 59K in** |
+| `agent-absence-escalation` | 14 steps · 28 calls · 523K in | **9 steps · 15 calls · 319K in** |
+
+Still open: the prompt claims a 3–6 call budget that nothing enforces.
 
 ### Best-of-N synthesis ("max mode")
 `mode: 'max'` on `/v1/chat/completions` (the UI's per-message Max toggle) runs **N parallel candidate agent loops, then one tool-less synthesis ("judge") call** that merges the drafts into the final answer. Orchestrated by `runBestOfN()` (`src/agent/synthesize.ts`), prompted by `buildSynthesisPrompt()` (`src/retrieval/synthesisPrompt.ts`). Not Cursor-style Max mode: this is best-of-N / self-consistency, and there is **no quota, billing or tiering** — a per-message toggle and an env-guarded N.
 
-- **Cost guardrail is the whole point.** The normal loop's 100-step stop is unbounded in practice (see the gap above); best-of-N multiplies spend by N, so every candidate runs under `stopWhen: stepCountIs(BEST_OF_N_MAX_STEPS)` (default **6**) — deliberately tight. Do not raise it casually, and never widen the candidate count beyond `BEST_OF_N`/`body.candidates` (clamped to ≤ 8).
+- **Cost guardrail is the whole point.** The normal loop's `MAX_TOOL_STEPS` backstop is 100; best-of-N multiplies spend by N, so every candidate runs under `stopWhen: stepCountIs(BEST_OF_N_MAX_STEPS)` (default **6**) — deliberately tight. Do not raise it casually, and never widen the candidate count beyond `BEST_OF_N`/`body.candidates` (clamped to ≤ 8).
 - **Retrieval and the tool registry are shared, once.** `ragUserPrompt`, `tools`, disclosure metadata and the input-token estimates are computed once; only each candidate's temperature/seed (`buildCandidateProviderOptions`) and its own transcript shaper differ. Every candidate must get **its own** `createToolTranscriptShaper()` — the shaper holds mutable `replay` state.
 - **Candidates reuse the full tool surface**: `prepareStep` disclosure, `repairToolCall` aliases, `toolRuntime` envelope — the same as the normal path, so a candidate cannot drift from normal behaviour.
 - **Failure policy** (`runBestOfN` never throws): fewer than 2 successful drafts, or a judge that fails/produces nothing, degrades to the "best" draft (most steps, `finishReason` ≠ error) emitted as a one-shot `text-delta`. All candidates failed → whatever partial text the longest run produced, `stopReason` stays `completed`. Judge `length` → `output-limit`.
@@ -346,7 +426,8 @@ Streaming state lives in two variables: `streaming` (the turn is live — its ac
 | `GRAPH_PATH` / `SEARCH_INDEX_PATH` | `<OUTPUT_DIR>/…` | Individual overrides |
 | `AUTO_BUILD_INDEX` | `true` | |
 | `TOOLS_DIR` | `./tools.d` | Runtime tool plugins; skipped if absent |
-| `TOOLS_HOT_RELOAD` | on outside prod | Watch `TOOLS_DIR` and reload on the next request |
+| `TOOLS_HOT_RELOAD` | on outside prod | Watch `TOOLS_DIR` and `SKILLS_DIR`, reload on the next request |
+| `SKILLS_DIR` | `./skills.d` | Markdown playbooks appended to the system prompt on a trigger match. See [Skills](#skills-srcagentskillsts-skills_dir) |
 | `TOOL_DISCLOSURE_THRESHOLD` | `12` | Progressive tool disclosure gate: above this tool count the first step exposes built-ins + trigger-matched plugins only; `0` disables |
 | `PORT` | `3000` | |
 | `MAX_CONTEXT_TOKENS` | `500000` | Also reported to the UI on `finish`, so the usage bar follows it |
@@ -355,6 +436,7 @@ Streaming state lives in two variables: `streaming` (the turn is live — its ac
 | `API_TOKEN` | empty (no auth) | When set, `/v1/*` needs `Authorization: Bearer` or `x-api-key` |
 | `MAX_CONVERSATION_ROUNDS` | `20` | Max rounds one thread may carry (round = question + answer, counted off the replayed history). Past it `/v1/chat/completions` answers 400 `conversation_limit_exceeded`; `0` disables |
 | `CONTEXT_BUDGET_TOKENS` | `24000` | Cap on full-text retrieved context; the rest become one-liners |
+| `MAX_TOOL_STEPS` | `100` | Runaway backstop for the agent loop, in LLM round-trips (not tool calls). See [Step budget](#step-budget-max_tool_steps-default-100) |
 | `TOOL_TIMEOUT_MS` | `15000` | Deadline per tool execution; expiry returns `{error, hint}` |
 | `TOOL_CONTEXT_BUDGET_RATIO` | `0.75` | Window fraction a step's prompt may fill before old tool results are shed |
 | `TOOL_SHED_RESULT_TOKENS` | `600` | Size an old tool result is shrunk to when shedding is unavoidable |
@@ -389,12 +471,22 @@ Workshop packages live at `steamapps/workshop/content/270150/<itemid>/<pkgname>/
 
 ## Testing
 
+Three nets, in ascending cost. Reach for the cheapest one that can catch the class of bug you are risking — see [ADR-0005](./adr/0005-vitest-for-pure-functions.md) for why the eval harnesses alone were not enough.
+
+- `npm run test` — vitest over `tests/unit/`. **Pure functions only**: intent classification, tool disclosure, the transcript shaper, token accounting, the tool envelope, plugin loading. Deterministic, no LLM, no network, ~1s. These cover exactly what the eval harnesses cannot notice — a token-attribution drift or a disclosure regression breaks no eval assertion.
+  - **Keep the boundary.** Once a test needs a mocked LLM provider to assert loop behaviour, it belongs in `eval:agent` instead; maintaining provider mocks costs more than the bugs they catch.
+  - `tests/tsconfig.json` exists because the root config pins `rootDir: ./src` for the build, and ESLint's `projectService` refuses to lint a TS file belonging to no project. `npm run typecheck` runs both.
+  - Two assertions are **safety** assertions, not regression ones, and must never be relaxed: `repairToolCall` maps no write/shell/exec name, and a plugin may not shadow a built-in.
 - `npm run eval` — 30-case retrieval harness over `tests/eval/dataset.json`, writes a timestamped report into `tests/eval/`. **No LLM calls.** Note the dataset references some keys that no longer exist in the current `./data` snapshot, so absolute recall understates real quality; track deltas, not the absolute number. Baseline on the current snapshot: 15/30 (R@5 0.533, MRR@10 0.507).
 - `npm run eval:agent [id-filter]` — tool-loop harness over `tests/eval/agent-dataset.json`, driving the real route in-process via `app.inject()`. **Spends real LLM quota** (~1–3 min for the full 8 cases) and is non-deterministic, so assertions are "at least this" — `expectedTools` must all have been called, `expectedKeys` must appear in the answer, `stopReason` must be `completed`, and `maxSteps` bounds the loop. Run it after any change to tools, the tool loop, intent classification, or prompt structure.
   - Step budgets come from the design reference (a single-entity question is 1–3 targeted calls) and the system prompt's own "4–6 attempts settle absence" rule, **not** from observed behaviour — so a case that exceeds its budget is reporting a real inefficiency, not a broken test. `agent-references` and `agent-absence-escalation` currently exceed theirs.
+  - **Steering cases run differently.** A case declaring `steer` or `stopAfterToolSteps` cannot use `inject()` — it hands back the whole body once the stream is over, so there is no moment during the turn at which the side channel could be called, and no way to learn the `turnId` in time. Those cases (and only those) run against a real listener on an ephemeral loopback port and read incrementally, exactly as the browser does. The listener is only started when a selected case needs one.
+    - They assert two separate things on purpose: the side channel returned **200** (the server accepted it) *and* a **`steer-applied`** frame arrived (the loop actually carried it). The first can pass while the second fails — that is precisely the bug the sticky-injection rule exists to prevent.
   - Both report files and the eval reports are untracked build artifacts; `tests/eval/report-*.json` is **not** gitignored, so delete stray reports before committing.
 - `npm run validate:index` — exercises all 7 graph tools, picking real sample keys out of the built graph so it works against any data directory.
 
 ## Style
 
 Prettier, configured in `.prettierrc.json` (single quotes, `printWidth` 100, trailing commas, semicolons, 2-space tabs). Prettier does **not** read `.gitignore`, so `.prettierignore` must be kept in sync with it by hand — `web/` is the one manual addition (its own toolchain). Otherwise, match the surrounding code.
+
+The tree was formatted in full and `format:check` is a CI gate, so run `npm run format` before pushing. Prettier does not reflow comments, so the wide comment blocks throughout `src/` are hand-wrapped at the same 100 columns — keep them that way when editing, or they drift out of alignment with the code Prettier does wrap.

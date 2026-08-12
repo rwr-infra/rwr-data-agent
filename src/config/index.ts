@@ -116,6 +116,17 @@ export const config = {
    */
   toolDisclosureThreshold: parseInt(process.env.TOOL_DISCLOSURE_THRESHOLD ?? '12', 10),
 
+  // ── Skills ────────────────────────────────────────────────────────────────
+  /**
+   * Directory of skills: markdown playbooks appended to the system prompt when the question
+   * matches their declared triggers. Optional — skipped if absent.
+   *
+   * This is where domain knowledge belongs in a self-hosted deployment: a mod's quirks are a file
+   * someone drops in, not an edit to the prompt in the codebase. Shares `TOOLS_HOT_RELOAD`, since
+   * both are "operator-editable files reloaded on the next request".
+   */
+  skillsDir: path.resolve(process.env.SKILLS_DIR ?? './skills.d'),
+
   // ── Server ────────────────────────────────────────────────────────────────
   port: parseInt(process.env.PORT ?? '3000', 10),
   /**
@@ -158,6 +169,24 @@ export const config = {
    * enumeration is capped. Raise it if answers start missing attributes the model should have seen.
    */
   contextBudgetTokens: parseInt(process.env.CONTEXT_BUDGET_TOKENS ?? '24000', 10),
+
+  /**
+   * Step cap for the normal agent loop — a runaway backstop, deliberately not a tight budget.
+   *
+   * 100 keeps the historical behaviour, because a genuinely deep question needs the room: a
+   * reference or inheritance chain that crosses several packages is *sequential* — each `readSource`
+   * depends on what the previous layer reported — and truncating it mid-walk produces a confidently
+   * wrong answer rather than a slow one.
+   *
+   * Note this counts **steps, not tool calls**: one step can fan out many parallel calls, and
+   * measured runs do (15 calls in 9 steps; 54 `getScriptSymbols` in a single step). So the real
+   * lever on cost is retrieval breadth and the prompt's playbooks, not this number — lower it only
+   * when an operator wants a hard ceiling and accepts truncated answers as the trade.
+   *
+   * Hitting it is not a silent truncation: `finish.stopReason` reports `step-limit`, and the system
+   * prompt's instruction is to answer from the evidence already gathered.
+   */
+  maxToolSteps: positiveIntEnv('MAX_TOOL_STEPS', 100),
 
   // ── Agent tool transcript ─────────────────────────────────────────────────
   /**
@@ -205,9 +234,8 @@ export const config = {
   /** Number of parallel candidate drafts. Requests may override it via `body.candidates`. */
   bestOfN: positiveIntEnv('BEST_OF_N', 3),
   /**
-   * Per-candidate agent step cap. The normal loop's `stepCountIs(100)` is a runaway backstop,
-   * not a budget — a single question has measured 2.5M input tokens — and best-of-N multiplies
-   * that by N, so each candidate gets a deliberately tight cap.
+   * Per-candidate agent step cap. Tighter than `maxToolSteps` on purpose: best-of-N multiplies
+   * the loop by N, so a budget that is merely sane for one run is N times too loose here.
    */
   bestOfNMaxSteps: positiveIntEnv('BEST_OF_N_MAX_STEPS', 6),
   /**

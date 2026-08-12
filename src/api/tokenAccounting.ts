@@ -182,7 +182,7 @@ export interface ResolvedUsage {
 }
 
 /** Resolve token usage for the finish event. `totalUsage` sums every step of the agent loop while
- *  `usage` covers only the last one — with a 100-step tool loop those differ by an order of
+ *  `usage` covers only the last one — with a multi-step tool loop those differ by an order of
  *  magnitude, so turn totals must come from `totalUsage`.
  *  Many OpenAI-compatible backends omit (or return NaN/0) usage on streamed responses; in that case
  *  fall back to the char basis and flag the result as estimated so the UI can mark it with "~". */

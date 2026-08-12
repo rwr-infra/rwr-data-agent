@@ -26,14 +26,20 @@ function joinNames(names: string[]): string | undefined {
 
 function describe(base: string, s: ReturnType<typeof summarizeSymbols>): string {
   const parts = [`AngelScript file: ${base}.`];
-  if (s.classes.length) parts.push(`Defines ${s.classes.length === 1 ? 'class' : 'classes'} ${s.classes.join(', ')}.`);
+  if (s.classes.length)
+    parts.push(`Defines ${s.classes.length === 1 ? 'class' : 'classes'} ${s.classes.join(', ')}.`);
   if (s.namespaces.length) parts.push(`Namespaces: ${s.namespaces.join(', ')}.`);
-  if (s.functions.length) parts.push(`${s.functions.length} function${s.functions.length === 1 ? '' : 's'}.`);
-  if (s.includes.length) parts.push(`Includes ${s.includes.length} file${s.includes.length === 1 ? '' : 's'}.`);
+  if (s.functions.length)
+    parts.push(`${s.functions.length} function${s.functions.length === 1 ? '' : 's'}.`);
+  if (s.includes.length)
+    parts.push(`Includes ${s.includes.length} file${s.includes.length === 1 ? '' : 's'}.`);
   return parts.join(' ');
 }
 
-export async function parseAngelScriptFile(filePath: string, modName: string): Promise<StructuredDocument[]> {
+export async function parseAngelScriptFile(
+  filePath: string,
+  modName: string,
+): Promise<StructuredDocument[]> {
   const content = await fs.readFile(filePath, 'utf-8');
   return parseAngelScriptContent(content, filePath, modName);
 }

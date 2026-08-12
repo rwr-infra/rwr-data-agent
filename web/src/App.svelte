@@ -59,6 +59,11 @@
   // off it. Null between blocks (e.g. while a tool runs), which is what stops the caret from
   // blinking on a segment that is already finished.
   let activeBlockId: string | null = $state(null);
+  // The running turn's server-side id, from its `turn-start` frame. This is the key the steer/stop
+  // side channel needs; it is NOT the client's own `turnId`, which groups display blocks. Null while
+  // nothing is running, and against a backend old enough not to announce one — the composer then
+  // falls back to its pre-steering behaviour rather than offering a button that would 404.
+  let serverTurnId: string | null = $state(null);
   let prefillText = $state('');
   let toast = $state<{ message: string; visible: boolean }>({ message: '', visible: false });
   let toastTimer: ReturnType<typeof setTimeout>;
@@ -395,6 +400,49 @@
     await sendMessageInternal(text, false);
   }
 
+  /**
+   * Add an instruction to the turn already streaming. It lands on the loop's next step — the
+   * current one is in flight with the provider, and cancelling it would throw away reasoning the
+   * user has already paid for. Everything found so far is kept.
+   *
+   * The `steer-applied` frame is what renders the confirmation, not this call: a 200 only means the
+   * server accepted it, while that frame means the loop actually carried it.
+   */
+  async function steerTurn(text: string) {
+    const id = serverTurnId;
+    if (!id) return;
+    try {
+      const res = await fetch('/v1/chat/steer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ turnId: id, message: text }),
+      });
+      // 404 is the ordinary race — the turn finished between the click and the request landing.
+      if (!res.ok) showToast(tr.steerFailed);
+    } catch {
+      showToast(tr.steerFailed);
+    }
+  }
+
+  /**
+   * End the running turn now. Whatever was generated stays on screen; the stream closes itself with
+   * `stopReason: 'stopped'`, so there is nothing to tear down here.
+   */
+  async function stopTurn() {
+    const id = serverTurnId;
+    if (!id) return;
+    try {
+      await fetch('/v1/chat/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ turnId: id }),
+      });
+    } catch {
+      // The stream is the source of truth for how the turn ended — a failed stop just means it
+      // keeps running, which the UI already shows.
+    }
+  }
+
   async function sendMessageInternal(text: string, isRetry: boolean, retryTurnId?: string) {
     if (!text || loading) return;
 
@@ -558,7 +606,20 @@
           if (!line.trim()) continue;
           try {
             const event = JSON.parse(line);
-            if (event.type === 'reasoning-delta') {
+            if (event.type === 'turn-start') {
+              // First frame of the stream. Until it lands there is nothing to steer or stop.
+              serverTurnId = typeof event.turnId === 'string' ? event.turnId : null;
+            } else if (event.type === 'steer-applied') {
+              // The instruction reached the loop. Shown as its own timeline block so the answer
+              // above it stays readable as "what the model thought before being redirected".
+              displayItems.push({
+                type: 'meta',
+                text: tr.steerApplied(String(event.message ?? '')),
+                id: uid(),
+                turnId,
+              });
+              displayItems = displayItems;
+            } else if (event.type === 'reasoning-delta') {
               const r = event.textDelta ?? '';
               if (r) {
                 if (reasonIdx < 0) {
@@ -752,6 +813,7 @@
               // not the wording, so it can be shown in the user's language.
               const stopNote = event.stopReason === 'step-limit' ? tr.stopStepLimit
                 : event.stopReason === 'output-limit' ? tr.stopOutputLimit
+                : event.stopReason === 'stopped' ? tr.stopStopped
                 : null;
               if (stopNote) displayItems.push({ type: 'meta', text: stopNote, id: uid(), turnId });
               displayItems = displayItems;
@@ -801,6 +863,8 @@
     stopTimer();
     maxModeTotal = 0;
     judgePhase = false;
+    // The turn is over on the server too, so steer/stop would 404 from here on.
+    serverTurnId = null;
     // Final state goes in even while hidden: `paint()` may have deferred the last deltas to a rAF
     // that will not fire until the tab comes back, and the turn is over — one render, not per-delta.
     render();
@@ -972,6 +1036,9 @@
     oninputchange={handleInputChange}
     {prefillText}
     onprefillconsumed={handlePrefillConsumed}
+    steerable={serverTurnId !== null}
+    onsteer={steerTurn}
+    onstop={stopTurn}
   />
 
   <SessionDrawer

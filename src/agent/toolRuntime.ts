@@ -50,7 +50,11 @@ function stableStringify(value: unknown): string {
  * see each other. Harmless — these tools are idempotent reads — and the runaway case this guards
  * against is repetition across steps.
  */
-function priorCallCount(messages: ToolCallOptions['messages'], toolName: string, input: unknown): number {
+function priorCallCount(
+  messages: ToolCallOptions['messages'],
+  toolName: string,
+  input: unknown,
+): number {
   const fingerprint = stableStringify(input);
   let count = 0;
   for (const message of messages) {
@@ -109,7 +113,11 @@ function duplicateFailure(priorCalls: number): ToolFailure {
 }
 
 /** Resolve `work` or fail at `timeoutMs`, whichever comes first. Also fails if the request aborts. */
-async function withDeadline<T>(work: Promise<T>, timeoutMs: number, signal: AbortSignal | undefined): Promise<T> {
+async function withDeadline<T>(
+  work: Promise<T>,
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   let onAbort: (() => void) | undefined;
   try {
@@ -140,7 +148,11 @@ async function withDeadline<T>(work: Promise<T>, timeoutMs: number, signal: Abor
  * tool's single required field.
  */
 const TOOL_ALIASES: Record<string, { toolName: string; field: string; argKeys: string[] }> = {
-  grep: { toolName: 'searchDocs', field: 'query', argKeys: ['pattern', 'query', 'regex', 'q', 'search'] },
+  grep: {
+    toolName: 'searchDocs',
+    field: 'query',
+    argKeys: ['pattern', 'query', 'regex', 'q', 'search'],
+  },
   search: { toolName: 'searchDocs', field: 'query', argKeys: ['query', 'pattern', 'q'] },
   search_files: { toolName: 'searchDocs', field: 'query', argKeys: ['query', 'pattern', 'q'] },
   ripgrep: { toolName: 'searchDocs', field: 'query', argKeys: ['pattern', 'query', 'regex'] },
@@ -172,10 +184,14 @@ export const repairToolCall: ToolCallRepairFunction<ToolSet> = ({ toolCall, tool
     return Promise.resolve(null);
   }
 
-  const value = alias.argKeys.map((k) => parsed[k]).find((v) => typeof v === 'string' && v.length > 0);
+  const value = alias.argKeys
+    .map((k) => parsed[k])
+    .find((v) => typeof v === 'string' && v.length > 0);
   if (typeof value !== 'string') return Promise.resolve(null);
 
-  console.warn(`[tool] repaired hallucinated call: ${toolCall.toolName} → ${alias.toolName}(${alias.field}="${value}")`);
+  console.warn(
+    `[tool] repaired hallucinated call: ${toolCall.toolName} → ${alias.toolName}(${alias.field}="${value}")`,
+  );
   return Promise.resolve({
     ...toolCall,
     toolName: alias.toolName,

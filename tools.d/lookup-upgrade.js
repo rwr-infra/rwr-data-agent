@@ -76,7 +76,8 @@ async function buildIndex(sourceDir) {
     }
 
     // giveDigimindItem(cId, pId, "gkw_g41_only.weapon", normalizeWeaponKey(itemKey), "g41")
-    const digimindRe = /giveDigimindItem\(\s*cId\s*,\s*pId\s*,\s*"([^"]+)"\s*,\s*[^,]+,\s*"([^"]+)"/g;
+    const digimindRe =
+      /giveDigimindItem\(\s*cId\s*,\s*pId\s*,\s*"([^"]+)"\s*,\s*[^,]+,\s*"([^"]+)"/g;
     while ((m = digimindRe.exec(content)) !== null) {
       digimindCalls.push({ weaponKey: m[1], pidName: m[2] });
     }
@@ -94,7 +95,9 @@ async function buildIndex(sourceDir) {
         carryItemKey: uc.carryItemKey,
         pidName: uc.pidName,
         sourceWeapons: [...new Set(sourceWeaponsByPid[uc.pidName] ?? [])],
-        upgradedWeapons: digimindCalls.filter((d) => d.pidName === uc.pidName).map((d) => d.weaponKey),
+        upgradedWeapons: digimindCalls
+          .filter((d) => d.pidName === uc.pidName)
+          .map((d) => d.weaponKey),
         englishName: '',
         chineseName: '',
       });
@@ -114,13 +117,17 @@ async function buildIndex(sourceDir) {
 
   // Step 3 — English name → Chinese name
   try {
-    const content = await fs.readFile(path.join(sourceDir, 'languages', 'cn', 'GFL_alltext.xml'), 'utf-8');
+    const content = await fs.readFile(
+      path.join(sourceDir, 'languages', 'cn', 'GFL_alltext.xml'),
+      'utf-8',
+    );
     const cnByEn = {};
     let m;
     const textRe = /<text\s+key="([^"]+)"\s+text="([^"]+)"/g;
     while ((m = textRe.exec(content)) !== null) cnByEn[m[1]] = m[2];
     for (const mapping of mappings) {
-      if (mapping.englishName && cnByEn[mapping.englishName]) mapping.chineseName = cnByEn[mapping.englishName];
+      if (mapping.englishName && cnByEn[mapping.englishName])
+        mapping.chineseName = cnByEn[mapping.englishName];
     }
   } catch {
     /* no cn translations — English names still work */
@@ -203,7 +210,8 @@ export default function register(host) {
         properties: {
           query: {
             type: 'string',
-            description: 'The upgrade item name (Chinese or English), carry_item key, or weapon key',
+            description:
+              'The upgrade item name (Chinese or English), carry_item key, or weapon key',
           },
         },
         required: ['query'],
@@ -226,9 +234,11 @@ export default function register(host) {
         const lower = query.toLowerCase().trim();
         const byKey = (key) => index.mappings[index.keyIndex[key]];
 
-        if (index.cnNameIndex[lower]) return { query, found: true, mapping: byKey(index.cnNameIndex[lower]) };
+        if (index.cnNameIndex[lower])
+          return { query, found: true, mapping: byKey(index.cnNameIndex[lower]) };
         for (const [cnName, key] of Object.entries(index.cnNameIndex)) {
-          if (cnName.includes(lower) || lower.includes(cnName)) return { query, found: true, mapping: byKey(key) };
+          if (cnName.includes(lower) || lower.includes(cnName))
+            return { query, found: true, mapping: byKey(key) };
         }
 
         // Character-level fuzzy match for partial Chinese queries.
@@ -239,22 +249,27 @@ export default function register(host) {
             const nameChars = new Set(cnName.replace(/[^一-鿿]/g, '').split(''));
             let overlap = 0;
             for (const ch of queryChars) if (nameChars.has(ch)) overlap++;
-            if (overlap / queryChars.size >= 0.6 && (!best || overlap > best.overlap)) best = { key, overlap };
+            if (overlap / queryChars.size >= 0.6 && (!best || overlap > best.overlap))
+              best = { key, overlap };
           }
           if (best) return { query, found: true, mapping: byKey(best.key) };
         }
 
-        if (index.enNameIndex[lower]) return { query, found: true, mapping: byKey(index.enNameIndex[lower]) };
+        if (index.enNameIndex[lower])
+          return { query, found: true, mapping: byKey(index.enNameIndex[lower]) };
         for (const [enName, key] of Object.entries(index.enNameIndex)) {
-          if (enName.includes(lower) || lower.includes(enName)) return { query, found: true, mapping: byKey(key) };
+          if (enName.includes(lower) || lower.includes(enName))
+            return { query, found: true, mapping: byKey(key) };
         }
 
         const trimmed = query.trim();
-        if (index.keyIndex[trimmed] !== undefined) return { query, found: true, mapping: byKey(trimmed) };
+        if (index.keyIndex[trimmed] !== undefined)
+          return { query, found: true, mapping: byKey(trimmed) };
 
         for (const mapping of index.mappings) {
           const all = [...mapping.sourceWeapons, ...mapping.upgradedWeapons];
-          if (all.some((w) => w.toLowerCase().includes(lower))) return { query, found: true, mapping };
+          if (all.some((w) => w.toLowerCase().includes(lower)))
+            return { query, found: true, mapping };
         }
 
         return { query, found: false };

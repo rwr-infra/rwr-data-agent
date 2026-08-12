@@ -43,19 +43,24 @@ export function buildBuiltinTools(scope?: string) {
     searchDocs: tool({
       description: scoped(
         'Full-text search over the game data index (the same index the pre-fetched context ' +
-        'came from). Matches Keys, English/Chinese localized names, and document content. ' +
-        'USE THIS FIRST whenever the pre-fetched context does not contain the item the user ' +
-        'asked about — retry with the bare item name, a Key fragment, an alias, or the ' +
-        'English/Chinese equivalent. Never tell the user an item does not exist without ' +
-        'having searched for it here.'),
+          'came from). Matches Keys, English/Chinese localized names, and document content. ' +
+          'USE THIS FIRST whenever the pre-fetched context does not contain the item the user ' +
+          'asked about — retry with the bare item name, a Key fragment, an alias, or the ' +
+          'English/Chinese equivalent. Never tell the user an item does not exist without ' +
+          'having searched for it here.',
+      ),
       inputSchema: z.object({
         query: z
           .string()
-          .describe('Search terms, e.g. "ak47", "AK-47 突击步枪", "gkw_ak". Short and specific beats a full sentence.'),
+          .describe(
+            'Search terms, e.g. "ak47", "AK-47 突击步枪", "gkw_ak". Short and specific beats a full sentence.',
+          ),
         type: z
           .string()
           .optional()
-          .describe('Optional node type filter (weapon, carry_item, projectile, call, character, script_chunk, …)'),
+          .describe(
+            'Optional node type filter (weapon, carry_item, projectile, call, character, script_chunk, …)',
+          ),
         limit: z.number().optional().describe('Max results, 1-30 (default 10)'),
       }),
       execute: async ({ query, type, limit }) => searchDocs(query, type, limit ?? 10, scope),
@@ -64,11 +69,12 @@ export function buildBuiltinTools(scope?: string) {
     getInheritanceChain: tool({
       description: scoped(
         'Trace the full inheritance chain of an entity (weapon, carry_item, etc.). ' +
-        'Returns parent chain (what this entity inherits from via file= attribute) ' +
-        'and children (what inherits from this entity). Use when the user asks about ' +
-        'inheritance, base files, parent templates, or "inherits from". Each layer reports ' +
-        'its own `mod`: a parent may physically live in another package, and that is where ' +
-        'the inherited value comes from — cite the package when it differs.'),
+          'Returns parent chain (what this entity inherits from via file= attribute) ' +
+          'and children (what inherits from this entity). Use when the user asks about ' +
+          'inheritance, base files, parent templates, or "inherits from". Each layer reports ' +
+          'its own `mod`: a parent may physically live in another package, and that is where ' +
+          'the inherited value comes from — cite the package when it differs.',
+      ),
       inputSchema: z.object({
         key: z.string().describe('The entity key (e.g., "m4a1.weapon", "K309.carry_item")'),
       }),
@@ -78,8 +84,9 @@ export function buildBuiltinTools(scope?: string) {
     findReferences: tool({
       description: scoped(
         'Find all entities that reference a given entity (reverse lookup). ' +
-        'Shows who points TO this entity via extends, fires, transforms_to, etc. ' +
-        'Use to answer "who uses this projectile", "which weapons reference this base".'),
+          'Shows who points TO this entity via extends, fires, transforms_to, etc. ' +
+          'Use to answer "who uses this projectile", "which weapons reference this base".',
+      ),
       inputSchema: z.object({
         key: z.string().describe('The entity key to find references for'),
       }),
@@ -89,8 +96,9 @@ export function buildBuiltinTools(scope?: string) {
     getTransformChain: tool({
       description: scoped(
         'Trace the degradation/consumption chain of a carry item (e.g., armor layers). ' +
-        'Items with transform_on_consume transform into another item when consumed. ' +
-        'Use to answer "how many armor layers does X have" or trace armor degradation.'),
+          'Items with transform_on_consume transform into another item when consumed. ' +
+          'Use to answer "how many armor layers does X have" or trace armor degradation.',
+      ),
       inputSchema: z.object({
         key: z.string().describe('The carry item key (e.g., "K309.carry_item")'),
       }),
@@ -100,23 +108,24 @@ export function buildBuiltinTools(scope?: string) {
     readSource: tool({
       description: scoped(
         'Read the raw source file content. Use to inspect exact XML attributes, ' +
-        'verify data, or read AngelScript source code. ' +
-        'Supports optional line range for large files. The result reports the owning `mod`, ' +
-        'and flags `outOfScope` when the file belongs to another package.'),
+          'verify data, or read AngelScript source code. ' +
+          'Supports optional line range for large files. The result reports the owning `mod`, ' +
+          'and flags `outOfScope` when the file belongs to another package.',
+      ),
       inputSchema: z.object({
         file: z.string().describe('Relative file path (e.g., "weapons/m4a1.weapon")'),
         startLine: z.number().optional().describe('Start line (1-indexed)'),
         endLine: z.number().optional().describe('End line (1-indexed)'),
       }),
-      execute: async ({ file, startLine, endLine }) =>
-        readSource(file, startLine, endLine, scope),
+      execute: async ({ file, startLine, endLine }) => readSource(file, startLine, endLine, scope),
     }),
 
     listFiles: tool({
       description: scoped(
         'List indexed files matching a glob pattern. Use to find files by name ' +
-        'when you do not know the exact key. Supports optional type filter. ' +
-        'Patterns use * as wildcard (e.g., "*m4*", "*.weapon").'),
+          'when you do not know the exact key. Supports optional type filter. ' +
+          'Patterns use * as wildcard (e.g., "*m4*", "*.weapon").',
+      ),
       inputSchema: z.object({
         pattern: z.string().describe('Glob pattern (e.g., "*m4*", "*.call")'),
         type: z
@@ -130,8 +139,9 @@ export function buildBuiltinTools(scope?: string) {
     getScriptSymbols: tool({
       description: scoped(
         'Get parsed AngelScript (.as) function/class/include signatures with line numbers. ' +
-        'Use to answer questions about game scripts, custom game modes, hooks, or mod logic. ' +
-        'Much better than reading the full script file for "what functions exist".'),
+          'Use to answer questions about game scripts, custom game modes, hooks, or mod logic. ' +
+          'Much better than reading the full script file for "what functions exist".',
+      ),
       inputSchema: z.object({
         file: z.string().describe('Relative .as file path (e.g., "scripts/start_1.as")'),
       }),
@@ -141,14 +151,14 @@ export function buildBuiltinTools(scope?: string) {
     getNode: tool({
       description: scoped(
         'Look up a single entity by its key. Returns basic info (type, file path, mod). ' +
-        'Use to resolve a key to its source file before calling readSource, ' +
-        'or to verify an entity exists.'),
+          'Use to resolve a key to its source file before calling readSource, ' +
+          'or to verify an entity exists.',
+      ),
       inputSchema: z.object({
         key: z.string().describe('The entity key to look up'),
       }),
       execute: async ({ key }) => getNode(key, scope),
     }),
-
   };
 }
 
@@ -220,7 +230,11 @@ export async function getAgentTools(scope?: string): Promise<Record<string, Tool
   const builtin = buildBuiltinTools(scope) as unknown as Record<string, Tool>;
   builtinNames = Object.keys(builtin);
 
-  const { tools: plugins, entries, triggers } = await loadToolPlugins(createToolHost(scope), builtinNames);
+  const {
+    tools: plugins,
+    entries,
+    triggers,
+  } = await loadToolPlugins(createToolHost(scope), builtinNames);
   pluginEntries = entries;
   // One envelope over built-ins and plugins alike: duplicate guard, deadline, `{error, hint}` on
   // failure. Wrapped here rather than per request so the token-accounting cache keeps its key.
@@ -246,7 +260,12 @@ export async function getAgentTools(scope?: string): Promise<Record<string, Tool
 }
 
 /** Snapshot for GET /v1/tools. Does not trigger a load. */
-export function getToolInventory(): { builtin: string[]; plugins: PluginEntry[]; toolsDir: string; hotReload: boolean } {
+export function getToolInventory(): {
+  builtin: string[];
+  plugins: PluginEntry[];
+  toolsDir: string;
+  hotReload: boolean;
+} {
   return {
     builtin: builtinNames,
     plugins: pluginEntries,

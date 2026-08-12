@@ -1,11 +1,21 @@
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { generateText } from 'ai';
+import { createMemorySessionStore } from '@rwr/agent-core';
 import { config } from '../config/index.js';
 import { SUMMARY_SYSTEM_PROMPT, buildSummaryPrompt } from './prompt.js';
 import { disabledThinkingOptions } from '../llm/providerOptions.js';
 import type { ConversationSummary } from './types.js';
 
-const summaries = new Map<string, ConversationSummary>();
+/**
+ * How long a session's rolling summary is kept after its last update.
+ *
+ * Generous enough that a user who walks away from a chat and comes back the same afternoon still
+ * has their memory — but bounded, because `x-session-id` is minted by the client and the server is
+ * never told when a conversation is abandoned. The eviction itself lives in the core store.
+ */
+const SUMMARY_TTL_MS = 6 * 60 * 60_000;
+
+const summaries = createMemorySessionStore<ConversationSummary>(SUMMARY_TTL_MS);
 
 let provider: ReturnType<typeof createOpenAICompatible> | null = null;
 
@@ -28,16 +38,25 @@ export function setSummary(sessionId: string, summary: ConversationSummary): voi
   summaries.set(sessionId, summary);
 }
 
+/** Live summary count — for tests. */
+export function summaryCount(): number {
+  return summaries.size();
+}
+
 export function clearSummary(sessionId: string): void {
   summaries.delete(sessionId);
 }
 
 function parseSummaryJson(text: string): ConversationSummary | null {
   try {
-    const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const cleaned = text
+      .replace(/```json\n?/g, '')
+      .replace(/```\n?/g, '')
+      .trim();
     // JSON.parse is typed `any`; keep the model's output at arm's length.
     const parsed: unknown = JSON.parse(cleaned);
-    const obj = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
+    const obj =
+      typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
     const summary = obj['summary'];
     const entities = obj['entities'];
     const topic = obj['topic'];
@@ -45,7 +64,9 @@ function parseSummaryJson(text: string): ConversationSummary | null {
     if (typeof summary === 'string' && Array.isArray(entities)) {
       return {
         summary,
-        mentionedEntities: (entities as unknown[]).filter((e): e is string => typeof e === 'string'),
+        mentionedEntities: (entities as unknown[]).filter(
+          (e): e is string => typeof e === 'string',
+        ),
         currentTopic: typeof topic === 'string' ? topic : 'general',
         turnCount: typeof turnCount === 'number' ? turnCount : 0,
         updatedAt: Date.now(),

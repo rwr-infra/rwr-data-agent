@@ -124,7 +124,8 @@ function normalise(msg: Message): { msg: Message; changed: boolean } {
     const content = (msg.content as ContentPart[]).map((part) => {
       if (part.type !== 'tool-result') return part;
       const output = part.output as { type?: string; value?: unknown } | string | undefined;
-      const value = output !== null && typeof output === 'object' && 'value' in output ? output.value : output;
+      const value =
+        output !== null && typeof output === 'object' && 'value' in output ? output.value : output;
       if (value === undefined || safeJson(value) === '') {
         changed = true;
         return { ...part, output: { type: 'text', value: 'null' } };
@@ -141,7 +142,10 @@ function normalise(msg: Message): { msg: Message; changed: boolean } {
     (msg.content as ContentPart[]).length > 0 &&
     !(msg.content as ContentPart[]).some((p) => p.type === 'text')
   ) {
-    return { msg: { ...msg, content: [{ type: 'text', text: ' ' }, ...(msg.content as ContentPart[])] }, changed: true };
+    return {
+      msg: { ...msg, content: [{ type: 'text', text: ' ' }, ...(msg.content as ContentPart[])] },
+      changed: true,
+    };
   }
 
   return { msg, changed: false };
@@ -182,7 +186,10 @@ export interface ShaperOptions {
   shedTargetTokens: number;
 }
 
-export function createToolTranscriptShaper({ budgetTokens, shedTargetTokens }: ShaperOptions): ToolTranscriptShaper {
+export function createToolTranscriptShaper({
+  budgetTokens,
+  shedTargetTokens,
+}: ShaperOptions): ToolTranscriptShaper {
   const budget = Math.max(budgetTokens, MIN_BUDGET_TOKENS);
   const replay: number[] = [];
   const shedSteps: number[] = [];

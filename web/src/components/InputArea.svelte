@@ -18,6 +18,14 @@
     oninputchange: (text: string) => void;
     prefillText?: string;
     onprefillconsumed?: () => void;
+    /**
+     * True once the running turn has announced its id, which is the key the steer/stop side channel
+     * needs. False against a backend old enough not to send `turn-start`, and in the gap before the
+     * first frame arrives — the composer then behaves exactly as it did before steering existed.
+     */
+    steerable?: boolean;
+    onsteer?: (text: string) => void;
+    onstop?: () => void;
   }
   let {
     tr,
@@ -33,6 +41,9 @@
     oninputchange,
     prefillText = '',
     onprefillconsumed,
+    steerable = false,
+    onsteer,
+    onstop,
   }: Props = $props();
 
   let inputText = $state('');
@@ -63,12 +74,19 @@
     }
   }
 
+  /**
+   * Enter does the thing the composer is currently showing: start a turn, or — while one is running
+   * and steerable — add an instruction to it. Without a steerable turn the old behaviour stands:
+   * typing during a stream does nothing until it ends.
+   */
   function submit() {
     const text = inputText.trim();
-    if (!text || loading) return;
+    if (!text) return;
+    if (loading && !steerable) return;
     inputText = '';
     if (textarea) textarea.style.height = 'auto';
-    onsend(text);
+    if (loading) onsteer?.(text);
+    else onsend(text);
   }
 
   $effect(() => {
@@ -101,26 +119,57 @@
       oninput={handleInput}
       onkeydown={handleKeydown}
     ></textarea>
-    <!-- While a turn streams the button spins rather than just greying out: disabled alone reads as
-         "nothing to send", the spinner says "an answer is on its way". Still disabled — the send
-         path is closed either way. -->
-    <button
-      class="btn btn-primary btn-sm join-item shrink-0 self-end h-[44px] w-[44px]"
-      aria-label={loading ? tr.thinking : tr.send}
-      title={loading ? tr.thinking : tr.send}
-      aria-busy={loading}
-      disabled={loading || !inputText.trim()}
-      onclick={submit}
-    >
-      {#if loading}
-        <span class="loading loading-spinner loading-sm"></span>
-      {:else}
+    <!-- Three states for the trailing control:
+         · idle           → Send.
+         · streaming, steerable → Steer (needs text) plus a Stop button. A running answer is no
+           longer a wall: the user can narrow it mid-flight or end it, which is the whole point of
+           the side channel.
+         · streaming, not steerable → the old spinner, disabled. That is the fallback against a
+           backend that never sent `turn-start`. -->
+    {#if loading && steerable}
+      <button
+        class="btn btn-primary btn-sm join-item shrink-0 self-end h-[44px] w-[44px]"
+        aria-label={tr.steer}
+        title={tr.steerHint}
+        disabled={!inputText.trim()}
+        onclick={submit}
+      >
+        <!-- Arrow-into-line: "add this to what is already running", distinct from the plain Send arrow. -->
         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 19V5" />
-          <path d="m5 12 7-7 7 7" />
+          <path d="M12 19V9" />
+          <path d="m8 13 4-4 4 4" />
+          <path d="M5 5h14" />
         </svg>
-      {/if}
-    </button>
+      </button>
+      <button
+        class="btn btn-error btn-outline btn-sm join-item shrink-0 self-end h-[44px] w-[44px]"
+        aria-label={tr.stopTurn}
+        title={tr.stopTurnHint}
+        onclick={() => onstop?.()}
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+          <rect x="5" y="5" width="14" height="14" rx="2" />
+        </svg>
+      </button>
+    {:else}
+      <button
+        class="btn btn-primary btn-sm join-item shrink-0 self-end h-[44px] w-[44px]"
+        aria-label={loading ? tr.thinking : tr.send}
+        title={loading ? tr.thinking : tr.send}
+        aria-busy={loading}
+        disabled={loading || !inputText.trim()}
+        onclick={submit}
+      >
+        {#if loading}
+          <span class="loading loading-spinner loading-sm"></span>
+        {:else}
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 19V5" />
+            <path d="m5 12 7-7 7 7" />
+          </svg>
+        {/if}
+      </button>
+    {/if}
   </div>
 
   <!-- One full-width row: the usage stats on the left, Max-mode toggle on the right. On mobile

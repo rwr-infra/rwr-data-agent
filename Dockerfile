@@ -7,7 +7,11 @@ FROM node:24-slim AS builder
 
 WORKDIR /app
 
+# The workspace manifest has to be in place before `npm ci`, or the root package's dependency on
+# `@rwr/agent-core` cannot be linked. Only the manifest, so editing the package's source does not
+# bust the install layer.
 COPY package*.json ./
+COPY packages/agent-core/package.json ./packages/agent-core/
 RUN npm ci
 
 # web/ must be present before `npm run build` — the build script also runs web:build.
@@ -15,6 +19,7 @@ COPY web ./web
 RUN npm --prefix web install
 
 COPY tsconfig.json ./
+COPY packages ./packages
 COPY src ./src
 
 # The web build bakes this into the header badge. Declared here (not at the top of
@@ -34,11 +39,16 @@ WORKDIR /app
 RUN groupadd -r appgroup && useradd -r -g appgroup appuser
 
 COPY package*.json ./
+COPY packages/agent-core/package.json ./packages/agent-core/
 RUN npm ci --omit=dev && npm cache clean --force
 
+# `npm ci` above linked node_modules/@rwr/agent-core at packages/agent-core, whose manifest points
+# main at ./dist — so the built package has to land there, not in the app's dist.
+COPY --from=builder /app/packages/agent-core/dist ./packages/agent-core/dist
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/public ./public
 COPY tools.d ./tools.d
+COPY skills.d ./skills.d
 
 # /app/data is the mounted RWR data root; /app/output holds the generated indexes.
 RUN mkdir -p /app/data /app/output && chown -R appuser:appgroup /app

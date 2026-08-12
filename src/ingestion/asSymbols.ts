@@ -31,10 +31,13 @@ const CONTROL_KEYWORDS = new Set([
 const TYPE = String.raw`[A-Za-z_][\w:]*\s*(?:<[^<>]*(?:<[^<>]*>)?[^<>]*>)?\s*(?:@|&(?:in|out|inout)?)?(?:\s*\[\s*\])?`;
 
 const RE_INCLUDE = /^\s*#include\s+["<]([^">]+)[">]/;
-const RE_CONTAINER = /^\s*(?:(?:shared|abstract|final|external)\s+)*(class|interface|mixin)\s+([A-Za-z_]\w*)/;
+const RE_CONTAINER =
+  /^\s*(?:(?:shared|abstract|final|external)\s+)*(class|interface|mixin)\s+([A-Za-z_]\w*)/;
 const RE_NAMESPACE = /^\s*namespace\s+([A-Za-z_][\w:]*)/;
 const RE_ENUM = /^\s*(?:shared\s+)?enum\s+([A-Za-z_]\w*)/;
-const RE_FUNCDEF = new RegExp(String.raw`^\s*(?:shared\s+)?funcdef\s+${TYPE}\s+([A-Za-z_]\w*)\s*\(`);
+const RE_FUNCDEF = new RegExp(
+  String.raw`^\s*(?:shared\s+)?funcdef\s+${TYPE}\s+([A-Za-z_]\w*)\s*\(`,
+);
 const RE_FUNCTION = new RegExp(
   String.raw`^\s*(?:(?:private|protected|shared|abstract|final|external|override|explicit)\s+)*` +
     String.raw`(?:const\s+)?(${TYPE})\s+([A-Za-z_]\w*)\s*\(([\s\S]*)\)\s*` +
@@ -180,7 +183,6 @@ export function extractScriptSymbols(source: string, fileBase: string): ScriptSy
     const kw = firstWord(logical);
     const signature = collapse(rawLogical).replace(/\s*\{\s*$/, '');
 
-
     if (!CONTROL_KEYWORDS.has(kw)) {
       const container = logical.match(RE_CONTAINER);
       const ns = logical.match(RE_NAMESPACE);
@@ -198,7 +200,13 @@ export function extractScriptSymbols(source: string, fileBase: string): ScriptSy
         });
         pendingContainer = container[2];
       } else if (ns) {
-        symbols.push({ file: fileBase, name: ns[1], signature, kind: 'namespace', line: startLine });
+        symbols.push({
+          file: fileBase,
+          name: ns[1],
+          signature,
+          kind: 'namespace',
+          line: startLine,
+        });
         pendingContainer = ns[1];
       } else if (en) {
         symbols.push({
@@ -280,7 +288,8 @@ export function extractScriptSymbols(source: string, fileBase: string): ScriptSy
 
 /** Group symbol names by kind — used to build the searchable summary of a script file. */
 export function summarizeSymbols(symbols: ScriptSymbol[]) {
-  const pick = (kind: ScriptSymbol['kind']) => symbols.filter((s) => s.kind === kind).map((s) => s.name);
+  const pick = (kind: ScriptSymbol['kind']) =>
+    symbols.filter((s) => s.kind === kind).map((s) => s.name);
   const dedupe = (xs: string[]) => [...new Set(xs)];
   return {
     includes: dedupe(pick('include')),

@@ -51,6 +51,15 @@ export interface Translations {
   stopStepLimit: string;
   stopOutputLimit: string;
   streamInterrupted: string;
+  /** Mid-stream steering: send an extra instruction into the turn that is already running. */
+  steer: string;
+  steerHint: string;
+  steerApplied: (message: string) => string;
+  steerFailed: string;
+  /** Mid-stream hard stop. */
+  stopTurn: string;
+  stopTurnHint: string;
+  stopStopped: string;
   allPackages: string;
   ctxOver: string;
   reqFailed: string;
@@ -129,6 +138,13 @@ const i18n: Record<Lang, Translations> = {
     stopStepLimit: '⚠ 工具调用已达步数上限，模型未产出最终答案。请缩小问题范围或换用更具体的关键词重试。',
     stopOutputLimit: '⚠ 回答已达输出 token 上限被截断。可提高 LLM_MAX_OUTPUT_TOKENS，或把问题拆成几次提问。',
     streamInterrupted: '⚠ 连接中断，回答未写完。上面是已收到的部分内容，可点重试重新生成。',
+    steer: '补充',
+    steerHint: '给正在进行的回答追加一条指令，下一步生效（已查到的结果全部保留）',
+    steerApplied: (message: string) => `↳ 已补充指令：${message}`,
+    steerFailed: '补充失败：这一轮可能已经结束了。',
+    stopTurn: '停止',
+    stopTurnHint: '立即停止本轮，已生成的内容保留',
+    stopStopped: '⏹ 已按你的要求停止。上面是停止前生成的内容。',
     allPackages: '全部数据包',
     ctxOver: '上下文已达上限，请刷新页面开始新对话',
     reqFailed: '请求失败: ',
@@ -210,6 +226,13 @@ const i18n: Record<Lang, Translations> = {
     stopStepLimit: '⚠ Hit the tool-call step limit without producing a final answer. Narrow the question or retry with more specific terms.',
     stopOutputLimit: '⚠ Answer was cut off at the output token limit. Raise LLM_MAX_OUTPUT_TOKENS, or split the question into several turns.',
     streamInterrupted: '⚠ Connection dropped before the answer finished. What arrived is kept above — use retry to regenerate.',
+    steer: 'Steer',
+    steerHint: 'Add an instruction to the answer in progress. Takes effect on the next step; everything found so far is kept.',
+    steerApplied: (message: string) => `↳ Steered: ${message}`,
+    steerFailed: 'Could not steer — this turn may have already finished.',
+    stopTurn: 'Stop',
+    stopTurnHint: 'Stop this turn now, keeping whatever has been generated',
+    stopStopped: '⏹ Stopped as requested. What is above is everything generated before the stop.',
     allPackages: 'All packages',
     ctxOver: 'Context limit reached, please refresh to start a new conversation',
     reqFailed: 'Request failed: ',

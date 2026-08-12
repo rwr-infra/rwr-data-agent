@@ -40,7 +40,9 @@ async function main() {
   const scriptNode = graph.nodes.find((n) => n.type === 'script');
 
   if (extendsEdge) {
-    await section(`getInheritanceChain("${extendsEdge.from}")`, () => getInheritanceChain(extendsEdge.from));
+    await section(`getInheritanceChain("${extendsEdge.from}")`, () =>
+      getInheritanceChain(extendsEdge.from),
+    );
   }
 
   if (transformEdge) {
@@ -65,7 +67,9 @@ async function main() {
   await section('listFiles("*.call", type=call, limit=5)', () => listFiles('*.call', 'call', 5));
 
   if (scriptNode) {
-    await section(`getScriptSymbols("${scriptNode.file}")`, () => getScriptSymbols(scriptNode.file));
+    await section(`getScriptSymbols("${scriptNode.file}")`, () =>
+      getScriptSymbols(scriptNode.file),
+    );
   }
 
   console.log('\n=== DONE ===');

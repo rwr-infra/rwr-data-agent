@@ -9,7 +9,12 @@ import pLimit from 'p-limit';
 import { collectFiles } from '../ingestion/shared.js';
 import { structuredDocToRWRDocument } from '../ingestion/xmlParser.js';
 import { discoverPackages } from '../ingestion/packages.js';
-import type { StructuredDocument, SearchResult, SearchFilters, DocumentType } from '../types/index.js';
+import type {
+  StructuredDocument,
+  SearchResult,
+  SearchFilters,
+  DocumentType,
+} from '../types/index.js';
 
 export interface IndexEntry {
   id: string;
@@ -72,7 +77,17 @@ export function tokenize(text: string, fieldName?: string): string[] {
 
 const MINI_SEARCH_OPTIONS: Options<IndexEntry> = {
   fields: ['key', 'name', 'i18nNames', 'content', 'type'],
-  storeFields: ['key', 'type', 'name', 'i18nNames', 'content', 'file', 'faction', 'weaponClass', 'mod'],
+  storeFields: [
+    'key',
+    'type',
+    'name',
+    'i18nNames',
+    'content',
+    'file',
+    'faction',
+    'weaponClass',
+    'mod',
+  ],
   tokenize,
   searchOptions: {
     boost: { key: 3, name: 2.5, i18nNames: 2.5, content: 1 },
@@ -214,7 +229,12 @@ export async function computeDataFingerprint(
  * build assigns it as a running counter so entries can be written out and dropped file by
  * file instead of collected into one array first.
  */
-export function entryFromDoc(root: string, pkgName: string, doc: StructuredDocument, seq: number): IndexEntry {
+export function entryFromDoc(
+  root: string,
+  pkgName: string,
+  doc: StructuredDocument,
+  seq: number,
+): IndexEntry {
   const rwr = structuredDocToRWRDocument(doc);
   const absFile = rwr.metadata.file_path ?? doc.source_file;
   return {
@@ -240,7 +260,11 @@ export interface IndexWriter {
   /** Append one entry. Applies backpressure, so memory stays flat however large the index gets. */
   add(entry: IndexEntry): Promise<void>;
   /** Close the body and write the header. Returns how many entries were written. */
-  finish(meta: { dataDir: string; packages: PackageSummary[]; fingerprint: IndexFingerprint }): Promise<number>;
+  finish(meta: {
+    dataDir: string;
+    packages: PackageSummary[];
+    fingerprint: IndexFingerprint;
+  }): Promise<number>;
   /** Discard a partial build without touching the existing index. */
   abort(): Promise<void>;
 }
@@ -390,11 +414,15 @@ async function loadIndex(): Promise<MiniSearch<IndexEntry>> {
       loaded++;
     }
   } catch (err) {
-    throw new Error(`Search index body unreadable at ${bodyPath}: ${(err as Error).message}`, { cause: err });
+    throw new Error(`Search index body unreadable at ${bodyPath}: ${(err as Error).message}`, {
+      cause: err,
+    });
   }
 
   if (loaded !== meta.count) {
-    console.warn(`[localSearch] Index body has ${loaded} entries, header says ${meta.count} — rebuild recommended.`);
+    console.warn(
+      `[localSearch] Index body has ${loaded} entries, header says ${meta.count} — rebuild recommended.`,
+    );
   }
 
   indexCache = index;
@@ -414,10 +442,9 @@ export async function warmSearchIndex(): Promise<IndexMeta | null> {
   return metaCache;
 }
 
-function applyFilters<T extends { type: string; faction: string; weaponClass: string; mod: string }>(
-  results: T[],
-  filters: SearchFilters,
-): T[] {
+function applyFilters<
+  T extends { type: string; faction: string; weaponClass: string; mod: string },
+>(results: T[], filters: SearchFilters): T[] {
   let out = results;
   if (filters.type) out = out.filter((r) => r.type === filters.type);
   if (filters.faction) out = out.filter((r) => r.faction === filters.faction);
@@ -430,9 +457,7 @@ function applyFilters<T extends { type: string; faction: string; weaponClass: st
 function extractEntityTokens(query: string): string[] {
   const tokens = query.match(/[a-zA-Z][a-zA-Z0-9_-]{1,}/g) ?? [];
   const stopWords = new Set(['weapon', 'the', 'and', 'for', 'with', 'list', 'all', 'data']);
-  return tokens
-    .filter((t) => !stopWords.has(t.toLowerCase()) && t.length >= 2)
-    .slice(0, 5);
+  return tokens.filter((t) => !stopWords.has(t.toLowerCase()) && t.length >= 2).slice(0, 5);
 }
 
 export async function search(
@@ -524,15 +549,24 @@ export async function search(
 }
 
 /** Fast exact-key lookup — bypasses fuzzy/prefix matching for `key=` queries. */
-export async function exactKeySearch(key: string, filters: SearchFilters = {}): Promise<SearchResult[]> {
+export async function exactKeySearch(
+  key: string,
+  filters: SearchFilters = {},
+): Promise<SearchResult[]> {
   const index = await loadIndex();
   const lowerKey = key.toLowerCase();
-  const matches = index.search(lowerKey, { fuzzy: 0, prefix: false, boost: { key: 10 } }) as unknown as (IndexEntry & {
+  const matches = index.search(lowerKey, {
+    fuzzy: 0,
+    prefix: false,
+    boost: { key: 10 },
+  }) as unknown as (IndexEntry & {
     id: string;
   })[];
 
   const filtered = applyFilters(
-    matches.filter((r) => r.key.toLowerCase() === lowerKey || r.key.toLowerCase().includes(lowerKey)),
+    matches.filter(
+      (r) => r.key.toLowerCase() === lowerKey || r.key.toLowerCase().includes(lowerKey),
+    ),
     filters,
   );
 

@@ -72,7 +72,13 @@ function pushNode(ctx: BuildCtx, node: GraphNode, absFile: string): void {
   if (!ctx.firstKeyOfFile.has(absFile)) ctx.firstKeyOfFile.set(absFile, node.key);
 }
 
-function walk(obj: unknown, filePath: string, ctx: BuildCtx, rootElement: string | undefined, isRoot: boolean): void {
+function walk(
+  obj: unknown,
+  filePath: string,
+  ctx: BuildCtx,
+  rootElement: string | undefined,
+  isRoot: boolean,
+): void {
   if (obj === null || obj === undefined || typeof obj !== 'object') return;
 
   if (Array.isArray(obj)) {
@@ -99,9 +105,10 @@ function walk(obj: unknown, filePath: string, ctx: BuildCtx, rootElement: string
   }
 
   if (currentKey) {
-    const nodeType = rootElement && ROOT_ELEMENT_MAP[rootElement]
-      ? ROOT_ELEMENT_MAP[rootElement]
-      : EXT_TYPE_MAP[path.extname(filePath).toLowerCase()] ?? 'unknown';
+    const nodeType =
+      rootElement && ROOT_ELEMENT_MAP[rootElement]
+        ? ROOT_ELEMENT_MAP[rootElement]
+        : (EXT_TYPE_MAP[path.extname(filePath).toLowerCase()] ?? 'unknown');
     pushNode(
       ctx,
       {
@@ -115,19 +122,34 @@ function walk(obj: unknown, filePath: string, ctx: BuildCtx, rootElement: string
     );
 
     if (typeof attrs['@_file'] === 'string' && attrs['@_file'].trim()) {
-      ctx.edges.push({ from: currentKey, fromFile: filePath, targetRef: attrs['@_file'], targetFile: attrs['@_file'], rel: 'extends' });
+      ctx.edges.push({
+        from: currentKey,
+        fromFile: filePath,
+        targetRef: attrs['@_file'],
+        targetFile: attrs['@_file'],
+        rel: 'extends',
+      });
     }
-    if (typeof attrs['@_transform_on_consume'] === 'string' && attrs['@_transform_on_consume'].trim()) {
-      ctx.edges.push({ from: currentKey, fromFile: filePath, targetRef: attrs['@_transform_on_consume'], rel: 'transforms_to' });
+    if (
+      typeof attrs['@_transform_on_consume'] === 'string' &&
+      attrs['@_transform_on_consume'].trim()
+    ) {
+      ctx.edges.push({
+        from: currentKey,
+        fromFile: filePath,
+        targetRef: attrs['@_transform_on_consume'],
+        rel: 'transforms_to',
+      });
     }
   }
 
   for (const { name, value } of children) {
     const childList = Array.isArray(value) ? value : [value];
     for (const childVal of childList) {
-      const childAttrs = (childVal && typeof childVal === 'object' && !Array.isArray(childVal))
-        ? childVal as Record<string, unknown>
-        : {};
+      const childAttrs =
+        childVal && typeof childVal === 'object' && !Array.isArray(childVal)
+          ? (childVal as Record<string, unknown>)
+          : {};
 
       if (name === 'projectile' && typeof childAttrs['@_file'] === 'string') {
         ctx.edges.push({
@@ -202,7 +224,10 @@ export interface GraphCollector {
   /** Contribute the AngelScript symbols of a `.as` file from content already in memory. */
   addScriptSymbols(filePath: string, content: string): void;
   /** Resolve edges and assemble the graph. */
-  finalize(opts: { packages: DataPackage[]; fileCount: number }): Promise<{ graph: RwrGraph; symbols: ScriptSymbol[] }>;
+  finalize(opts: {
+    packages: DataPackage[];
+    fileCount: number;
+  }): Promise<{ graph: RwrGraph; symbols: ScriptSymbol[] }>;
 }
 
 export function createGraphCollector(sourceDir: string, packages: DataPackage[]): GraphCollector {
