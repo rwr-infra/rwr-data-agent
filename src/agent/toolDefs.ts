@@ -258,7 +258,16 @@ export async function getAgentTools(scope?: string): Promise<Record<string, Tool
     console.log('[plugin] Directory changed mid-load — this request keeps the pre-change tools');
     return registry;
   }
-  pluginEntries = entries;
+  // Only the unscoped load writes the inventory. A factory receives the host and may branch on
+  // `host.scope` at *registration* time — returning different specs, or throwing for one package and
+  // not another — so a scoped load's entries describe that package, not the deployment. Letting them
+  // land here would make `GET /v1/tools` report whichever scoped request loaded last, labelled as
+  // global: wrong in the one place whose entire job is telling an operator what loaded.
+  //
+  // `builtinNames` needs no such guard — `buildBuiltinTools` varies the closures per scope, never
+  // the key set — and the inventory self-heals: `/v1/tools` forces an unscoped load of its own, and
+  // an invalidation clears every scope's registry, so the `''` key is always reloaded from disk.
+  if (scope === undefined) pluginEntries = entries;
   registries.set(cacheKey, registry);
   disclosureMeta.set(cacheKey, {
     coreNames: builtinNames,
