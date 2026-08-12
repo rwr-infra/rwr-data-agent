@@ -1,6 +1,7 @@
 import * as fsSync from 'fs';
 import { tool, type Tool } from 'ai';
 import { z } from 'zod';
+import { createReloadGate } from '@rwr/agent-core';
 import { config } from '../config/index.js';
 import {
   configureGraph,
@@ -173,25 +174,30 @@ export function buildBuiltinTools(scope?: string) {
  */
 const registries = new Map<string, Record<string, Tool>>();
 /**
- * Per-scope disclosure metadata, cached alongside `registries` and cleared on the same
- * `dirty` flag so a hot-reload cannot leave it stale. Populated only when a scope's
+ * Per-scope disclosure metadata, cached alongside `registries` and invalidated by the same
+ * generation counter so a hot-reload cannot leave it stale. Populated only when a scope's
  * registry is actually built; `getToolDisclosureMeta` returns `undefined` for scopes
  * nobody requested yet, which simply disables disclosure for them.
  */
 const disclosureMeta = new Map<string, ToolDisclosureMeta>();
 let pluginEntries: PluginEntry[] = [];
 let builtinNames: string[] = [];
-let dirty = true;
+
+/**
+ * Staleness lives in the gate, not in a `dirty` boolean here — see `createReloadGate` for why a
+ * boolean loses a race that two concurrent requests can reach.
+ */
+const reload = createReloadGate();
 let watching = false;
 let reloadTimer: NodeJS.Timeout | null = null;
 
 /** Mark the registry stale; the next getAgentTools() rebuilds it. */
 export function invalidateToolRegistry(): void {
-  dirty = true;
+  reload.invalidate();
 }
 
 /**
- * Watch the plugin directory. Changes only flip the `dirty` flag — the actual reload
+ * Watch the plugin directory. Changes only bump the generation counter — the actual reload
  * happens when the next request asks for tools, so an in-flight stream is never
  * swapped out from under itself.
  */
@@ -203,7 +209,7 @@ function watchPluginDir(): void {
       if (reloadTimer) clearTimeout(reloadTimer);
       reloadTimer = setTimeout(() => {
         console.log('[plugin] Change detected — tools will reload on the next request');
-        dirty = true;
+        reload.invalidate();
       }, 300);
     });
   } catch {
@@ -213,24 +219,25 @@ function watchPluginDir(): void {
 }
 
 /**
- * Built-in tools plus every successfully loaded plugin. Rebuilds when marked dirty.
+ * Built-in tools plus every successfully loaded plugin. Rebuilds when the generation has moved past
+ * what the cache holds.
  *
  * `scope` is the request's selected package: the returned tools — plugins included, through the
  * host — only ever see that package.
  */
 export async function getAgentTools(scope?: string): Promise<Record<string, Tool>> {
-  if (dirty) {
+  const stale = reload.isStale();
+  if (stale) {
     registries.clear();
     disclosureMeta.clear();
   }
   const cacheKey = scope ?? '';
   const cached = registries.get(cacheKey);
-  if (cached && !dirty) return cached;
+  if (cached && !stale) return cached;
 
-  // Cleared before the await below, not after: the watcher can fire while `loadToolPlugins` reads
-  // the directory, and clearing afterwards would discard that signal and serve the pre-change
-  // plugins until something else marked the registry dirty again.
-  dirty = false;
+  // Captured before the await, and checked after: the watcher can fire while `loadToolPlugins` is
+  // reading the directory, and what comes back then describes a directory that no longer exists.
+  const loadingGeneration = reload.begin();
   const builtin = buildBuiltinTools(scope) as unknown as Record<string, Tool>;
   builtinNames = Object.keys(builtin);
 
@@ -239,10 +246,19 @@ export async function getAgentTools(scope?: string): Promise<Record<string, Tool
     entries,
     triggers,
   } = await loadToolPlugins(createToolHost(scope), builtinNames);
-  pluginEntries = entries;
   // One envelope over built-ins and plugins alike: duplicate guard, deadline, `{error, hint}` on
   // failure. Wrapped here rather than per request so the token-accounting cache keeps its key.
   const registry = instrumentTools({ ...builtin, ...plugins });
+
+  if (!reload.publish(loadingGeneration)) {
+    // The directory changed while we were reading it. Serve what we have — this request has to
+    // answer with *something*, and a set of tools one edit out of date beats an error — but publish
+    // nothing, so the next request reloads instead of inheriting it. Caching it here is the actual
+    // bug: it would pin the stale registry with the gate agreeing that it is current.
+    console.log('[plugin] Directory changed mid-load — this request keeps the pre-change tools');
+    return registry;
+  }
+  pluginEntries = entries;
   registries.set(cacheKey, registry);
   disclosureMeta.set(cacheKey, {
     coreNames: builtinNames,

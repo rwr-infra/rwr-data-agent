@@ -1,11 +1,91 @@
 import { describe, expect, it } from 'vitest';
-import { PROTOCOL_VERSION, createMemorySessionStore, encodeEvent } from '@rwr/agent-core';
+import {
+  PROTOCOL_VERSION,
+  createMemorySessionStore,
+  createReloadGate,
+  encodeEvent,
+} from '@rwr/agent-core';
 
 /**
  * Tests the package through its published entry point rather than by reaching into `src/` — the
  * export surface in `index.ts` is the thing external consumers get, so it is the thing worth
  * pinning. A symbol that stops being exported should break a test, not just a build somewhere else.
  */
+
+/**
+ * The gate exists for one interleaving, so that interleaving is what these pin. Every case here is
+ * a sequence of calls with no clock and no filesystem — which is the point of the gate being a
+ * separate unit: the same race is untestable inside `getAgentTools`, where it lives behind `fs.watch`
+ * timing and module-level state.
+ */
+describe('reload gate', () => {
+  it('starts stale so the first read loads', () => {
+    const gate = createReloadGate();
+    expect(gate.isStale()).toBe(true);
+  });
+
+  it('is fresh after a publish and stale again after an invalidate', () => {
+    const gate = createReloadGate();
+    expect(gate.publish(gate.begin())).toBe(true);
+    expect(gate.isStale()).toBe(false);
+
+    gate.invalidate();
+    expect(gate.isStale()).toBe(true);
+  });
+
+  /**
+   * The bug this whole thing exists for: the loader that *started* first finishes last and would
+   * otherwise publish pre-change data over the newer data — and mark it current, so nothing reloads.
+   */
+  it('refuses a publish from a load that began before a change', () => {
+    const gate = createReloadGate();
+    const first = gate.begin();
+
+    gate.invalidate();
+    const second = gate.begin();
+    expect(gate.publish(second)).toBe(true);
+
+    // Late arrival from before the change.
+    expect(gate.publish(first)).toBe(false);
+    // And the refusal did not disturb what the winner published.
+    expect(gate.isStale()).toBe(false);
+  });
+
+  it('leaves the cache stale when only the losing load finishes', () => {
+    const gate = createReloadGate();
+    const first = gate.begin();
+    gate.invalidate();
+
+    expect(gate.publish(first)).toBe(false);
+    // Nobody published the current generation, so the next request must still reload.
+    expect(gate.isStale()).toBe(true);
+  });
+
+  /**
+   * Why the counter tracks *changes* and not load attempts. Two overlapping loads with nothing
+   * happening between them are not in conflict — they read the same directory and would publish the
+   * same thing. An attempt counter would reject the first one and leave the cache empty.
+   */
+  it('lets two overlapping loads publish when nothing changed between them', () => {
+    const gate = createReloadGate();
+    const a = gate.begin();
+    const b = gate.begin();
+
+    expect(gate.publish(b)).toBe(true);
+    expect(gate.publish(a)).toBe(true);
+    expect(gate.isStale()).toBe(false);
+  });
+
+  it('needs one publish per change, not one per invalidate call', () => {
+    const gate = createReloadGate();
+    gate.invalidate();
+    gate.invalidate();
+    gate.invalidate();
+
+    expect(gate.publish(gate.begin())).toBe(true);
+    expect(gate.isStale()).toBe(false);
+  });
+});
 
 describe('session store', () => {
   const HOUR = 60 * 60_000;

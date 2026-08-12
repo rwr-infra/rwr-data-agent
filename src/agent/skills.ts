@@ -1,20 +1,25 @@
 import * as fsSync from 'fs';
-import { loadSkills, selectSkills, type Skill, type SkillEntry } from '@rwr/agent-core';
+import {
+  createReloadGate,
+  loadSkills,
+  selectSkills,
+  type Skill,
+  type SkillEntry,
+} from '@rwr/agent-core';
 import { config } from '../config/index.js';
 
 /**
  * Skill registry: the same load-cache-watch lifecycle the tool plugins get, over `SKILLS_DIR`.
  *
- * Deliberately mirrors `toolDefs.ts`: a change flips a dirty flag and the reload happens when the
- * *next* request asks for skills, so an in-flight turn never has its system prompt swapped out from
- * under it. Skills are cheaper to reload than plugins — plain text, no ESM cache to leak — but the
- * timing rule is the same and there is no reason for two mental models.
+ * Deliberately mirrors `toolDefs.ts`, down to the generation counter: a change bumps it and the
+ * reload happens when the *next* request asks for skills, so an in-flight turn never has its system
+ * prompt swapped out from under it. Skills are cheaper to reload than plugins — plain text, no ESM
+ * cache to leak — but the timing rule is the same and there is no reason for two mental models.
  */
 
 let cached: Skill[] = [];
 let entries: SkillEntry[] = [];
-let loaded = false;
-let dirty = false;
+const reload = createReloadGate();
 let watching = false;
 let reloadTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -26,7 +31,7 @@ function watchSkillsDir(): void {
       if (reloadTimer) clearTimeout(reloadTimer);
       reloadTimer = setTimeout(() => {
         console.log('[skill] Change detected — skills will reload on the next request');
-        dirty = true;
+        reload.invalidate();
       }, 300);
     });
   } catch {
@@ -37,16 +42,22 @@ function watchSkillsDir(): void {
 
 /** Every loaded skill, reloading first if the directory changed. */
 export async function getSkills(): Promise<Skill[]> {
-  if (loaded && !dirty) return cached;
+  if (!reload.isStale()) return cached;
 
-  // Cleared *before* the await. The watcher can fire while `loadSkills` is reading the directory;
-  // clearing afterwards would overwrite that signal, pinning the registry to the pre-change files
-  // until the operator happened to edit the directory a second time.
-  dirty = false;
+  // Captured before the await, checked after. The watcher can fire while `loadSkills` is reading the
+  // directory, and a load that finishes describing the pre-change files must not publish over a
+  // newer one that already did — nor mark itself current, which would stop anything reloading.
+  const loadingGeneration = reload.begin();
   const result = await loadSkills({ dir: config.skillsDir });
+  if (!reload.publish(loadingGeneration)) {
+    // One edit out of date, and deliberately not cached: this turn gets these skills, the next
+    // request reloads. Skills only add prompt text, so a stale set is a weaker answer, never a wrong
+    // tool call.
+    console.log('[skill] Directory changed mid-load — this request keeps the pre-change skills');
+    return result.skills;
+  }
   cached = result.skills;
   entries = result.entries;
-  loaded = true;
 
   const ok = entries.filter((e) => !e.error);
   if (entries.length > 0) {

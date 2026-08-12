@@ -19,6 +19,8 @@ The repo is an npm workspace. `packages/agent-core` (`@rwr/agent-core`) holds th
 | `steering/` | The in-flight turn registry — `createTurn` / `steerTurn` / `stopTurn` / `endTurn` |
 | `session/` | `createMemorySessionStore(ttlMs)` — keyed per-session state that evicts |
 | `plugins/` | The plugin loader: discovery, validation, per-file failure isolation, trigger normalization |
+| `skills/` | The skill loader and `selectSkills` — frontmatter, mandatory triggers, body cap |
+| `reload/` | `createReloadGate()` — the staleness counter both loaders need, and the reason it is not a `dirty` boolean |
 | `transport/` | `PROTOCOL_VERSION`, the NDJSON event union, `encodeEvent` |
 
 **The loop is deliberately not in it.** The AI SDK already ships one, and re-implementing it would buy nothing — see [Step budget](#step-budget-max_tool_steps-default-100) and the SDK's `ToolLoopAgent`.
@@ -240,8 +242,9 @@ export default function register(host) {
 - **`host`** (`createToolHost(scope)`) injects `config` paths, `search()`, and the raw graph primitives — a plugin never imports internal modules. `search` and `graph.*` are **pre-bound to the request's package**, so a plugin written before package scoping existed is scoped for free; `host.scope` is there for wording output or skipping work, not for opting out.
 - **Failure is isolated.** A load-time throw or an execute-time throw is logged, recorded on the `/v1/tools` entry, and skipped; other tools are unaffected. An execute error is returned to the model as `{ error }` rather than breaking the stream.
 - **No shadowing.** A plugin whose `name` matches a built-in is rejected, so an external file cannot hijack core behaviour.
-- **Hot reload** (`TOOLS_HOT_RELOAD`, defaults on outside production): `fs.watch` + 300ms debounce sets a dirty flag; the reload itself happens when the next request asks for tools, so an in-flight stream is never swapped. It works via `import(url + '?v=<mtime>')` — the ESM module cache cannot be purged, so each reload leaks the previous module. That is why it defaults off in production.
-- **`GET /v1/tools`** reports `{ builtin, plugins[], toolsDir, hotReload }` with per-file errors. Hot reload without this is undebuggable.
+- **Hot reload** (`TOOLS_HOT_RELOAD`, defaults on outside production): `fs.watch` + 300ms debounce bumps a generation counter; the reload itself happens when the next request asks for tools, so an in-flight stream is never swapped. It works via `import(url + '?v=<mtime>')` — the ESM module cache cannot be purged, so each reload leaks the previous module. That is why it defaults off in production.
+  - **Staleness is a counter, not a flag, and it counts directory changes — not load attempts.** A load captures the generation before reading the directory and publishes only if it has not moved. Requests overlap (two concurrent chats; `GET /v1/tools` forces a load of its own), and with a boolean the loader that *started* first can finish last and overwrite the newer registry with the pre-change one — while the flag reads clean, so nothing ever reloads it again. The loser still returns its own result to its caller, one edit out of date; it just does not cache it. `src/agent/skills.ts` mirrors this exactly.
+- **`GET /v1/tools`** reports `{ builtin, plugins[], skills[], toolsDir, skillsDir, hotReload }`, each list carrying its per-file errors. Hot reload without this is undebuggable.
 
 ## Skills (src/agent/skills.ts, SKILLS_DIR)
 

@@ -12,6 +12,8 @@
  * - **plugins** — load tool definitions an operator dropped in a directory, isolating failures.
  * - **skills** — prompt fragments injected when the question matches, so domain knowledge lives in
  *   a directory rather than in the codebase's system prompt.
+ * - **reload** — the staleness bookkeeping both of those directories need, which is subtler than a
+ *   `dirty` flag as soon as two loads can overlap.
  * - **transport** — the NDJSON event protocol, versioned, as a contract for external clients.
  *
  * **Architectural constraint, and the only proof that any of this is reusable: nothing in this
@@ -52,6 +54,8 @@ export {
   type SkillEntry,
   type LoadedSkills,
 } from './skills/loader.js';
+
+export { createReloadGate, type ReloadGate } from './reload/gate.js';
 
 export {
   PROTOCOL_VERSION,

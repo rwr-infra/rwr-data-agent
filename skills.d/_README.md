@@ -1,7 +1,9 @@
 # skills.d
 
 Markdown playbooks appended to the system prompt when a question matches their triggers. Drop a
-file in, no restart needed (outside production). See the Skills section in `AGENTS.md`.
+file in and it is picked up on the next request — as long as `TOOLS_HOT_RELOAD` is on, which it is
+by default outside production. With it off, a change needs a restart. See the Skills section in
+`AGENTS.md`.
 
 Files beginning with `_` or `.` are skipped, which is why this one is not loaded as a skill.
 
