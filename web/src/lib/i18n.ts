@@ -95,6 +95,15 @@ export interface Translations {
   candidatesTitle: string;
   disagreement: string;
   fallbackNote: string;
+  /** Tail status line while the post-answer self-check runs. */
+  reflecting: string;
+  /** Tail status line for any other unfinished phase — a tool running, a step in flight. */
+  working: string;
+  reflectionPass: string;
+  revisionNote: string;
+  /** Wording for one reflection finding code. The backend sends an open set of codes, so an unknown
+   *  one falls back to the code itself rather than rendering as blank. */
+  reflectionIssue: (code: string) => string;
   modelLabel: string;
   modelSwitchHint: string;
   aiDisclaimer: string;
@@ -182,6 +191,20 @@ const i18n: Record<Lang, Translations> = {
     candidatesTitle: 'N 路候选原文',
     disagreement: '候选答案之间可能存在分歧，以归纳结果为准。',
     fallbackNote: '⚠ 归纳失败，已回退到最佳单路候选答案。',
+    reflecting: '正在自检答案…',
+    working: '处理中…',
+    reflectionPass: '✓ 自检通过',
+    revisionNote: '已自检并修订，后续追问以此版本为准',
+    reflectionIssue: (code) =>
+      ({
+        'missing-citation': '缺少来源文件引用',
+        'missing-key': '缺少实体 key',
+        'scope-violation': '越出所选 package 范围',
+        'count-mismatch': '数量与实际不符',
+        'unsupported-claim': '缺少证据支撑的结论',
+        'no-answer': '原轮次未给出答案',
+        other: '其他问题',
+      })[code] ?? code,
     modelLabel: '模型',
     modelSwitchHint: '切换对话使用的模型',
     aiDisclaimer: 'AI 生成内容，仅供参考，可能会犯错，请仔细甄别',
@@ -265,6 +288,20 @@ const i18n: Record<Lang, Translations> = {
     candidatesTitle: 'N candidate drafts',
     disagreement: 'Candidates may disagree; the synthesis is authoritative.',
     fallbackNote: '⚠ Synthesis failed — fell back to the best single candidate.',
+    reflecting: 'Checking the answer…',
+    working: 'Working…',
+    reflectionPass: '✓ Self-check passed',
+    revisionNote: 'Self-checked and revised — later questions build on this version',
+    reflectionIssue: (code) =>
+      ({
+        'missing-citation': 'Value stated without a source file',
+        'missing-key': 'Entity shown without its key',
+        'scope-violation': 'Outside the selected package',
+        'count-mismatch': 'Stated count disagrees with the list',
+        'unsupported-claim': 'Claim with no supporting evidence',
+        'no-answer': 'The turn produced no answer',
+        other: 'Other finding',
+      })[code] ?? code,
     modelLabel: 'Model',
     modelSwitchHint: 'Switch the model used for this conversation',
     aiDisclaimer: 'AI-generated content — may be wrong. Verify important details.',

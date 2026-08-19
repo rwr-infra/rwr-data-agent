@@ -26,6 +26,7 @@ import { isToolFailure, repairToolCall } from '../../agent/toolRuntime.js';
 import { createTurn, endTurn, PROTOCOL_VERSION } from '@rwr/agent-core';
 import {
   aggregateBestOfN,
+  applyReflection,
   buildBreakdown,
   estimateTokens,
   measureToolCallTokens,
@@ -34,6 +35,8 @@ import {
   resolveUsage,
 } from '../tokenAccounting.js';
 import { runBestOfN, summarizeToolInput, summarizeToolResult } from '../../agent/synthesize.js';
+import { buildReflectionTranscript, runReflection, shouldReflect } from '../../agent/reflect.js';
+import type { ReflectionRunResult } from '../../agent/reflect.js';
 import type { Tool } from 'ai';
 import type { ChatCompletionRequest, SearchResult } from '../../types/index.js';
 
@@ -297,6 +300,8 @@ export async function chatRoutes(app: FastifyInstance) {
         : config.llmModel;
     // The judge follows the turn's model unless the operator pinned one via JUDGE_MODEL.
     const judgeModelId = config.judgeModelExplicit ? config.judgeModel : turnModelId;
+    // Same rule for the reflection checker: pinned only when REFLECTION_MODEL was set explicitly.
+    const reflectionModelId = config.reflectionModelExplicit ? config.reflectionModel : turnModelId;
 
     console.log(`[chat] LLM request | model=${turnModelId} | history=${historyMessages.length}`);
 
@@ -435,6 +440,82 @@ export async function chatRoutes(app: FastifyInstance) {
       heartbeat = setInterval(() => emit({ type: 'ping' }), config.streamHeartbeatMs);
     }
 
+    /**
+     * Reflect on a finished answer, emit what it found, and hand the run back so the caller can fold
+     * its spend into `finish`. Returns undefined when the turn did not qualify or the call failed — in
+     * both cases nothing was emitted and the turn finishes exactly as it would have.
+     *
+     * Shared by the single path and max mode. It lives here rather than inside either branch because
+     * both need the same events in the same order, and because `runBestOfN`'s contract — never throw,
+     * always let the route write a normal `finish` — should not grow a second responsibility.
+     *
+     * Not applied to structured output: a zod schema already constrains that shape, and its content is
+     * assembled from the retrieved context rather than narrated, so there is no prose to check.
+     */
+    const reflectAndEmit = async (input: {
+      answer: string;
+      stopReason: 'completed' | 'step-limit' | 'output-limit' | 'stopped';
+      toolFailureCount: number;
+      toolTranscript: ReturnType<typeof buildReflectionTranscript>;
+    }): Promise<ReflectionRunResult | undefined> => {
+      const triggers = shouldReflect({
+        enabled: config.reflectionEnabled,
+        toolFailureCount: input.toolFailureCount,
+        stopReason: input.stopReason,
+        intent: queryCategory,
+        hasAnswer: input.answer.trim().length > 0,
+        stoppedByUser: turn.stoppedByUser(),
+        clientGone,
+      });
+      if (!triggers) return undefined;
+
+      // Announced before the call, not after: this phase emits nothing else for up to a minute, and a
+      // client with no way to label it shows a finished answer under a live stop button.
+      emit({ type: 'reflection-start', trigger: triggers });
+
+      const reflection = await runReflection({
+        model: getProvider().chatModel(reflectionModelId),
+        query,
+        answer: input.answer,
+        retrievedContext: results,
+        toolTranscript: input.toolTranscript,
+        packageScope,
+        intent: queryCategory,
+        triggers,
+        maxOutputTokens: maxTokens,
+        // Not the shaper's budget, which is the whole window minus the fixed parts (~340K by default)
+        // and would therefore trim nothing. Reflection re-sends the answer, the context and the
+        // transcript for a check the user is already waiting on, so it gets the retrieval budget —
+        // the same order as the context block it carries. Measured: at the shaper's budget the call
+        // reached the origin's response timeout and was skipped.
+        budgetTokens: config.contextBudgetTokens,
+        abortSignal: abort.signal,
+        startObservation: (name: string, obsInput?: unknown) => {
+          const obs = chainObs.startObservation(
+            name,
+            { input: obsInput },
+            { asType: 'generation' },
+          );
+          return {
+            update: (patch: Record<string, unknown>) => obs.update(patch),
+            end: () => obs.end(),
+          };
+        },
+      });
+      if (!reflection) return undefined;
+
+      emit({
+        type: 'reflection',
+        verdict: reflection.verdict,
+        issues: reflection.issues,
+        trigger: triggers,
+      });
+      if (reflection.revisedAnswer) {
+        emit({ type: 'revision', text: reflection.revisedAnswer });
+      }
+      return reflection;
+    };
+
     let llmError: Error | null = null;
     try {
       if (useStructured) {
@@ -555,28 +636,58 @@ export async function chatRoutes(app: FastifyInstance) {
             },
           });
           chainObs.otelSpan.setAttribute('langfuse.trace.output', result.answer.slice(0, 500));
+          // The judge merges the drafts, it does not verify them against the evidence, so a synthesis
+          // carries the same risks a single answer does. Every candidate's transcript goes in, tagged
+          // with its index: reflection selects this turn partly on a failed candidate call, so it has
+          // to be able to see that call. The prompt's own budget trims the merged list if N loops
+          // made it long.
+          // `runBestOfN` never throws, so a user stop does not reach the handler's catch (whose
+          // `stopped` branch only ever sees structured mode) — the candidates just abort, the
+          // orchestrator falls back to the best draft, and `completed` would go out for a turn the
+          // user cut short. The registry is the authority on that, same as the single path.
+          const stopReason = turn.stoppedByUser() ? 'stopped' : result.stopReason;
+          const reflection = await reflectAndEmit({
+            answer: result.answer,
+            stopReason,
+            toolFailureCount: result.perCandidate.reduce((n, c) => n + c.toolFailures, 0),
+            toolTranscript: result.perCandidate.flatMap((c) => c.toolTranscript),
+          });
+          const finalUsage = reflection
+            ? applyReflection(
+                agg,
+                agg.breakdown,
+                reflection.accounting,
+                reflection.revisedAnswer
+                  ? {
+                      originalAnswerTokens: estimateTokens(result.answer),
+                      revisedAnswerTokens: estimateTokens(reflection.revisedAnswer),
+                    }
+                  : undefined,
+              )
+            : { ...agg, breakdown: agg.breakdown };
           emit({
             type: 'finish',
-            stopReason: result.stopReason,
+            stopReason,
             usage: {
-              promptTokens: agg.promptTokens,
-              completionTokens: agg.completionTokens,
-              contextTokens: agg.contextTokens,
+              promptTokens: finalUsage.promptTokens,
+              completionTokens: finalUsage.completionTokens,
+              contextTokens: finalUsage.contextTokens,
               maxContextTokens: config.maxContextTokens,
-              estimated: agg.estimated,
-              breakdown: agg.breakdown,
+              estimated: finalUsage.estimated,
+              breakdown: finalUsage.breakdown,
             },
           });
         } else {
           // Tool results are replayed in full; the shaper only sheds them if a step's prompt would
           // otherwise overflow the window. The system prompt, tool definitions and the output
           // reservation ride alongside `messages`, so they come off the budget first.
+          const shaperBudgetTokens =
+            Math.floor(config.maxContextTokens * config.toolContextBudgetRatio) -
+            inputTokens.system -
+            toolDefTokens -
+            maxTokens;
           const shaper = createToolTranscriptShaper({
-            budgetTokens:
-              Math.floor(config.maxContextTokens * config.toolContextBudgetRatio) -
-              inputTokens.system -
-              toolDefTokens -
-              maxTokens,
+            budgetTokens: shaperBudgetTokens,
             shedTargetTokens: config.toolShedResultTokens,
           });
           // Tool execution time, reported by the SDK and keyed by tool call, so the UI can show it
@@ -842,16 +953,38 @@ export async function chatRoutes(app: FastifyInstance) {
           );
           const resolved = resolveUsage(totalUsage, lastStepUsage, basis);
           const breakdown = buildBreakdown(basis, resolved);
+          // After the answer, before `finish`: the reflection events belong to this turn, so they have
+          // to land while the stream is still open, and their spend has to reach the same `finish` the
+          // client reads its usage from.
+          const reflection = await reflectAndEmit({
+            answer: answerText,
+            stopReason,
+            toolFailureCount,
+            toolTranscript: buildReflectionTranscript(stepResults),
+          });
+          const finalUsage = reflection
+            ? applyReflection(
+                resolved,
+                breakdown,
+                reflection.accounting,
+                reflection.revisedAnswer
+                  ? {
+                      originalAnswerTokens: estimateTokens(answerText),
+                      revisedAnswerTokens: estimateTokens(reflection.revisedAnswer),
+                    }
+                  : undefined,
+              )
+            : { ...resolved, breakdown };
           emit({
             type: 'finish',
             stopReason,
             usage: {
-              promptTokens: resolved.promptTokens,
-              completionTokens: resolved.completionTokens,
-              contextTokens: resolved.contextTokens,
+              promptTokens: finalUsage.promptTokens,
+              completionTokens: finalUsage.completionTokens,
+              contextTokens: finalUsage.contextTokens,
               maxContextTokens: config.maxContextTokens,
-              estimated: resolved.estimated,
-              breakdown,
+              estimated: finalUsage.estimated,
+              breakdown: finalUsage.breakdown,
             },
           });
         }

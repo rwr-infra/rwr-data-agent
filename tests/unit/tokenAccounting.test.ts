@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { LanguageModelUsage, Tool } from 'ai';
 import {
   aggregateBestOfN,
+  applyReflection,
   buildBreakdown,
   estimateTokens,
   measureToolCallTokens,
@@ -257,5 +258,70 @@ describe('aggregateBestOfN', () => {
   it('is estimated when any single run was', () => {
     const agg = aggregateBestOfN([{ i: 0, basis: candidateBasis }, candidates[1]], judge, 'draft');
     expect(agg.estimated).toBe(true);
+  });
+});
+
+describe('applyReflection', () => {
+  const reflectionBasis = measureTurn(
+    { system: 150, toolDefs: 0, context: 4000, messages: 0, reasoning: 0, answer: 600 },
+    { replay: [], toolCallTokens: 0 },
+  );
+  const reflection = {
+    basis: reflectionBasis,
+    totalUsage: usage(5000, 800),
+    lastStepUsage: usage(5000, 800),
+  };
+  const turn = {
+    promptTokens: 20000,
+    completionTokens: 1200,
+    contextTokens: 3000,
+    estimated: false,
+  };
+  const breakdown = buildBreakdown(measureTurn(TOKENS, { replay: [500], toolCallTokens: 20 }), {
+    ...turn,
+    contextTokens: turn.contextTokens,
+  });
+
+  it('adds the reflection round trip to the spend of the turn it checked', () => {
+    const out = applyReflection(turn, breakdown, reflection);
+    expect(out.promptTokens).toBe(20000 + 5000);
+    expect(out.completionTokens).toBe(1200 + 800);
+    expect(out.breakdown.reflection).toEqual({ promptTokens: 5000, completionTokens: 800 });
+  });
+
+  // Reflection carries nothing into the next request, so occupancy only moves when the answer itself
+  // was replaced — the client replays the revision instead of the streamed text.
+  it('leaves occupancy alone when the check passed', () => {
+    expect(applyReflection(turn, breakdown, reflection).contextTokens).toBe(3000);
+  });
+
+  it('swaps the answer slice out of occupancy when a revision replaced it', () => {
+    const out = applyReflection(turn, breakdown, reflection, {
+      originalAnswerTokens: 400,
+      revisedAnswerTokens: 700,
+    });
+    expect(out.contextTokens).toBe(3000 - 400 + 700);
+  });
+
+  it('never reports negative occupancy', () => {
+    const out = applyReflection({ ...turn, contextTokens: 100 }, breakdown, reflection, {
+      originalAnswerTokens: 900,
+      revisedAnswerTokens: 10,
+    });
+    expect(out.contextTokens).toBe(0);
+  });
+
+  it('is estimated when either the turn or the reflection call was', () => {
+    expect(applyReflection({ ...turn, estimated: true }, breakdown, reflection).estimated).toBe(
+      true,
+    );
+    expect(applyReflection(turn, breakdown, { basis: reflectionBasis }).estimated).toBe(true);
+  });
+
+  it('leaves the existing slices untouched', () => {
+    const out = applyReflection(turn, breakdown, reflection);
+    expect(out.breakdown.systemPrompt).toBe(breakdown.systemPrompt);
+    expect(out.breakdown.answer).toBe(breakdown.answer);
+    expect(out.breakdown.steps).toBe(breakdown.steps);
   });
 });

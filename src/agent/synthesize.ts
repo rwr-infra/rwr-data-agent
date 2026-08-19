@@ -28,6 +28,7 @@ import type {
 } from '../api/tokenAccounting.js';
 import type { SearchResult } from '../types/index.js';
 import { buildSynthesisPrompt } from '../retrieval/synthesisPrompt.js';
+import type { ReflectionToolCallLine } from '../retrieval/reflectionPrompt.js';
 import { buildLlmProviderOptions, buildCandidateProviderOptions } from '../llm/providerOptions.js';
 import { createToolTranscriptShaper } from './toolTranscript.js';
 import { selectActiveTools } from './toolSelection.js';
@@ -86,6 +87,25 @@ export interface BestOfNCandidateResult extends BestOfNCandidateAccounting {
   temperature: number;
   seed: number;
   finishReason: string | undefined;
+  /** Failed tool calls in this candidate's loop. Reported so the route can use the same risk signal
+   *  for reflection here as on the single path; it was previously only logged. */
+  toolFailures: number;
+  /**
+   * One summarised line per tool call this candidate made, tagged with its index.
+   *
+   * Reported for the same reason `toolFailures` is: reflection selects a max-mode turn partly *on* a
+   * failed candidate call, so without the transcript it is asked to judge whether the synthesis leans
+   * on a failure it cannot see. Summaries, not raw payloads — the merged N-candidate transcript is
+   * already the largest thing in that prompt.
+   *
+   * **Required, not optional, and deliberately so.** The "additive, optional fields only" rule is the
+   * NDJSON protocol's promise to external clients (`packages/agent-core/src/transport/events.ts`); it
+   * does not govern this type, which is internal — every construction site is in this file and the
+   * only consumer is the chat route. Required is what makes the compiler check them: optional plus a
+   * `?? []` at the consumer would turn "this return path forgot to fill it" into a silently empty
+   * transcript, which is precisely the bug this field was added to fix.
+   */
+  toolTranscript: ReflectionToolCallLine[];
 }
 
 export interface BestOfNJudgeResult extends BestOfNJudgeAccounting {
@@ -225,6 +245,7 @@ async function runCandidate(
   let reasoningText = '';
   let answerText = '';
   let toolFailureCount = 0;
+  const toolTranscript: ReflectionToolCallLine[] = [];
 
   try {
     options.onEvent({ type: 'candidate-open', candidate: i, total: options.candidateCount });
@@ -310,6 +331,13 @@ async function runCandidate(
       } else if (p.type === 'tool-result') {
         const failed = isToolFailure(p.output);
         if (failed) toolFailureCount++;
+        toolTranscript.push({
+          toolName: p.toolName ?? '?',
+          input: summarizeToolInput(p.toolName, p.input),
+          result: summarizeToolResult(p.toolName, p.output),
+          ok: !failed,
+          candidate: i,
+        });
         options.onEvent({
           type: 'candidate-step',
           candidate: i,
@@ -324,6 +352,13 @@ async function runCandidate(
         toolFailureCount++;
         const message = p.error instanceof Error ? p.error.message : String(p.error);
         console.warn(`[best-of-n] candidate ${i} tool-error ${p.toolName ?? '?'} — ${message}`);
+        toolTranscript.push({
+          toolName: p.toolName ?? '?',
+          input: '',
+          result: message.split('. Available tools:')[0],
+          ok: false,
+          candidate: i,
+        });
         options.onEvent({
           type: 'candidate-step',
           candidate: i,
@@ -369,6 +404,8 @@ async function runCandidate(
       temperature,
       seed,
       finishReason: finishReason ?? undefined,
+      toolFailures: toolFailureCount,
+      toolTranscript,
     };
   } catch (err) {
     console.warn(`[best-of-n] candidate ${i} failed: ${(err as Error).message}`);
@@ -396,6 +433,8 @@ async function runCandidate(
       temperature,
       seed,
       finishReason: 'error',
+      toolFailures: toolFailureCount,
+      toolTranscript,
     };
   } finally {
     obs?.end();
@@ -558,6 +597,8 @@ function failedCandidate(options: BestOfNOptions, i: number): BestOfNCandidateRe
     temperature: 0,
     seed: 0,
     finishReason: 'error',
+    toolFailures: 0,
+    toolTranscript: [],
   };
 }
 

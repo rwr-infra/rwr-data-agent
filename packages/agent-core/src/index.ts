@@ -70,6 +70,9 @@ export {
   type JsonDeltaEvent,
   type ToolStepEvent,
   type SteerAppliedEvent,
+  type ReflectionStartEvent,
+  type ReflectionEvent,
+  type RevisionEvent,
   type FinishEvent,
   type ErrorEvent,
 } from './transport/events.js';

@@ -42,6 +42,10 @@
   let maxMode = $state(readCache().maxMode === true);
   let maxModeTotal = $state(0);
   let judgePhase = $state(false);
+  // The turn is in its post-answer self-check. Set by `reflection-start` and cleared by whatever ends
+  // the phase — the verdict, `finish`, or a break — because a reflection that could not run emits no
+  // verdict at all, and a status line stuck on "checking" is worse than none.
+  let reflecting = $state(false);
   let contextUsed = $state(0);
   let lastBreakdown = $state<TokenBreakdown | undefined>(undefined);
   // Fallback until the first `finish` event reports the server's own MAX_CONTEXT_TOKENS. Hardcoding
@@ -100,6 +104,20 @@
           items.push({ type: 'message', role: 'ai', content: seg.text, id: uid(), turnId });
         } else if (seg.kind === 'reasoning') {
           items.push({ type: 'reasoning', text: seg.text, id: uid(), turnId });
+        } else if (seg.kind === 'reflection') {
+          // Only a clean check renders on its own; a revised one is shown by the revision block below
+          // it, same as while streaming.
+          if (seg.verdict === 'pass') {
+            items.push({ type: 'reflection', verdict: 'pass', id: uid(), turnId });
+          }
+        } else if (seg.kind === 'revision') {
+          items.push({
+            type: 'revision',
+            text: seg.text,
+            issues: seg.issues ?? [],
+            id: uid(),
+            turnId,
+          });
         } else {
           items.push({
             type: 'tool-call',
@@ -494,6 +512,12 @@
     let turnStat: TurnStat | undefined;
     // Candidate-close events received so far; when all N have closed the judge phase begins.
     let closedCount = 0;
+    // The revised answer, when the turn's self-check produced one. It replaces the streamed text in
+    // `history` — see the `revision` branch — and stays null on every other turn.
+    let revisionText: string | null = null;
+    // Findings from the `reflection` event, held for the `revision` event that follows it: they belong
+    // on the revision block, and the two events arrive separately.
+    let pendingIssues: { code: string; detail?: string }[] = [];
 
     /** Shared side effects of the first block of any kind: TTFB, and swapping the indicator out. */
     const beginStreaming = () => {
@@ -754,7 +778,42 @@
               displayItems = displayItems;
               maxModeTotal = 0;
               judgePhase = false;
+            } else if (event.type === 'reflection-start') {
+              reflecting = true;
+            } else if (event.type === 'reflection') {
+              reflecting = false;
+              // Defensive rather than a known path: today a turn that reflects has already streamed
+              // text or a tool step, so the indicator is long gone. The invariant is what matters —
+              // any block that reaches the timeline ends the thinking state.
+              beginStreaming();
+              // The self-check's outcome, after the answer and before `finish`. A clean check is a
+              // one-line badge; a check that found something renders as the revision block that
+              // follows, so its findings are carried there instead of shown twice.
+              render();
+              closeBlocks();
+              const issues = (event.issues ?? []) as { code: string; detail?: string }[];
+              segments.push({ kind: 'reflection', verdict: event.verdict, issues });
+              if (event.verdict === 'pass') {
+                displayItems.push({ type: 'reflection', verdict: 'pass', id: uid(), turnId });
+              } else {
+                pendingIssues = issues;
+              }
+              displayItems = displayItems;
+            } else if (event.type === 'revision') {
+              beginStreaming();
+              // The revised answer, whole. The streamed original stays on screen above it — the
+              // timeline is what actually happened — but this is the version `history` carries, so the
+              // next request is not built on an answer the server itself flagged.
+              render();
+              closeBlocks();
+              revisionText = event.text as string;
+              segments.push({ kind: 'revision', text: revisionText, issues: pendingIssues });
+              displayItems.push({ type: 'revision', text: revisionText, issues: pendingIssues, id: uid(), turnId });
+              displayItems = displayItems;
             } else if (event.type === 'finish') {
+              // A reflection that failed emits no verdict, so this is the only terminator the phase is
+              // guaranteed to get from the stream itself.
+              reflecting = false;
               // The turn is over: nothing is accumulating any more, so the caret stops blinking on
               // whatever block was last. Flush deferred deltas first — dropping the cursors is what
               // would otherwise turn the final render() below into a no-op on a hidden tab.
@@ -807,10 +866,16 @@
       stopTimer();
       maxModeTotal = 0;
       judgePhase = false;
+      reflecting = false;
       // A turn that already streamed part of an answer keeps its user message: the partial reply is
       // pushed onto `history` below, and dropping the question would leave two assistant turns in a
       // row — a malformed history that the next request replays to the model.
-      if (answerText()) {
+      //
+      // `revisionText` counts, and must: a `step-limit` turn streams no text of its own, so a break
+      // after the revision frame would roll the question back here while the persistence path below
+      // still stores the revision — an assistant message with no question in front of it. The two
+      // have to agree on what "produced an answer" means.
+      if (revisionText ?? answerText()) {
         displayItems.push({ type: 'meta', text: tr.streamInterrupted, id: uid(), turnId });
       } else {
         // Blocks appear as soon as *any* delta arrives, reasoning and tool calls included, so a break
@@ -843,6 +908,7 @@
     stopTimer();
     maxModeTotal = 0;
     judgePhase = false;
+    reflecting = false;
     // The turn is over on the server too, so steer/stop would 404 from here on.
     serverTurnId = null;
     // Final state goes in even while hidden: `paint()` may have deferred the last deltas to a rAF
@@ -850,11 +916,18 @@
     render();
     closeBlocks();
 
-    const content = answerText();
+    // The revision wins when the turn produced one: the server flagged the streamed answer, and every
+    // later request — including the summarizer's view of this conversation — replays `content`. Both
+    // versions stay on screen, but only one can be the answer the model builds on. A `step-limit` turn
+    // streamed nothing at all, so this is also what lets a rebuilt answer reach storage.
+    const content = revisionText ?? answerText();
     if (content) {
       // A tool call that ended the turn leaves an empty trailing text block behind; it would restore
-      // as an empty bubble, so it never reaches storage.
-      const kept = segments.filter((s) => s.kind === 'tool' || s.text.length > 0);
+      // as an empty bubble, so it never reaches storage. Only text/reasoning blocks can be empty —
+      // the rest carry no `text` to measure.
+      const kept = segments.filter((s) =>
+        s.kind === 'text' || s.kind === 'reasoning' ? s.text.length > 0 : true,
+      );
       // A call whose closing event never arrived (stream broke mid-call) must not restore as
       // "running" — `ok` is what closes the card, and nothing can ever close it after a reload.
       for (const s of kept) {
@@ -962,12 +1035,21 @@
     writeClipboard(item.content);
   }
 
-  /** A whole answer: every text block of the turn, joined. Tool cards and reasoning stay out. */
+  /**
+   * A whole answer: every text block of the turn, joined. Tool cards and reasoning stay out.
+   *
+   * A revised turn copies the revision alone — it is the version `history` carries, so copying the
+   * superseded text (or both) would hand out something the conversation itself no longer stands on.
+   */
   function handleCopyTurn(turnId: string, format: 'text' | 'markdown') {
-    const text = displayItems
-      .filter((it) => it.type === 'message' && it.role === 'ai' && it.turnId === turnId)
-      .map((it) => (it.type === 'message' ? it.content : ''))
-      .join('\n\n');
+    const revision = displayItems.find((it) => it.type === 'revision' && it.turnId === turnId);
+    const text =
+      revision?.type === 'revision'
+        ? revision.text
+        : displayItems
+            .filter((it) => it.type === 'message' && it.role === 'ai' && it.turnId === turnId)
+            .map((it) => (it.type === 'message' ? it.content : ''))
+            .join('\n\n');
     if (!text) return;
     writeClipboard(format === 'markdown' ? text : stripMarkdown(text));
   }
@@ -989,6 +1071,13 @@
       thinkingText={maxModeTotal > 0 ? tr.runningCandidates(maxModeTotal) : judgePhase ? tr.synthesizing : tr.thinking}
       searchingText={tr.searching}
       generatingText={tr.generating}
+      statusText={reflecting
+        ? tr.reflecting
+        : maxModeTotal > 0
+          ? tr.runningCandidates(maxModeTotal)
+          : judgePhase
+            ? tr.synthesizing
+            : tr.working}
       {elapsed}
       {pendingRecallTurnId}
       {activeBlockId}

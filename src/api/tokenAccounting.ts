@@ -235,6 +235,9 @@ export interface TokenBreakdown {
   steps: number;
   /** Fields carrying a provider-reported exact count rather than a scaled char estimate. */
   exact: string[];
+  /** The reflection call's own spend. Absent when reflection did not run. Additive per the stream
+   *  contract — the sibling slices keep summing to the reported input/output totals without it. */
+  reflection?: { promptTokens: number; completionTokens: number };
 }
 
 /**
@@ -366,6 +369,71 @@ export function aggregateBestOfN(
 
 function sum(values: number[]): number {
   return values.reduce((a, b) => a + b, 0);
+}
+
+/** The reflection call: a single tool-less LLM call, measured like the judge. */
+export interface ReflectionAccounting {
+  basis: TurnBasis;
+  totalUsage?: LanguageModelUsage;
+  lastStepUsage?: LanguageModelUsage;
+}
+
+/** Char counts of the answer reflection replaced, when it produced a revision. */
+export interface ReflectionAnswerSwap {
+  originalAnswerTokens: number;
+  revisedAnswerTokens: number;
+}
+
+/**
+ * Fold a reflection call into a turn whose usage is already resolved.
+ *
+ * Spend simply adds up: the reflection round trip is real prompt and completion tokens. Occupancy
+ * does not — reflection carries no state into the next request, so `contextTokens` only moves when a
+ * revision *replaced* the answer, because the client then replays the revision instead of the
+ * streamed text. Getting that wrong is not cosmetic: the client gates its send button on this number.
+ *
+ * Applies to both turn shapes. `breakdown` may be a `BestOfNBreakdown`; the reflection slice is
+ * additive either way, and the existing slices are left untouched so they keep summing to the totals
+ * the provider reported for the turn itself.
+ */
+export function applyReflection(
+  usage: {
+    promptTokens: number;
+    completionTokens: number;
+    contextTokens: number;
+    estimated: boolean;
+  },
+  breakdown: TokenBreakdown,
+  reflection: ReflectionAccounting,
+  answerSwap?: ReflectionAnswerSwap,
+): {
+  promptTokens: number;
+  completionTokens: number;
+  contextTokens: number;
+  estimated: boolean;
+  breakdown: TokenBreakdown;
+} {
+  const resolved = resolveUsage(reflection.totalUsage, reflection.lastStepUsage, reflection.basis);
+  const contextTokens = answerSwap
+    ? Math.max(
+        usage.contextTokens - answerSwap.originalAnswerTokens + answerSwap.revisedAnswerTokens,
+        0,
+      )
+    : usage.contextTokens;
+
+  return {
+    promptTokens: usage.promptTokens + resolved.promptTokens,
+    completionTokens: usage.completionTokens + resolved.completionTokens,
+    contextTokens,
+    estimated: usage.estimated || resolved.estimated,
+    breakdown: {
+      ...breakdown,
+      reflection: {
+        promptTokens: resolved.promptTokens,
+        completionTokens: resolved.completionTokens,
+      },
+    },
+  };
 }
 
 /** Distribute the reported input/output totals over the turn's char basis so the UI can show

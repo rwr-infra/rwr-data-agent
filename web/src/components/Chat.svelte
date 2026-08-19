@@ -5,6 +5,7 @@
   import ReasoningBlock from './ReasoningBlock.svelte';
   import ToolCallCard from './ToolCallCard.svelte';
   import ThinkingIndicator from './ThinkingIndicator.svelte';
+  import { formatElapsed } from '../lib/utils.js';
   import CandidatePanel from './CandidatePanel.svelte';
 
   interface Props {
@@ -14,6 +15,8 @@
     thinkingText: string;
     searchingText: string;
     generatingText: string;
+    /** Label for the tail status line — what the turn is doing now that it has produced something. */
+    statusText: string;
     elapsed: number;
     pendingRecallTurnId: string | null;
     /** Id of the block still receiving deltas — it gets the caret / the live reasoning header. */
@@ -27,7 +30,7 @@
     onconfirmrecall: () => void;
     oncancelrecall: () => void;
   }
-  let { items, thinking, streaming, thinkingText, searchingText, generatingText, elapsed, pendingRecallTurnId, activeBlockId, tr, loading, onretry, onrecall, oncopy, oncopyturn, onconfirmrecall, oncancelrecall }: Props = $props();
+  let { items, thinking, streaming, thinkingText, searchingText, generatingText, statusText, elapsed, pendingRecallTurnId, activeBlockId, tr, loading, onretry, onrecall, oncopy, oncopyturn, onconfirmrecall, oncancelrecall }: Props = $props();
 
   // The turn still streaming. Its action bar and meta line stay hidden until it finishes.
   let liveTurnId = $derived(streaming ? items[items.length - 1]?.turnId : undefined);
@@ -45,9 +48,28 @@
   // Each of these binds the neighbour to a local first: indexing twice (`items[i-1].type === … &&
   // items[i-1].role === …`) discards the narrowing between the two reads, since TS cannot know the
   // array did not change in between.
-  function prevWasAi(i: number): boolean {
+  /** True when the block before `i` is one this turn's answer text lives in — an AI message, or the
+   *  revision that superseded it. Both render the meta line inside their own block. */
+  function prevWasAnswer(i: number): boolean {
     const prev = i > 0 ? items[i - 1] : undefined;
+    if (prev?.type === 'revision') return true;
     return prev?.type === 'message' && prev.role === 'ai';
+  }
+
+  /**
+   * One-line summary of a revision's findings, e.g. `缺少证据支撑的结论 ×10、缺少来源文件引用 ×3`.
+   *
+   * Aggregated by code rather than listed: a reflection routinely reports the same finding about
+   * several claims, and one badge each turned the header into a row of a dozen identical chips that
+   * said nothing the count does not. The per-claim `detail` stays on the wire for the log; what the
+   * reader needs here is which checks failed and roughly how often.
+   */
+  function issueSummary(issues: { code: string; detail?: string }[]): string {
+    const counts = new Map<string, number>();
+    for (const issue of issues) counts.set(issue.code, (counts.get(issue.code) ?? 0) + 1);
+    return [...counts]
+      .map(([code, n]) => `${tr.reflectionIssue(code)}${n > 1 ? ` ×${n}` : ''}`)
+      .join('、');
   }
 
   /** Text of the meta line that follows an AI message, or '' when there is none. */
@@ -57,16 +79,21 @@
   }
 
   /**
-   * The last AI text block of each turn — the action bar belongs to the turn, not to every block
+   * The last answer block of each turn — the action bar belongs to the turn, not to every block
    * (text → tool → text …), so it hangs off the final one only. One reverse pass, recomputed when
    * `items` changes; a per-row forward scan would make every streamed delta O(items × turn size).
+   *
+   * A revision counts, and being later it wins: the turn's copy/retry belong to the answer the
+   * conversation actually continues from, and hanging a second bar off the superseded text would give
+   * one turn two.
    */
   let turnEndIds = $derived.by(() => {
     const ids = new Set<string>();
     const seen = new Set<string>();
     for (let j = items.length - 1; j >= 0; j--) {
       const it = items[j];
-      if (it.type === 'message' && it.role === 'ai' && !seen.has(it.turnId)) {
+      const isAnswer = it.type === 'revision' || (it.type === 'message' && it.role === 'ai');
+      if (isAnswer && !seen.has(it.turnId)) {
         seen.add(it.turnId);
         ids.add(it.id);
       }
@@ -80,7 +107,7 @@
   let rows = $derived(
     items
       .map((item, i) => ({ item, i }))
-      .filter(({ item, i }) => !(item.type === 'meta' && prevWasAi(i))),
+      .filter(({ item, i }) => !(item.type === 'meta' && prevWasAnswer(i))),
   );
 
   let chatEl: HTMLDivElement | undefined = $state();
@@ -250,6 +277,27 @@
       <div class:opacity-50={isDimmed(i)} class:transition-opacity={isDimmed(i)}>
         <CandidatePanel candidates={item.candidates} kind={item.kind} {tr} />
       </div>
+    {:else if item.type === 'reflection'}
+      <div class="flex flex-col items-start animate-fade-in" class:opacity-50={isDimmed(i)} class:transition-opacity={isDimmed(i)}>
+        <div class="text-xs text-success/70">{tr.reflectionPass}</div>
+      </div>
+    {:else if item.type === 'revision'}
+      <!-- Rendered as an ordinary answer bubble, not a quote or a collapsible panel: this *is* the
+           answer the conversation continues from, and framing it as an aside made the superseded
+           version look like the real one. The findings collapse into a single note above it — one
+           badge per repeated finding filled the header with a dozen identical chips. -->
+      <div class="group flex flex-col items-start animate-fade-in" class:opacity-50={isDimmed(i)} class:transition-opacity={isDimmed(i)}>
+        <div class="text-xs text-warning/80 mb-1">
+          {tr.revisionNote}{issueSummary(item.issues) ? ` · ${issueSummary(item.issues)}` : ''}
+        </div>
+        <Message content={item.text} type="ai" />
+        {#if item.turnId !== liveTurnId && turnEndIds.has(item.id)}
+          {#if metaTextAt(i)}
+            <div class="text-xs text-base-content/50 mt-0.5 animate-fade-in">{metaTextAt(i)}</div>
+          {/if}
+          {@render aiActions(item.turnId)}
+        {/if}
+      </div>
     {/if}
 
     {#if pendingRecallTurnId && item.type === 'message' && item.role === 'user' && item.turnId === pendingRecallTurnId}
@@ -263,6 +311,17 @@
 
   {#if thinking}
     <ThinkingIndicator {thinkingText} {searchingText} {generatingText} {elapsed} />
+  {:else if loading}
+    <!-- The turn has produced something but is not done. Every phase after the first block used to be
+         silent — most visibly the post-answer self-check, which can hold the stream for up to a minute
+         with a complete answer on screen and the stop button still lit, indistinguishable from a hang.
+         One line, present until `finish`, naming the phase. Not the skeleton indicator above: that one
+         stands in for content that does not exist yet, and here it does. -->
+    <div class="flex items-center gap-2 px-1 text-xs text-base-content/60 animate-fade-in" role="status" aria-live="polite">
+      <span class="loading loading-dots loading-xs text-primary"></span>
+      <span>{statusText}</span>
+      <span class="text-base-content/40">{formatElapsed(elapsed)}</span>
+    </div>
   {/if}
   </div>
 </div>

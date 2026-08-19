@@ -266,6 +266,23 @@ export const config = {
    *  switches the main model; otherwise the judge follows the turn's selected model. */
   judgeModelExplicit: !!process.env.JUDGE_MODEL,
 
+  // ── Reflection (post-answer self-critique) ────────────────────────────────
+  /**
+   * Master switch for reflection: after the answer has streamed, one tool-less call re-checks it
+   * against the retrieved context and the tool transcript, and rewrites it when a check fails.
+   *
+   * Off by default, unlike best-of-N. Max mode is opted into per message by the user, while
+   * reflection fires on its own whenever a turn looks risky — and inheritance/enumeration questions
+   * are the bulk of real traffic, so defaulting it on would add an LLM round trip to most turns
+   * before there is any measured pass rate to justify the spend.
+   */
+  reflectionEnabled: process.env.REFLECTION_ENABLED === 'true',
+  /** Model for the reflection call — defaults to the main model, can be a stronger checker. */
+  reflectionModel: process.env.REFLECTION_MODEL ?? process.env.LLM_MODEL ?? 'deepseek-v4-flash',
+  /** True when REFLECTION_MODEL was explicitly set — then it stays pinned even when the client
+   *  switches the main model; otherwise reflection follows the turn's selected model. */
+  reflectionModelExplicit: !!process.env.REFLECTION_MODEL,
+
   // ── Observability ─────────────────────────────────────────────────────────
   langfuseEnabled: process.env.LANGFUSE_ENABLED === 'true',
   langfusePublicKey: process.env.LANGFUSE_PUBLIC_KEY ?? '',
