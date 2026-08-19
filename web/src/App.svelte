@@ -775,6 +775,10 @@
               maxModeTotal = 0;
               judgePhase = false;
             } else if (event.type === 'reflection') {
+              // Defensive rather than a known path: today a turn that reflects has already streamed
+              // text or a tool step, so the indicator is long gone. The invariant is what matters —
+              // any block that reaches the timeline ends the thinking state.
+              beginStreaming();
               // The self-check's outcome, after the answer and before `finish`. A clean check is a
               // one-line badge; a check that found something renders as the revision block that
               // follows, so its findings are carried there instead of shown twice.
@@ -789,6 +793,7 @@
               }
               displayItems = displayItems;
             } else if (event.type === 'revision') {
+              beginStreaming();
               // The revised answer, whole. The streamed original stays on screen above it — the
               // timeline is what actually happened — but this is the version `history` carries, so the
               // next request is not built on an answer the server itself flagged.
@@ -854,7 +859,12 @@
       // A turn that already streamed part of an answer keeps its user message: the partial reply is
       // pushed onto `history` below, and dropping the question would leave two assistant turns in a
       // row — a malformed history that the next request replays to the model.
-      if (answerText()) {
+      //
+      // `revisionText` counts, and must: a `step-limit` turn streams no text of its own, so a break
+      // after the revision frame would roll the question back here while the persistence path below
+      // still stores the revision — an assistant message with no question in front of it. The two
+      // have to agree on what "produced an answer" means.
+      if (revisionText ?? answerText()) {
         displayItems.push({ type: 'meta', text: tr.streamInterrupted, id: uid(), turnId });
       } else {
         // Blocks appear as soon as *any* delta arrives, reasoning and tool calls included, so a break

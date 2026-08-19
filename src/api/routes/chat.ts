@@ -633,14 +633,20 @@ export async function chatRoutes(app: FastifyInstance) {
           });
           chainObs.otelSpan.setAttribute('langfuse.trace.output', result.answer.slice(0, 500));
           // The judge merges the drafts, it does not verify them against the evidence, so a synthesis
-          // carries the same risks a single answer does. The transcript stays empty: candidate tool
-          // steps are streamed as progress but never returned, so the reflection prompt checks this
-          // answer against the shared retrieval context alone.
+          // carries the same risks a single answer does. Every candidate's transcript goes in, tagged
+          // with its index: reflection selects this turn partly on a failed candidate call, so it has
+          // to be able to see that call. The prompt's own budget trims the merged list if N loops
+          // made it long.
+          // `runBestOfN` never throws, so a user stop does not reach the handler's catch (whose
+          // `stopped` branch only ever sees structured mode) — the candidates just abort, the
+          // orchestrator falls back to the best draft, and `completed` would go out for a turn the
+          // user cut short. The registry is the authority on that, same as the single path.
+          const stopReason = turn.stoppedByUser() ? 'stopped' : result.stopReason;
           const reflection = await reflectAndEmit({
             answer: result.answer,
-            stopReason: result.stopReason,
+            stopReason,
             toolFailureCount: result.perCandidate.reduce((n, c) => n + c.toolFailures, 0),
-            toolTranscript: [],
+            toolTranscript: result.perCandidate.flatMap((c) => c.toolTranscript),
           });
           const finalUsage = reflection
             ? applyReflection(
@@ -657,7 +663,7 @@ export async function chatRoutes(app: FastifyInstance) {
             : { ...agg, breakdown: agg.breakdown };
           emit({
             type: 'finish',
-            stopReason: result.stopReason,
+            stopReason,
             usage: {
               promptTokens: finalUsage.promptTokens,
               completionTokens: finalUsage.completionTokens,

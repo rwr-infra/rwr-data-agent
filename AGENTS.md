@@ -413,7 +413,7 @@ Still open: the prompt claims a 3–6 call budget that nothing enforces.
 
 ### Reflection (post-answer self-critique)
 
-One tool-less call *after* the answer has streamed, re-checking it against the retrieved context and the tool transcript and rewriting it when a check fails. Orchestrated by `runReflection()` (`src/agent/reflect.ts`), prompted by `buildReflectionPrompt()` (`src/retrieval/reflectionPrompt.ts`) — the same shape as the best-of-N judge, and deliberately so: a single `generateObject` call, no tools, no shaper, no step loop.
+One tool-less call *after* the answer has streamed, re-checking it against the retrieved context and the tool transcript and rewriting it when a check fails. Orchestrated by `runReflection()` (`src/agent/reflect.ts`), prompted by `buildReflectionPrompt()` (`src/retrieval/reflectionPrompt.ts`) — the same shape as the best-of-N judge, and deliberately so: one streamed call, no tools, no shaper, no step loop, with the JSON verdict accumulated and parsed afterwards (see below for why it is neither `generateObject` nor non-streamed).
 
 **It checks what the system prompt already asks for and nothing else** — citations, `**Name** (\`key\`)` form, package scope, enumeration counts, claims with no evidence. Those instructions were never verified programmatically; this is the first thing that does. A checker with opinions of its own would rewrite answers that were already fine.
 

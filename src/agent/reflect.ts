@@ -417,7 +417,11 @@ export async function runReflection(
   } catch (err) {
     // A reflection that could not run is a reflection that did not happen, not a turn that failed.
     // Never surfaced as an `error` event — that one means the stream itself broke.
-    console.warn(`[reflection] skipped: ${(err as Error).message}`);
+    //
+    // Read defensively: the `error` stream part above rethrows whatever the provider put there, which
+    // is not necessarily an Error. `(err as Error).message` on a null would throw a TypeError out of
+    // this catch and break the never-throws contract on a turn that already has its answer.
+    console.warn(`[reflection] skipped: ${err instanceof Error ? err.message : String(err)}`);
     obs?.update({ level: 'ERROR', statusMessage: 'Reflection failed' });
     return undefined;
   } finally {

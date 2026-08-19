@@ -49,6 +49,25 @@ describe('shipped skills.d', () => {
       expect(body).toMatch(/格式样例|以本轮/);
     }
   });
+
+  /**
+   * The framing line above the examples may say what the examples *are*; it may not say what to do
+   * when answering. The distinction is not pedantry — a directive here is a rule the base prompt
+   * already owns, duplicated into every matching turn, which is the thing measured at 5→7 steps.
+   *
+   * The check that used to live above missed exactly this: it only rejected numbered procedures and
+   * ReAct labels, so a mid-sentence "就说…，不要…" passed. It is the preamble that is checked, not the
+   * examples — an example answer legitimately contains ordinary prose.
+   */
+  it('keeps behavioural directives out of the framing above the examples', () => {
+    const DIRECTIVE =
+      /就说|应当|必须|请先|你应该|不要(用|把|说)|you (should|must)|\balways \b|\bnever \b/i;
+    for (const name of FEWSHOT) {
+      const body = (byName.get(name) as Skill).body;
+      const preamble = body.split(/\*\*(?:样例|Example)/)[0];
+      expect(preamble, `${name} framing reads as an instruction`).not.toMatch(DIRECTIVE);
+    }
+  });
 });
 
 describe('few-shot triggers', () => {

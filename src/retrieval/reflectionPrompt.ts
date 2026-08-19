@@ -60,6 +60,9 @@ export interface ReflectionToolCallLine {
   /** `summarizeToolResult` output, e.g. `2 layer(s)` or the error message. */
   result: string;
   ok: boolean;
+  /** Best-of-N only: which candidate loop made the call. N candidates run the same question, so
+   *  without it the merged transcript reads as one loop that called `findReferences` five times. */
+  candidate?: number;
 }
 
 export interface ReflectionPromptOptions {
@@ -67,7 +70,7 @@ export interface ReflectionPromptOptions {
   /** The answer under review. Empty is valid — see the module comment. */
   answer: string;
   retrievedContext: SearchResult[];
-  /** Empty in max mode: candidate tool steps never leave the orchestrator. */
+  /** In max mode this is every candidate's calls merged, each tagged with its `candidate` index. */
   toolTranscript: ReflectionToolCallLine[];
   packageScope?: string;
   intent: QueryCategory;
@@ -179,7 +182,8 @@ function fitInput(
 }
 
 function renderCall(c: ReflectionToolCallLine): string {
-  return `- ${c.toolName}(${c.input}) → ${c.ok ? c.result : `FAILED: ${c.result}`}`;
+  const who = c.candidate !== undefined ? `[candidate ${c.candidate + 1}] ` : '';
+  return `- ${who}${c.toolName}(${c.input}) → ${c.ok ? c.result : `FAILED: ${c.result}`}`;
 }
 
 function renderTranscript(lines: string[]): string {

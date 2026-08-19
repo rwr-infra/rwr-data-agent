@@ -136,8 +136,8 @@ sequenceDiagram
     F-->>C: {"type":"text-delta"}
 
     opt reflection (REFLECTION_ENABLED, risky turn only)
-        F->>M: generateObject(review the answer vs the evidence)
-        M-->>F: {verdict, issues, revisedAnswer?}
+        F->>M: streamText(review the answer vs the evidence)
+        M-->>F: JSON text, accumulated then parsed leniently
         F-->>C: {"type":"reflection","verdict":"revised","issues":[…]}
         F-->>C: {"type":"revision","text":"…"}
     end

@@ -2,7 +2,7 @@
 name: fewshot-inheritance
 triggers: [继承, 父类, 基类, 派生, inherit, extends, parent chain, base file]
 ---
-以下是继承类回答的**格式样例**：看的是**排版与归属写法**，不是内容。层数、属性、文件路径一律以本轮 `getInheritanceChain` / `readSource` 的实际结果为准。**某一层的工具调用失败时，就说这一层没读到，不要用样例或常识补上它的属性。**
+以下是继承类回答的**格式样例**：看的是**排版与归属写法**，不是内容。层数、属性、文件路径一律以本轮 `getInheritanceChain` / `readSource` 的实际结果为准——**样例里的具体数值只示范排版，不是本轮的证据。**
 
 **样例 1**
 
