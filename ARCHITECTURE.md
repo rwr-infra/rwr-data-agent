@@ -46,6 +46,12 @@ until it produces a text answer or hits `stopWhen: stepCountIs(MAX_TOOL_STEPS)` 
 
 Every step re-sends the whole prompt, which is why both the shaper and the accounting exist.
 
+Once the loop has produced its answer, a risky turn can get one more tool-less call: **reflection**
+re-checks the answer against the retrieved context and the tool transcript and rewrites it when a
+check fails (`REFLECTION_ENABLED`, off by default — see the Reflection section in `AGENTS.md`). It
+runs *after* the answer streamed, so it appends `reflection` / `revision` lines rather than delaying
+the first token, and it never recurses.
+
 ```mermaid
 flowchart TD
     subgraph STEP["one step"]
@@ -107,7 +113,7 @@ sequenceDiagram
     participant T as Tools
 
     C->>F: POST /v1/chat/completions
-    F-->>C: {"type":"turn-start","turnId":"…","protocolVersion":"1.1"}
+    F-->>C: {"type":"turn-start","turnId":"…","protocolVersion":"1.2"}
     F->>F: search → buildUserPrompt
     F->>M: streamText(system, messages, tools)
 
@@ -128,6 +134,14 @@ sequenceDiagram
 
     M-->>F: text deltas
     F-->>C: {"type":"text-delta"}
+
+    opt reflection (REFLECTION_ENABLED, risky turn only)
+        F->>M: generateObject(review the answer vs the evidence)
+        M-->>F: {verdict, issues, revisedAnswer?}
+        F-->>C: {"type":"reflection","verdict":"revised","issues":[…]}
+        F-->>C: {"type":"revision","text":"…"}
+    end
+
     F-->>C: {"type":"finish","stopReason":"completed","usage":{…,"breakdown":{…}}}
 ```
 
@@ -139,8 +153,10 @@ sequenceDiagram
 | `json-delta` | partial object, structured mode only |
 | `tool-step` | opening (`summary`) then closing (`done`, `ok`, `durationMs`), paired by `toolCallId` |
 | `steer-applied` | a mid-stream instruction reached the loop — once per message, not per step |
+| `reflection` | the post-answer self-check: `verdict` (`pass` / `revised`), `issues[]`, `trigger[]`. Absence means *not checked*, not *clean* |
+| `revision` | the revised answer, whole — the version that enters the conversation history |
 | `finish` | `stopReason` (`completed` / `step-limit` / `output-limit` / `stopped`) + usage and its per-slice breakdown |
-| `error` | the stream itself broke — **not** used for tool failures or stop reasons |
+| `error` | the stream itself broke — **not** used for tool failures, stop reasons, or reflection findings |
 
 `finish.usage` separates **spend** from **occupancy**: `promptTokens`/`completionTokens` sum every
 step of the loop, while `contextTokens` is what the next request will carry. `breakdown` attributes

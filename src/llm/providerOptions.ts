@@ -36,6 +36,22 @@ export function disabledThinkingOptions(): Record<string, Record<string, JSONVal
 }
 
 /**
+ * Options for the reflection call. It checks an answer against evidence rather than writing one, so
+ * temperature is pinned low regardless of `LLM_TEMPERATURE` — a creative re-reading of the same
+ * context is exactly the failure mode here. Thinking is only overridden when the operator configured
+ * the field at all, so the flag is never sent to a model that does not understand it (B3).
+ */
+export function buildReflectionProviderOptions(): Record<string, Record<string, JSONValue>> {
+  const base = buildLlmProviderOptions() ?? {};
+  const llm: Record<string, JSONValue> = { ...(base.llm ?? {}) };
+  llm.temperature = 0.2;
+  if (config.llmThinkingEnabled !== undefined) {
+    llm.thinking = { type: 'disabled' };
+  }
+  return { llm };
+}
+
+/**
  * Per-candidate options for best-of-N runs: the main options as a base, overridden with the
  * candidate's own temperature and seed. Both live under the same `llm` key as the base fields,
  * so they are forwarded verbatim (snake_case) next to reasoning_effort / thinking.

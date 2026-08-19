@@ -86,6 +86,9 @@ export interface BestOfNCandidateResult extends BestOfNCandidateAccounting {
   temperature: number;
   seed: number;
   finishReason: string | undefined;
+  /** Failed tool calls in this candidate's loop. Reported so the route can use the same risk signal
+   *  for reflection here as on the single path; it was previously only logged. */
+  toolFailures: number;
 }
 
 export interface BestOfNJudgeResult extends BestOfNJudgeAccounting {
@@ -369,6 +372,7 @@ async function runCandidate(
       temperature,
       seed,
       finishReason: finishReason ?? undefined,
+      toolFailures: toolFailureCount,
     };
   } catch (err) {
     console.warn(`[best-of-n] candidate ${i} failed: ${(err as Error).message}`);
@@ -396,6 +400,7 @@ async function runCandidate(
       temperature,
       seed,
       finishReason: 'error',
+      toolFailures: toolFailureCount,
     };
   } finally {
     obs?.end();
@@ -558,6 +563,7 @@ function failedCandidate(options: BestOfNOptions, i: number): BestOfNCandidateRe
     temperature: 0,
     seed: 0,
     finishReason: 'error',
+    toolFailures: 0,
   };
 }
 

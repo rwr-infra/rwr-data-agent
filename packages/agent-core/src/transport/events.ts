@@ -14,7 +14,7 @@
  * Bump the minor for a new optional field or event type; the major only for a change the rule
  * above forbids. Announced on `turn-start` so a client can refuse to guess.
  */
-export const PROTOCOL_VERSION = '1.1';
+export const PROTOCOL_VERSION = '1.2';
 
 /** Why a turn ended. Consumers **must** tolerate an unknown value here. */
 export type StopReason = 'completed' | 'step-limit' | 'output-limit' | 'stopped';
@@ -76,6 +76,41 @@ export interface SteerAppliedEvent {
 }
 
 /**
+ * Outcome of the post-answer self-critique, emitted after the answer text and before `finish`.
+ *
+ * A turn that did not reflect emits nothing here — absence means "not checked", never "checked and
+ * clean". `revised` is the only verdict followed by a `revision` event; a client that renders the
+ * reflection must therefore tolerate both orders of arrival being absent.
+ *
+ * Findings are **not** errors: a reflection that fails its own checks still leaves a complete turn,
+ * so nothing here may travel as an `ErrorEvent`.
+ */
+export interface ReflectionEvent {
+  type: 'reflection';
+  verdict: 'pass' | 'revised';
+  /**
+   * Machine-readable findings. `code` is an open set (`missing-citation`, `missing-key`,
+   * `scope-violation`, `count-mismatch`, `unsupported-claim`, `no-answer`, `other` today) — the
+   * client owns the wording and must tolerate an unknown value. `detail` is model-produced prose in
+   * the question's language, displayed verbatim like answer text rather than localized.
+   */
+  issues?: { code: string; detail?: string }[];
+  /** Which risk signals selected this turn for reflection, e.g. `['tool-failure']`. */
+  trigger?: string[];
+}
+
+/**
+ * The revised answer, whole rather than as deltas — the original already streamed as `text-delta`
+ * and stays on screen. This is the version that enters the conversation history: a client replaying
+ * the turn sends this instead of the streamed text, so a client that ignores the event keeps the
+ * original and stays consistent with itself.
+ */
+export interface RevisionEvent {
+  type: 'revision';
+  text: string;
+}
+
+/**
  * Token usage for the turn. The two halves answer different questions and are not interchangeable:
  * `promptTokens`/`completionTokens` are **spend** (summed across every step of the loop), while
  * `contextTokens` is **occupancy** — what the *next* request will carry, with the tool transcript
@@ -113,6 +148,8 @@ export type AgentEvent =
   | JsonDeltaEvent
   | ToolStepEvent
   | SteerAppliedEvent
+  | ReflectionEvent
+  | RevisionEvent
   | FinishEvent
   | ErrorEvent;
 

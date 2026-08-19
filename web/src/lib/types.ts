@@ -28,7 +28,17 @@ export type TurnSegment =
       output?: string;
       ok?: boolean;
       durationMs?: number;
-    };
+    }
+  | {
+      kind: 'reflection';
+      verdict: 'pass' | 'revised';
+      issues?: { code: string; detail?: string }[];
+    }
+  /** The revised answer. Also what `Message.content` holds for the turn, so the replayed timeline and
+   *  the history the next request sends agree on which version is the answer. The findings are
+   *  repeated here rather than looked up on the neighbouring reflection segment, so a replay needs no
+   *  cross-segment bookkeeping to render the same block. */
+  | { kind: 'revision'; text: string; issues?: { code: string; detail?: string }[] };
 
 /** Per-turn statistics as reported by `finish.usage`, kept on the assistant message. */
 export interface TurnStat {
@@ -68,6 +78,8 @@ export interface TokenBreakdown {
   perCandidate?: { i: number; steps: number; promptTokens: number; completionTokens: number }[];
   /** Best-of-N: the synthesis call's own spend. Absent when the turn fell back. */
   judge?: { promptTokens: number; completionTokens: number };
+  /** The reflection call's own spend. Absent when the turn did not reflect. */
+  reflection?: { promptTokens: number; completionTokens: number };
 }
 
 export interface ToolStep {
@@ -108,6 +120,19 @@ export type DisplayItem =
       turnId: string;
     }
   | { type: 'meta'; text: string; id: string; turnId: string }
+  /** A clean self-check, rendered as a one-line badge. A check that found something renders as the
+   *  `revision` block instead — the findings belong next to the answer that fixes them. */
+  | { type: 'reflection'; verdict: 'pass'; id: string; turnId: string }
+  /** The revised answer, rendered as an ordinary AI bubble — it is the answer the conversation
+   *  continues from, so it carries the turn's action bar and meta line. `issues` collapses into the
+   *  one-line note above it, aggregated by code. */
+  | {
+      type: 'revision';
+      text: string;
+      issues: { code: string; detail?: string }[];
+      id: string;
+      turnId: string;
+    }
   | { type: 'candidate-trace'; candidate: number; total: number; steps: ToolStep[]; done?: boolean; ok?: boolean; id: string; turnId: string }
   | { type: 'candidate-panel'; candidates: CandidateView[]; kind?: 'synthesis' | 'fallback'; id: string; turnId: string };
 
