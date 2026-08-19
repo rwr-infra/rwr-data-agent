@@ -97,6 +97,13 @@ export interface BestOfNCandidateResult extends BestOfNCandidateAccounting {
    * failed candidate call, so without the transcript it is asked to judge whether the synthesis leans
    * on a failure it cannot see. Summaries, not raw payloads — the merged N-candidate transcript is
    * already the largest thing in that prompt.
+   *
+   * **Required, not optional, and deliberately so.** The "additive, optional fields only" rule is the
+   * NDJSON protocol's promise to external clients (`packages/agent-core/src/transport/events.ts`); it
+   * does not govern this type, which is internal — every construction site is in this file and the
+   * only consumer is the chat route. Required is what makes the compiler check them: optional plus a
+   * `?? []` at the consumer would turn "this return path forgot to fill it" into a silently empty
+   * transcript, which is precisely the bug this field was added to fix.
    */
   toolTranscript: ReflectionToolCallLine[];
 }

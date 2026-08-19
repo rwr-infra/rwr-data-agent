@@ -61,7 +61,7 @@ describe('shipped skills.d', () => {
    */
   it('keeps behavioural directives out of the framing above the examples', () => {
     const DIRECTIVE =
-      /就说|应当|必须|请先|你应该|不要(用|把|说)|you (should|must)|\balways \b|\bnever \b/i;
+      /就说|应当|必须|请先|你应该|不要(用|把|说)|you (should|must)|\b(?:always|never)\b/i;
     for (const name of FEWSHOT) {
       const body = (byName.get(name) as Skill).body;
       const preamble = body.split(/\*\*(?:样例|Example)/)[0];
