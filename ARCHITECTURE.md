@@ -113,7 +113,7 @@ sequenceDiagram
     participant T as Tools
 
     C->>F: POST /v1/chat/completions
-    F-->>C: {"type":"turn-start","turnId":"…","protocolVersion":"1.2"}
+    F-->>C: {"type":"turn-start","turnId":"…","protocolVersion":"1.3"}
     F->>F: search → buildUserPrompt
     F->>M: streamText(system, messages, tools)
 
@@ -136,6 +136,7 @@ sequenceDiagram
     F-->>C: {"type":"text-delta"}
 
     opt reflection (REFLECTION_ENABLED, risky turn only)
+        F-->>C: {"type":"reflection-start","trigger":["tool-failure"]}
         F->>M: streamText(review the answer vs the evidence)
         M-->>F: JSON text, accumulated then parsed leniently
         F-->>C: {"type":"reflection","verdict":"revised","issues":[…]}
@@ -153,6 +154,7 @@ sequenceDiagram
 | `json-delta` | partial object, structured mode only |
 | `tool-step` | opening (`summary`) then closing (`done`, `ok`, `durationMs`), paired by `toolCallId` |
 | `steer-applied` | a mid-stream instruction reached the loop — once per message, not per step |
+| `reflection-start` | the self-check began — `trigger[]` only, so a client can label a phase that emits nothing else. No verdict is promised |
 | `reflection` | the post-answer self-check: `verdict` (`pass` / `revised`), `issues[]`, `trigger[]`. Absence means *not checked*, not *clean* |
 | `revision` | the revised answer, whole — the version that enters the conversation history |
 | `finish` | `stopReason` (`completed` / `step-limit` / `output-limit` / `stopped`) + usage and its per-slice breakdown |

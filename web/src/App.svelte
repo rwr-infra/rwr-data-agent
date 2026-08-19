@@ -42,6 +42,10 @@
   let maxMode = $state(readCache().maxMode === true);
   let maxModeTotal = $state(0);
   let judgePhase = $state(false);
+  // The turn is in its post-answer self-check. Set by `reflection-start` and cleared by whatever ends
+  // the phase — the verdict, `finish`, or a break — because a reflection that could not run emits no
+  // verdict at all, and a status line stuck on "checking" is worse than none.
+  let reflecting = $state(false);
   let contextUsed = $state(0);
   let lastBreakdown = $state<TokenBreakdown | undefined>(undefined);
   // Fallback until the first `finish` event reports the server's own MAX_CONTEXT_TOKENS. Hardcoding
@@ -774,7 +778,10 @@
               displayItems = displayItems;
               maxModeTotal = 0;
               judgePhase = false;
+            } else if (event.type === 'reflection-start') {
+              reflecting = true;
             } else if (event.type === 'reflection') {
+              reflecting = false;
               // Defensive rather than a known path: today a turn that reflects has already streamed
               // text or a tool step, so the indicator is long gone. The invariant is what matters —
               // any block that reaches the timeline ends the thinking state.
@@ -804,6 +811,9 @@
               displayItems.push({ type: 'revision', text: revisionText, issues: pendingIssues, id: uid(), turnId });
               displayItems = displayItems;
             } else if (event.type === 'finish') {
+              // A reflection that failed emits no verdict, so this is the only terminator the phase is
+              // guaranteed to get from the stream itself.
+              reflecting = false;
               // The turn is over: nothing is accumulating any more, so the caret stops blinking on
               // whatever block was last. Flush deferred deltas first — dropping the cursors is what
               // would otherwise turn the final render() below into a no-op on a hidden tab.
@@ -856,6 +866,7 @@
       stopTimer();
       maxModeTotal = 0;
       judgePhase = false;
+      reflecting = false;
       // A turn that already streamed part of an answer keeps its user message: the partial reply is
       // pushed onto `history` below, and dropping the question would leave two assistant turns in a
       // row — a malformed history that the next request replays to the model.
@@ -897,6 +908,7 @@
     stopTimer();
     maxModeTotal = 0;
     judgePhase = false;
+    reflecting = false;
     // The turn is over on the server too, so steer/stop would 404 from here on.
     serverTurnId = null;
     // Final state goes in even while hidden: `paint()` may have deferred the last deltas to a rAF
@@ -1059,6 +1071,13 @@
       thinkingText={maxModeTotal > 0 ? tr.runningCandidates(maxModeTotal) : judgePhase ? tr.synthesizing : tr.thinking}
       searchingText={tr.searching}
       generatingText={tr.generating}
+      statusText={reflecting
+        ? tr.reflecting
+        : maxModeTotal > 0
+          ? tr.runningCandidates(maxModeTotal)
+          : judgePhase
+            ? tr.synthesizing
+            : tr.working}
       {elapsed}
       {pendingRecallTurnId}
       {activeBlockId}

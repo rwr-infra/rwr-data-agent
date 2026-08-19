@@ -95,6 +95,10 @@ export interface Translations {
   candidatesTitle: string;
   disagreement: string;
   fallbackNote: string;
+  /** Tail status line while the post-answer self-check runs. */
+  reflecting: string;
+  /** Tail status line for any other unfinished phase — a tool running, a step in flight. */
+  working: string;
   reflectionPass: string;
   revisionNote: string;
   /** Wording for one reflection finding code. The backend sends an open set of codes, so an unknown
@@ -187,6 +191,8 @@ const i18n: Record<Lang, Translations> = {
     candidatesTitle: 'N 路候选原文',
     disagreement: '候选答案之间可能存在分歧，以归纳结果为准。',
     fallbackNote: '⚠ 归纳失败，已回退到最佳单路候选答案。',
+    reflecting: '正在自检答案…',
+    working: '处理中…',
     reflectionPass: '✓ 自检通过',
     revisionNote: '已自检并修订，后续追问以此版本为准',
     reflectionIssue: (code) =>
@@ -282,6 +288,8 @@ const i18n: Record<Lang, Translations> = {
     candidatesTitle: 'N candidate drafts',
     disagreement: 'Candidates may disagree; the synthesis is authoritative.',
     fallbackNote: '⚠ Synthesis failed — fell back to the best single candidate.',
+    reflecting: 'Checking the answer…',
+    working: 'Working…',
     reflectionPass: '✓ Self-check passed',
     revisionNote: 'Self-checked and revised — later questions build on this version',
     reflectionIssue: (code) =>

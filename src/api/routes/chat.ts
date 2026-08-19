@@ -469,6 +469,10 @@ export async function chatRoutes(app: FastifyInstance) {
       });
       if (!triggers) return undefined;
 
+      // Announced before the call, not after: this phase emits nothing else for up to a minute, and a
+      // client with no way to label it shows a finished answer under a live stop button.
+      emit({ type: 'reflection-start', trigger: triggers });
+
       const reflection = await runReflection({
         model: getProvider().chatModel(reflectionModelId),
         query,

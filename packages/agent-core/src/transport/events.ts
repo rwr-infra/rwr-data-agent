@@ -14,7 +14,7 @@
  * Bump the minor for a new optional field or event type; the major only for a change the rule
  * above forbids. Announced on `turn-start` so a client can refuse to guess.
  */
-export const PROTOCOL_VERSION = '1.2';
+export const PROTOCOL_VERSION = '1.3';
 
 /** Why a turn ended. Consumers **must** tolerate an unknown value here. */
 export type StopReason = 'completed' | 'step-limit' | 'output-limit' | 'stopped';
@@ -73,6 +73,22 @@ export interface SteerAppliedEvent {
   turnId: string;
   step: number;
   message: string;
+}
+
+/**
+ * The post-answer self-critique has started. Carries no result — it exists so a client can say what
+ * the turn is doing during a phase that emits nothing else.
+ *
+ * Without it the reflection call is a silent gap between the last `text-delta` and `finish`, up to a
+ * minute long, indistinguishable from a stalled stream: the answer is complete on screen, the stop
+ * button is still lit, and nothing explains why. A client may ignore it, in which case the phase is
+ * simply unlabelled — but every `reflection-start` is followed by either a `reflection` or, if the
+ * check could not run, nothing at all, so it must never be treated as a promise of a verdict.
+ */
+export interface ReflectionStartEvent {
+  type: 'reflection-start';
+  /** Which risk signals selected this turn, same values as `ReflectionEvent.trigger`. */
+  trigger?: string[];
 }
 
 /**
@@ -148,6 +164,7 @@ export type AgentEvent =
   | JsonDeltaEvent
   | ToolStepEvent
   | SteerAppliedEvent
+  | ReflectionStartEvent
   | ReflectionEvent
   | RevisionEvent
   | FinishEvent

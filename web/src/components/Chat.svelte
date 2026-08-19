@@ -5,6 +5,7 @@
   import ReasoningBlock from './ReasoningBlock.svelte';
   import ToolCallCard from './ToolCallCard.svelte';
   import ThinkingIndicator from './ThinkingIndicator.svelte';
+  import { formatElapsed } from '../lib/utils.js';
   import CandidatePanel from './CandidatePanel.svelte';
 
   interface Props {
@@ -14,6 +15,8 @@
     thinkingText: string;
     searchingText: string;
     generatingText: string;
+    /** Label for the tail status line — what the turn is doing now that it has produced something. */
+    statusText: string;
     elapsed: number;
     pendingRecallTurnId: string | null;
     /** Id of the block still receiving deltas — it gets the caret / the live reasoning header. */
@@ -27,7 +30,7 @@
     onconfirmrecall: () => void;
     oncancelrecall: () => void;
   }
-  let { items, thinking, streaming, thinkingText, searchingText, generatingText, elapsed, pendingRecallTurnId, activeBlockId, tr, loading, onretry, onrecall, oncopy, oncopyturn, onconfirmrecall, oncancelrecall }: Props = $props();
+  let { items, thinking, streaming, thinkingText, searchingText, generatingText, statusText, elapsed, pendingRecallTurnId, activeBlockId, tr, loading, onretry, onrecall, oncopy, oncopyturn, onconfirmrecall, oncancelrecall }: Props = $props();
 
   // The turn still streaming. Its action bar and meta line stay hidden until it finishes.
   let liveTurnId = $derived(streaming ? items[items.length - 1]?.turnId : undefined);
@@ -308,6 +311,17 @@
 
   {#if thinking}
     <ThinkingIndicator {thinkingText} {searchingText} {generatingText} {elapsed} />
+  {:else if loading}
+    <!-- The turn has produced something but is not done. Every phase after the first block used to be
+         silent — most visibly the post-answer self-check, which can hold the stream for up to a minute
+         with a complete answer on screen and the stop button still lit, indistinguishable from a hang.
+         One line, present until `finish`, naming the phase. Not the skeleton indicator above: that one
+         stands in for content that does not exist yet, and here it does. -->
+    <div class="flex items-center gap-2 px-1 text-xs text-base-content/60 animate-fade-in" role="status" aria-live="polite">
+      <span class="loading loading-dots loading-xs text-primary"></span>
+      <span>{statusText}</span>
+      <span class="text-base-content/40">{formatElapsed(elapsed)}</span>
+    </div>
   {/if}
   </div>
 </div>
