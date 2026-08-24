@@ -441,6 +441,10 @@ The timeline is persisted: assistant `Message`s carry `segments: TurnSegment[]`,
 
 Streaming state lives in two variables: `streaming` (the turn is live — its action bar and meta line stay hidden) and `activeBlockId` (the one block still receiving deltas — it gets the caret). While a tool runs, `activeBlockId` is null, which is what stops the caret from blinking on a block that already ended.
 
+**Code blocks are highlighted for two languages only.** `web/src/lib/highlight.ts` takes `highlight.js/lib/core` and registers `xml` and `angelscript` by hand — the answers quote game data (XML, including the XML-in-disguise extensions `.weapon`, `.projectile`, `.vehicle`, …) and AngelScript, and nothing else. The barrel import would add 190+ grammars; these two cost **+9.5 kB gzipped** in the bundle. Adding a language is one import plus one `registerLanguage` line.
+
+Two details are load-bearing. A fence whose label is unknown — a bare `weapon`, or no label at all — falls back to *sniffing a leading `<`*, because the extension list is long and grows with the game while "starts with `<`" identifies all of them with no list to maintain. And `markdown/CodeBlock.svelte` only highlights once the text has held still for 120 ms: `MarkdownRenderer` parses in streaming mode, so an unterminated fence is re-parsed on every arriving token, and highlighting each intermediate string would re-tokenize the whole block dozens of times a second. Colors are painted from `--syntax-*` in `app.css` rather than by loading one of highlight.js' own theme stylesheets, so they live inside the two brand themes and there is nothing to swap when the theme toggles.
+
 ### Observability
 `src/observability/langfuse.ts` + `src/instrumentation.ts` — Langfuse OTel tracing wraps the chat chain (search / generation spans), gated by `LANGFUSE_ENABLED`.
 
