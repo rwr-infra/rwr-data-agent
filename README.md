@@ -78,7 +78,7 @@ Extra fields beyond the OpenAI schema:
 | `response_format: {"type":"json_object"}` | Return a structured enumeration/comparison object instead of prose |
 | `mode: "max"` | Best-of-N: run N candidate agent loops in parallel, then one synthesis call that merges them |
 | `candidates` | Candidate count for a `max` request (default `BEST_OF_N`, clamped to 8) |
-| `self_check` | Opt into the post-answer self-check. There is no server-side switch — omit it and reflection never runs. Once opted in it still fires only on a risky turn (a failed tool call, an exhausted step budget, an inheritance/enumeration question), adding a `reflection` event and, on a rewrite, a `revision` carrying the answer that enters the conversation history |
+| `self_check` | Opt into the post-answer self-check. There is no server-side switch — omit it and reflection never runs. Once opted in it still fires only on a risky turn (a failed tool call, an exhausted step budget, an inheritance/enumeration question), and it is best-effort: a selected turn announces itself with `reflection-start`, then *may* emit a `reflection` verdict and, on a rewrite, a `revision` carrying the answer that enters the conversation history. A check that times out or fails emits neither — only `finish` is guaranteed |
 
 Headers: `x-session-id` enables rolling conversation summaries across requests.
 

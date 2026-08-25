@@ -420,8 +420,8 @@
    * Record the composer's toggles on the active session immediately. `saveCurrentSession` cannot do
    * it: it early-returns on a thread with no messages, so a switch flipped before the first question
    * would be lost the moment the user navigates away — the visible switch and the session it belongs
-   * to would then disagree on the next visit. `updatedAt` is deliberately left alone: flipping a
-   * toggle is not activity, and bumping it would reorder the session list under the user.
+   * to would then disagree on the next visit. Written with `touch: false`: flipping a toggle is not
+   * conversation activity, and `saveSession` otherwise restamps `updatedAt`, which orders the drawer.
    */
   async function persistTogglesToSession() {
     if (resetting || !activeSessionId) return;
@@ -431,7 +431,7 @@
     // streams, so there is no window where `history` has moved on but the list entry has not.
     const updated: Session = { ...sessions[idx], maxMode, selfCheck };
     sessions[idx] = updated;
-    await sessionStore.saveSession(updated);
+    await sessionStore.saveSession(updated, { touch: false });
   }
 
   function handleMaxModeToggle() {
