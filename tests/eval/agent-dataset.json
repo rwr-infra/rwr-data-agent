@@ -9,7 +9,8 @@
     "expectedKeys": [
       "gkw_g36.weapon"
     ],
-    "notes": "Must walk the graph rather than guess from the retrieved prose, and cite a file per layer",
+    "notes": "Must walk the graph rather than guess from the retrieved prose, and cite a file per layer. Also the repo's only end-to-end cover for reflection: an inheritance intent is a deterministic trigger, so `selfCheck` makes the check fire every run",
+    "selfCheck": true,
     "maxSteps": 8
   },
   {

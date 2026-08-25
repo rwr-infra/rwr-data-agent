@@ -316,6 +316,11 @@ export async function chatRoutes(app: FastifyInstance) {
     // retrieved context, where N drafts buy nothing. `body.candidates` overrides the configured N
     // (clamped; the feature exists to bound cost, not to multiply it unboundedly).
     const maxMode = body.mode === 'max' && config.bestOfNEnabled && !useStructured;
+    // The post-answer self-check, opted into per message like max mode — but with no operator master
+    // switch behind it, so an omitted field means off rather than "whatever the deployment set".
+    // No `!useStructured` guard, unlike `maxMode` above: that flag picks which branch runs, while
+    // both `reflectAndEmit` call sites already sit inside the non-structured branch.
+    const selfCheck = body.self_check === true;
     // Coerce the candidate count to a finite integer before clamping: a non-numeric
     // `body.candidates` (or a garbage BEST_OF_N, now guarded in config) must not become NaN —
     // `Array.from({ length: NaN })` runs zero candidates and silently answers nothing.
@@ -459,7 +464,7 @@ export async function chatRoutes(app: FastifyInstance) {
       toolTranscript: ReturnType<typeof buildReflectionTranscript>;
     }): Promise<ReflectionRunResult | undefined> => {
       const triggers = shouldReflect({
-        enabled: config.reflectionEnabled,
+        enabled: selfCheck,
         toolFailureCount: input.toolFailureCount,
         stopReason: input.stopReason,
         intent: queryCategory,

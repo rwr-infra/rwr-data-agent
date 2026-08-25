@@ -120,3 +120,66 @@ details.fold[open] > summary .fold-arrow {
 .drawer-panel {
   transition: transform 0.3s ease;
 }
+
+/* Code-block syntax colors (highlight.js). Only the scopes the XML and AngelScript
+   grammars emit are styled — those two are all that `lib/highlight.ts` registers.
+   The palette lives here instead of loading one of highlight.js' own theme stylesheets,
+   so the colors sit inside the steel-blue themes above and there is nothing to swap when
+   the theme toggles. `main.ts` sets `data-theme` before mount, so the dark block below is
+   the only override needed. */
+:root {
+  --syntax-comment: oklch(0.58 0.020 255);
+  --syntax-punct: oklch(0.52 0.025 255);
+  --syntax-name: oklch(0.45 0.150 265);
+  --syntax-attr: oklch(0.46 0.100 210);
+  --syntax-string: oklch(0.45 0.120 155);
+  --syntax-keyword: oklch(0.48 0.160 320);
+  --syntax-number: oklch(0.50 0.130 50);
+  --syntax-meta: oklch(0.55 0.050 255);
+}
+
+[data-theme="dark"] {
+  --syntax-comment: oklch(0.62 0.020 255);
+  --syntax-punct: oklch(0.66 0.025 255);
+  --syntax-name: oklch(0.78 0.110 265);
+  --syntax-attr: oklch(0.80 0.090 205);
+  --syntax-string: oklch(0.80 0.110 150);
+  --syntax-keyword: oklch(0.78 0.120 320);
+  --syntax-number: oklch(0.82 0.100 60);
+  --syntax-meta: oklch(0.70 0.040 255);
+}
+
+/* `.hljs-tag` wraps a whole XML element, name and attributes included, so it comes first:
+   the nested scopes below are equal-specificity and win by source order. */
+.hljs-tag {
+  color: var(--syntax-punct);
+}
+.hljs-comment {
+  color: var(--syntax-comment);
+  font-style: italic;
+}
+/* `symbol` is the class name in AngelScript and an entity reference in XML — both read as
+   names, so they share the name color rather than the numeric one. */
+.hljs-name,
+.hljs-built_in,
+.hljs-class,
+.hljs-title,
+.hljs-symbol {
+  color: var(--syntax-name);
+}
+.hljs-attr {
+  color: var(--syntax-attr);
+}
+.hljs-string {
+  color: var(--syntax-string);
+}
+.hljs-keyword,
+.hljs-literal {
+  color: var(--syntax-keyword);
+}
+.hljs-number {
+  color: var(--syntax-number);
+}
+.hljs-meta {
+  color: var(--syntax-meta);
+}

@@ -16,7 +16,7 @@
   import SessionDrawer from './components/SessionDrawer.svelte';
 
   const LOCAL_CACHE_KEY = 'rwr-data-agent-cache';
-  type LocalCache = { selectedMod?: string; maxMode?: boolean };
+  type LocalCache = { selectedMod?: string; maxMode?: boolean; selfCheck?: boolean };
   function readCache(): LocalCache {
     try { return JSON.parse(localStorage.getItem(LOCAL_CACHE_KEY) || '{}'); } catch { return {}; }
   }
@@ -42,6 +42,10 @@
   let maxMode = $state(readCache().maxMode === true);
   let maxModeTotal = $state(0);
   let judgePhase = $state(false);
+  // Post-answer self-check, opted into per message like `maxMode` and persisted the same way. `=== true`
+  // rather than a truthiness check is what makes "never touched" mean off: the server has no master
+  // switch any more, so this toggle is the only thing that can ask for the extra round trip.
+  let selfCheck = $state(readCache().selfCheck === true);
   // The turn is in its post-answer self-check. Set by `reflection-start` and cleared by whatever ends
   // the phase — the verdict, `finish`, or a break — because a reflection that could not run emits no
   // verdict at all, and a status line stuck on "checking" is worse than none.
@@ -201,7 +205,8 @@
       updatedAt: Date.now(),
       messages: plainMessages,
       selectedMod: selectedMod || undefined,
-      maxMode: maxMode || undefined,
+      maxMode,
+      selfCheck,
     };
     await sessionStore.saveSession(session);
     const idx = sessions.findIndex((s) => s.id === session.id);
@@ -230,7 +235,8 @@
       updatedAt: Date.now(),
       messages: [],
       selectedMod: selectedMod || undefined,
-      maxMode: maxMode || undefined,
+      maxMode,
+      selfCheck,
     };
     await sessionStore.saveSession(emptySession);
     sessions = [emptySession, ...sessions];
@@ -254,6 +260,10 @@
     if (session.maxMode !== undefined) {
       maxMode = session.maxMode;
       writeCache({ maxMode: session.maxMode });
+    }
+    if (session.selfCheck !== undefined) {
+      selfCheck = session.selfCheck;
+      writeCache({ selfCheck: session.selfCheck });
     }
     drawerOpen = false;
   }
@@ -296,11 +306,20 @@
       displayItems = buildDisplayItems(history);
       applySessionStats(latest);
       showWelcome = history.length === 0;
+      // Mirror `selectSession`: adopting a session's settings must also refresh the cache, or the
+      // cache stops being the default a *fresh* session starts from and goes stale against the state
+      // actually in use.
       if (latest.selectedMod !== undefined) {
         selectedMod = latest.selectedMod;
+        writeCache({ selectedMod: latest.selectedMod });
       }
       if (latest.maxMode !== undefined) {
         maxMode = latest.maxMode;
+        writeCache({ maxMode: latest.maxMode });
+      }
+      if (latest.selfCheck !== undefined) {
+        selfCheck = latest.selfCheck;
+        writeCache({ selfCheck: latest.selfCheck });
       }
     } else {
       await newSession();
@@ -390,15 +409,41 @@
       updatedAt: Date.now(),
       messages: [],
       selectedMod: mod || undefined,
-      maxMode: maxMode || undefined,
+      maxMode,
+      selfCheck,
     };
     await sessionStore.saveSession(emptySession);
     sessions = [emptySession, ...sessions];
   }
 
+  /**
+   * Record the composer's toggles on the active session immediately. `saveCurrentSession` cannot do
+   * it: it early-returns on a thread with no messages, so a switch flipped before the first question
+   * would be lost the moment the user navigates away — the visible switch and the session it belongs
+   * to would then disagree on the next visit. Written with `touch: false`: flipping a toggle is not
+   * conversation activity, and `saveSession` otherwise restamps `updatedAt`, which orders the drawer.
+   */
+  async function persistTogglesToSession() {
+    if (resetting || !activeSessionId) return;
+    const idx = sessions.findIndex((s) => s.id === activeSessionId);
+    if (idx < 0) return;
+    // Safe to write the list's own snapshot back whole: both toggles are disabled while a turn
+    // streams, so there is no window where `history` has moved on but the list entry has not.
+    const updated: Session = { ...sessions[idx], maxMode, selfCheck };
+    sessions[idx] = updated;
+    await sessionStore.saveSession(updated, { touch: false });
+  }
+
   function handleMaxModeToggle() {
     maxMode = !maxMode;
     writeCache({ maxMode });
+    void persistTogglesToSession();
+  }
+
+  function handleSelfCheckToggle() {
+    selfCheck = !selfCheck;
+    writeCache({ selfCheck });
+    void persistTogglesToSession();
   }
 
   async function handleResetAll() {
@@ -582,6 +627,7 @@
           messages: history.slice(0, qIdx + 1).map(({ role, content }) => ({ role, content })),
           ...(selectedMod ? { mod: selectedMod } : {}),
           ...(maxMode ? { mode: 'max' } : {}),
+          ...(selfCheck ? { self_check: true } : {}),
         }),
       });
 
@@ -1101,6 +1147,8 @@
     breakdown={lastBreakdown}
     {maxMode}
     onmaxtoggle={handleMaxModeToggle}
+    {selfCheck}
+    onselfchecktoggle={handleSelfCheckToggle}
     onsend={sendMessage}
     oninputchange={handleInputChange}
     {prefillText}

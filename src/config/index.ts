@@ -267,16 +267,10 @@ export const config = {
   judgeModelExplicit: !!process.env.JUDGE_MODEL,
 
   // ── Reflection (post-answer self-critique) ────────────────────────────────
-  /**
-   * Master switch for reflection: after the answer has streamed, one tool-less call re-checks it
-   * against the retrieved context and the tool transcript, and rewrites it when a check fails.
-   *
-   * Off by default, unlike best-of-N. Max mode is opted into per message by the user, while
-   * reflection fires on its own whenever a turn looks risky — and inheritance/enumeration questions
-   * are the bulk of real traffic, so defaulting it on would add an LLM round trip to most turns
-   * before there is any measured pass rate to justify the spend.
-   */
-  reflectionEnabled: process.env.REFLECTION_ENABLED === 'true',
+  // Whether it runs at all is the client's call, per message (`body.self_check`) — there is no
+  // master switch here on purpose. The check adds an LLM round trip to the turn the user is already
+  // waiting on, and inheritance/enumeration questions are the bulk of real traffic, so the cost
+  // belongs with whoever asked for it rather than with a deployment-wide default.
   /** Model for the reflection call — defaults to the main model, can be a stronger checker. */
   reflectionModel: process.env.REFLECTION_MODEL ?? process.env.LLM_MODEL ?? 'deepseek-v4-flash',
   /** True when REFLECTION_MODEL was explicitly set — then it stays pinned even when the client
@@ -304,5 +298,15 @@ export const config = {
 export function validateConfig() {
   if (!config.llmApiKey) {
     throw new Error('LLM_API_KEY is required (set it in .env)');
+  }
+  // REFLECTION_ENABLED was the master switch; reflection is now requested per message by the client
+  // (`body.self_check`). Left unread it would just stop working, so a deployment carrying the old
+  // variable is told rather than quietly losing the feature.
+  if (process.env.REFLECTION_ENABLED !== undefined) {
+    console.warn(
+      '[config] REFLECTION_ENABLED is no longer read. Reflection is opted into per message via ' +
+        '`self_check` on POST /v1/chat/completions (the Web UI has a toggle for it). Remove the ' +
+        'variable from .env; REFLECTION_MODEL still applies.',
+    );
   }
 }

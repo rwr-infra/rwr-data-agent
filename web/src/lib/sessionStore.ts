@@ -62,8 +62,13 @@ export async function getSession(id: string): Promise<Session | undefined> {
   }
 }
 
-export async function saveSession(session: Session): Promise<void> {
-  session.updatedAt = Date.now();
+/**
+ * Persist a session. `touch: false` writes it without restamping `updatedAt` — for changes that are
+ * not conversation activity, like flipping a composer toggle. The list is ordered by `updatedAt`, so
+ * restamping there would silently reorder the drawer under the user.
+ */
+export async function saveSession(session: Session, opts?: { touch?: boolean }): Promise<void> {
+  if (opts?.touch !== false) session.updatedAt = Date.now();
   if (memoryFallback) {
     memStore.set(session.id, session);
     return;

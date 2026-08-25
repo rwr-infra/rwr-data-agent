@@ -14,6 +14,8 @@
     breakdown?: TokenBreakdown;
     maxMode?: boolean;
     onmaxtoggle?: () => void;
+    selfCheck?: boolean;
+    onselfchecktoggle?: () => void;
     onsend: (text: string) => void;
     oninputchange: (text: string) => void;
     prefillText?: string;
@@ -37,6 +39,8 @@
     breakdown,
     maxMode = false,
     onmaxtoggle,
+    selfCheck = false,
+    onselfchecktoggle,
     onsend,
     oninputchange,
     prefillText = '',
@@ -154,8 +158,8 @@
     {/if}
   </div>
 
-  <!-- One full-width row: the usage stats on the left, Max-mode toggle on the right. On mobile
-       it stacks — stats first, then the toggle. `min-w-0` everywhere is what lets the row
+  <!-- One full-width row: the usage stats on the left, the per-message mode toggles on the right.
+       On mobile it stacks — stats first, then the toggles. `min-w-0` everywhere is what lets the row
        compress instead of spilling a horizontal scrollbar. -->
   <div class="flex flex-col sm:flex-row sm:items-center gap-2 w-full max-w-full min-w-0">
     <!-- Stats cluster: context occupancy and the round counter are both "how much of the budget is
@@ -189,7 +193,28 @@
         </span>
       {/if}
     </div>
-    <div class="flex items-center gap-2 min-w-0">
+    <!-- The two per-message toggles, cheapest first: self-check adds one round trip, Max multiplies
+         the whole turn by N. `flex-wrap` is what keeps them from spilling a scrollbar on a narrow
+         phone once the row has already stacked below the stats. -->
+    <div class="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 min-w-0">
+      <!-- Self-check: the post-answer critique. Same anatomy as the Max toggle below — daisyUI
+           switch + label inside one hover tooltip — in `secondary` so the two read as two switches
+           at a glance rather than one wide control. -->
+      <label
+        class="lg:tooltip tooltip-edge shrink-0 flex items-center gap-1.5 cursor-pointer"
+        data-tip={tr.selfCheckHint}
+      >
+        <input
+          type="checkbox"
+          class="toggle toggle-secondary toggle-sm"
+          title={tr.selfCheckHint}
+          aria-label={tr.selfCheck}
+          checked={selfCheck}
+          disabled={loading}
+          onchange={() => onselfchecktoggle?.()}
+        />
+        <span class="text-xs text-base-content/70 select-none">{tr.selfCheck}</span>
+      </label>
       <!-- Max mode: a daisyUI toggle switch with its label, wrapped in a hover tooltip explaining
            what it does. The tooltip only shows on lg+ screens (hover has no meaning on touch);
            `title` is the native fallback there. Clicking the label toggles the checkbox. -->
@@ -216,10 +241,10 @@
 </div>
 
 <style>
-  /* The Max-mode toggle sits at the right edge of the input row. daisyUI centers the tooltip
-     bubble on its anchor, so a wide hint spills past the viewport; anchor the bubble to the
-     label's right edge instead — it grows leftward, stays above the toggle, and the arrow keeps
-     pointing at the toggle. */
+  /* The mode toggles sit at the right edge of the input row. daisyUI centers the tooltip bubble
+     on its anchor, so a wide hint spills past the viewport; anchor the bubble to the label's right
+     edge instead — it grows leftward, stays above the toggle, and the arrow keeps pointing at it.
+     Matched by class, so every toggle carrying `tooltip-edge` gets it. */
   .lg\:tooltip.tooltip-edge[data-tip]:before {
     inset: auto 0 var(--tt-off) auto;
     transform: translateY(var(--tt-pos, 0.25rem));

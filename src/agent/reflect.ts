@@ -189,7 +189,7 @@ export function parseReflectionOutput(text: string): ReflectionOutput | null {
 }
 
 export interface ReflectionTriggerInput {
-  /** `REFLECTION_ENABLED`. */
+  /** The client's per-turn opt-in (`body.self_check`). */
   enabled: boolean;
   toolFailureCount: number;
   /** The turn's own stop reason, already computed by the route. */
