@@ -48,7 +48,8 @@ Every step re-sends the whole prompt, which is why both the shaper and the accou
 
 Once the loop has produced its answer, a risky turn can get one more tool-less call: **reflection**
 re-checks the answer against the retrieved context and the tool transcript and rewrites it when a
-check fails (`REFLECTION_ENABLED`, off by default — see the Reflection section in `AGENTS.md`). It
+check fails (opted into per message by the client via `body.self_check` — see the Reflection
+section in `AGENTS.md`). It
 runs *after* the answer streamed, so it appends `reflection` / `revision` lines rather than delaying
 the first token, and it never recurses.
 
@@ -135,7 +136,7 @@ sequenceDiagram
     M-->>F: text deltas
     F-->>C: {"type":"text-delta"}
 
-    opt reflection (REFLECTION_ENABLED, risky turn only)
+    opt reflection (body.self_check + risky turn)
         F-->>C: {"type":"reflection-start","trigger":["tool-failure"]}
         F->>M: streamText(review the answer vs the evidence)
         M-->>F: JSON text, accumulated then parsed leniently

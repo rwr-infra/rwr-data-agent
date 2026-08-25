@@ -42,6 +42,14 @@ export interface AgentEvalCase {
   notes: string;
   /** 'max' drives the request through the best-of-N path (N candidates + judge). */
   mode?: 'max';
+  /**
+   * Opt this case into the post-answer self-check (`body.self_check`). Reflection has no server-side
+   * switch any more, so without this flag no eval case exercises it at all and a regression in
+   * `runReflection` / `parseReflectionOutput` / the accounting ships unnoticed. Only worth setting on
+   * a case whose intent is a reflection trigger (inheritance / enumeration), where the check is
+   * deterministic — elsewhere it would assert on a turn that legitimately never reflects.
+   */
+  selfCheck?: boolean;
   /** Tools that must appear among the calls. Empty means "no requirement". */
   expectedTools?: string[];
   /** Entity keys the answer text must mention. */
@@ -91,6 +99,9 @@ type StreamEvent =
   | { type: 'error'; error?: string }
   | { type: 'turn-start'; turnId?: string }
   | { type: 'steer-applied'; message?: string; step?: number }
+  | { type: 'reflection-start'; trigger?: string[] }
+  | { type: 'reflection'; verdict?: 'pass' | 'revised'; issues?: { code: string }[] }
+  | { type: 'revision'; text?: string }
   | { type: string };
 
 interface TurnObservation {
@@ -110,6 +121,12 @@ interface TurnObservation {
   perCandidateCount?: number;
   /** `steer-applied` frames seen — one per accepted instruction, not per step. */
   steerApplied: number;
+  /** The self-check announced itself. Deterministic once a case opts in on a triggering intent. */
+  reflectionStarted: boolean;
+  /** The verdict, when the check got far enough to produce one — it fails open and may emit none. */
+  reflectionVerdict?: 'pass' | 'revised';
+  /** A `revision` frame replaced the answer. */
+  revised: boolean;
   /** HTTP status the side-channel call returned, when the case made one. */
   sideChannelStatus?: number;
 }
@@ -131,6 +148,8 @@ function emptyObservation(latencyMs: number): TurnObservation {
     latencyMs,
     streamError: null,
     steerApplied: 0,
+    reflectionStarted: false,
+    revised: false,
   };
 }
 
@@ -154,6 +173,18 @@ function absorb(line: string, obs: TurnObservation): StreamEvent | null {
       break;
     case 'steer-applied':
       obs.steerApplied++;
+      break;
+    case 'reflection-start':
+      obs.reflectionStarted = true;
+      break;
+    case 'reflection':
+      if ('verdict' in event) obs.reflectionVerdict = event.verdict;
+      break;
+    case 'revision':
+      // The revision *is* the answer from here on — the client replays it into history, so the eval's
+      // key/pattern assertions have to run against it rather than the superseded draft.
+      if ('text' in event) obs.answer = event.text ?? obs.answer;
+      obs.revised = true;
       break;
     case 'tool-step':
     case 'candidate-step': {
@@ -186,28 +217,27 @@ function absorb(line: string, obs: TurnObservation): StreamEvent | null {
   return event;
 }
 
-function requestBody(query: string, mode?: 'max') {
+function requestBody(evalCase: Pick<AgentEvalCase, 'query' | 'mode' | 'selfCheck'>) {
   return {
     model: 'rwr-agent',
     stream: true,
-    messages: [{ role: 'user', content: query }],
-    ...(mode ? { mode } : {}),
+    messages: [{ role: 'user', content: evalCase.query }],
+    ...(evalCase.mode ? { mode: evalCase.mode } : {}),
+    ...(evalCase.selfCheck ? { self_check: true } : {}),
   };
 }
 
 /** Drive one turn through the real route and collect everything the NDJSON stream reveals. */
 async function runTurn(
   app: Awaited<ReturnType<typeof buildApp>>,
-  query: string,
-  id: string,
-  mode?: 'max',
+  evalCase: AgentEvalCase,
 ): Promise<TurnObservation> {
   const startedAt = Date.now();
   const response = await app.inject({
     method: 'POST',
     url: '/v1/chat/completions',
-    headers: { 'content-type': 'application/json', 'x-session-id': `eval-${id}` },
-    payload: requestBody(query, mode),
+    headers: { 'content-type': 'application/json', 'x-session-id': `eval-${evalCase.id}` },
+    payload: requestBody(evalCase),
   });
 
   const observation = emptyObservation(Date.now() - startedAt);
@@ -232,7 +262,7 @@ async function runTurnWithSideChannel(
   const res = await fetch(`${base}/v1/chat/completions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-session-id': `eval-${evalCase.id}` },
-    body: JSON.stringify(requestBody(evalCase.query, evalCase.mode)),
+    body: JSON.stringify(requestBody(evalCase)),
   });
 
   const observation = emptyObservation(Date.now() - startedAt);
@@ -329,6 +359,12 @@ function assess(evalCase: AgentEvalCase, obs: TurnObservation): string[] {
       failures.push('finish.usage.breakdown.perCandidate is missing or empty');
     }
   }
+  // A case that opted into the self-check must at least see it announced. Only `reflection-start` is
+  // asserted: `runReflection` fails open, so a timed-out or unparseable check emits no verdict at all
+  // and failing on that would make the eval red for a degradation it is designed to absorb.
+  if (evalCase.selfCheck && !obs.reflectionStarted && obs.stopReason !== 'stopped') {
+    failures.push('self_check was requested but no reflection-start frame arrived');
+  }
   // Repetition is always a defect: the guard already refused the call, so a rejection means the model
   // burned a step. One is a stumble worth reporting, and the escalation should stop it there.
   if (obs.duplicateRejections > 1) {
@@ -382,7 +418,7 @@ async function main(): Promise<void> {
       const usesSideChannel = evalCase.steer || evalCase.stopAfterToolSteps !== undefined;
       const obs = usesSideChannel
         ? await runTurnWithSideChannel(base, evalCase)
-        : await runTurn(app, evalCase.query, evalCase.id, evalCase.mode);
+        : await runTurn(app, evalCase);
       const failures = assess(evalCase, obs);
       const ok = failures.length === 0;
       if (ok) passed++;
@@ -397,6 +433,14 @@ async function main(): Promise<void> {
           ),
       );
       console.log(c(`        tools: ${tools}`, 'dim'));
+      // Only printed for a case that asked for the check — everywhere else its absence is correct
+      // and a line saying so would be noise.
+      if (evalCase.selfCheck) {
+        const verdict = obs.reflectionStarted
+          ? `${obs.reflectionVerdict ?? 'no verdict (failed open)'}${obs.revised ? ' · answer replaced' : ''}`
+          : 'not run';
+        console.log(c(`        self-check: ${verdict}`, 'dim'));
+      }
       for (const f of failures) console.log(`        ${c('✕', 'red')} ${f}`);
       rows.push(
         [

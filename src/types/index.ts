@@ -92,4 +92,10 @@ export interface ChatCompletionRequest {
   mode?: 'normal' | 'max';
   /** Override the candidate count for a max-mode request (default: BEST_OF_N). */
   candidates?: number;
+  /**
+   * Opt into the post-answer self-check for this turn. There is no operator master switch: the check
+   * is one extra tool-less LLM round trip, so a client that says nothing must not be billed for it.
+   * The opt-in only makes the turn eligible — `shouldReflect()` still decides on its risk signals.
+   */
+  self_check?: boolean;
 }

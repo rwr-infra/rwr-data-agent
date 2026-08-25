@@ -157,4 +157,6 @@ export interface Session {
   selectedMod?: string;
   /** Best-of-N toggle state, persisted like `selectedMod`. */
   maxMode?: boolean;
+  /** Post-answer self-check toggle state, persisted like `maxMode`. */
+  selfCheck?: boolean;
 }

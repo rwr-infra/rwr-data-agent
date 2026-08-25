@@ -89,6 +89,9 @@ export interface Translations {
   resetConfirmBtn: string;
   maxMode: string;
   maxModeHint: string;
+  /** Label of the per-message post-answer self-check toggle. */
+  selfCheck: string;
+  selfCheckHint: string;
   runningCandidates: (n: number) => string;
   synthesizing: string;
   candidateN: (n: number) => string;
@@ -185,6 +188,9 @@ const i18n: Record<Lang, Translations> = {
     resetConfirmBtn: '确认重置',
     maxMode: 'Max 模式',
     maxModeHint: '并行运行 N 路候选答案，再综合归纳出一份最终答案（更全面，更耗时）',
+    selfCheck: '自检',
+    selfCheckHint:
+      '答案写完后，在有风险的轮次（工具调用失败、步数耗尽、继承/枚举类问题）再自查一遍引用、键名、包范围与数量，必要时改写。其余轮次不会触发（多一次往返）',
     runningCandidates: (n) => `正在并行运行 ${n} 路候选答案…`,
     synthesizing: '正在归纳候选答案…',
     candidateN: (n) => `候选 ${n}`,
@@ -282,6 +288,9 @@ const i18n: Record<Lang, Translations> = {
     resetConfirmBtn: 'Confirm reset',
     maxMode: 'Max mode',
     maxModeHint: 'Run N candidate answers in parallel, then synthesize one final answer (more thorough, slower)',
+    selfCheck: 'Self-check',
+    selfCheckHint:
+      'On risky turns only — a failed tool call, an exhausted step budget, an inheritance or enumeration question — re-check the written answer against its citations, keys, package scope and counts, rewriting it when a check fails (one extra round trip)',
     runningCandidates: (n) => `Running ${n} candidates in parallel…`,
     synthesizing: 'Synthesizing candidate answers…',
     candidateN: (n) => `Candidate ${n}`,
