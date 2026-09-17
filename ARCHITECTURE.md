@@ -130,7 +130,7 @@ sequenceDiagram
     Note over F,M: loop repeats until a text answer or the step limit
 
     C->>F: POST /v1/chat/steer {turnId, "只保留 class=3"}
-    Note over F: sticky on the turn — re-sent on every later step.<br/>Route is public; the bundled UI only calls /stop.
+    Note over F: sticky on the turn — re-sent on every later step.<br/>Route is public. The bundled UI only calls /stop.
     F-->>C: {"type":"steer-applied","step":3,"message":"只保留 class=3"}
 
     M-->>F: text deltas
